@@ -205,14 +205,24 @@ def fetch_yf_ohlcv(symbol: str, period: str, interval: str):
     import pandas as pd
     import yfinance as yf
 
-    df = yf.download(
-        symbol,
-        period=period,
-        interval=interval,
-        progress=False,
-        auto_adjust=False,
-        threads=False,
-    )
+    try:
+        df = yf.download(
+            symbol,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+    except Exception:
+        df = pd.DataFrame()
+
+    if df is None or df.empty:
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=period, interval=interval, auto_adjust=False)
+        except Exception:
+            df = pd.DataFrame()
 
     if df is None or df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])

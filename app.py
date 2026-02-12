@@ -55,6 +55,332 @@ def _format_int(v: Optional[int]) -> str:
     return f"{v:,}"
 
 
+def _palette_with(base: dict[str, object], **overrides: object) -> dict[str, object]:
+    out = dict(base)
+    out.update(overrides)
+    return out
+
+
+_BASE_DARK_PALETTE: dict[str, object] = {
+    "is_dark": True,
+    "background": "#232B3A",
+    "sidebar_bg": "#273245",
+    "text_color": "#F1F5FF",
+    "text_muted": "#CCD6EA",
+    "card_bg": "rgba(49, 62, 86, 0.74)",
+    "card_border": "rgba(162, 178, 204, 0.44)",
+    "control_bg": "rgba(58, 74, 102, 0.94)",
+    "control_border": "rgba(170, 185, 209, 0.45)",
+    "tab_bg": "rgba(63, 80, 109, 0.82)",
+    "tab_text": "#EFF4FF",
+    "accent": "#9BB9FF",
+    "plot_template": "plotly_dark",
+    "paper_bg": "#2A354A",
+    "plot_bg": "#2A354A",
+    "grid": "rgba(199,212,235,0.20)",
+    "price_up": "#87D2B2",
+    "price_down": "#F0A2A8",
+    "sma20": "#A7D4FF",
+    "sma60": "#F6CE91",
+    "vwap": "#A8DFC0",
+    "bb_upper": "rgba(240,162,168,0.36)",
+    "bb_lower": "rgba(167,212,255,0.34)",
+    "volume_up": "rgba(135,210,178,0.48)",
+    "volume_down": "rgba(240,162,168,0.46)",
+    "equity": "#7ccaa8",
+    "benchmark": "#b3a2ef",
+    "buy_hold": "#f1c27d",
+    "asset_palette": ["#98c1d9", "#b8c0ff", "#9bc53d", "#f4a261", "#80ed99", "#f6bd60"],
+    "signal_buy": "#90c4f4",
+    "signal_sell": "#f4b184",
+    "fill_buy": "#7ccaa8",
+    "fill_sell": "#e5989b",
+    "marker_edge": "#e5ecf6",
+    "trade_path": "rgba(203,213,225,0.50)",
+    "fill_link": "rgba(176,190,210,0.34)",
+}
+
+_BASE_LIGHT_PALETTE: dict[str, object] = {
+    "is_dark": False,
+    "background": "#ffffff",
+    "sidebar_bg": "#f8fafc",
+    "text_color": "#0f172a",
+    "text_muted": "#475569",
+    "card_bg": "rgba(12, 18, 28, 0.035)",
+    "card_border": "rgba(49, 61, 82, 0.16)",
+    "control_bg": "#ffffff",
+    "control_border": "rgba(49, 61, 82, 0.22)",
+    "tab_bg": "rgba(148, 163, 184, 0.12)",
+    "tab_text": "#0f172a",
+    "accent": "#2563eb",
+    "plot_template": "plotly_white",
+    "paper_bg": "#ffffff",
+    "plot_bg": "#ffffff",
+    "grid": "rgba(15,23,42,0.10)",
+    "price_up": "#16a34a",
+    "price_down": "#dc2626",
+    "sma20": "#0284c7",
+    "sma60": "#d97706",
+    "vwap": "#059669",
+    "bb_upper": "rgba(220,38,38,0.28)",
+    "bb_lower": "rgba(37,99,235,0.24)",
+    "volume_up": "rgba(22,163,74,0.35)",
+    "volume_down": "rgba(220,38,38,0.28)",
+    "equity": "#16a34a",
+    "benchmark": "#7c3aed",
+    "buy_hold": "#d97706",
+    "asset_palette": ["#0284c7", "#be123c", "#0f766e", "#7c2d12", "#4f46e5", "#0369a1"],
+    "signal_buy": "#0284c7",
+    "signal_sell": "#ea580c",
+    "fill_buy": "#16a34a",
+    "fill_sell": "#dc2626",
+    "marker_edge": "#0f172a",
+    "trade_path": "rgba(71,85,105,0.45)",
+    "fill_link": "rgba(100,116,139,0.30)",
+}
+
+_THEME_PALETTES: dict[str, dict[str, object]] = {
+    "夜間專業（Slate Pro）": _palette_with(_BASE_DARK_PALETTE),
+    "北歐夜色（Nord Calm）": _palette_with(
+        _BASE_DARK_PALETTE,
+        background="#2E3440",
+        sidebar_bg="#323B4B",
+        paper_bg="#3B4252",
+        plot_bg="#3B4252",
+        accent="#81A1C1",
+        text_color="#ECEFF4",
+        text_muted="#D8DEE9",
+        card_bg="rgba(67, 76, 94, 0.78)",
+        control_bg="rgba(74, 84, 105, 0.95)",
+        sma20="#88C0D0",
+        sma60="#EBCB8B",
+        benchmark="#B48EAD",
+        asset_palette=["#8FBCBB", "#D08770", "#A3BE8C", "#5E81AC", "#EBCB8B", "#BF616A"],
+    ),
+    "深海藍（Ocean Night）": _palette_with(
+        _BASE_DARK_PALETTE,
+        background="#1E293B",
+        sidebar_bg="#243349",
+        paper_bg="#223047",
+        plot_bg="#223047",
+        accent="#7DD3FC",
+        text_color="#F8FBFF",
+        text_muted="#D6E3F2",
+        price_up="#86EFAC",
+        price_down="#FDA4AF",
+        sma20="#7DD3FC",
+        sma60="#FDE68A",
+        buy_hold="#FDE68A",
+        asset_palette=["#67E8F9", "#A7F3D0", "#C4B5FD", "#FDBA74", "#93C5FD", "#F9A8D4"],
+    ),
+    "日光白（Paper Light）": _palette_with(_BASE_LIGHT_PALETTE),
+    "暖陽米白（Warm Paper）": _palette_with(
+        _BASE_LIGHT_PALETTE,
+        background="#F8F4EA",
+        sidebar_bg="#F3ECDD",
+        paper_bg="#FFF9EE",
+        plot_bg="#FFF9EE",
+        card_bg="rgba(120, 90, 35, 0.08)",
+        card_border="rgba(132, 105, 60, 0.24)",
+        control_bg="#FFF6E5",
+        control_border="rgba(120, 90, 35, 0.28)",
+        tab_bg="rgba(193, 154, 90, 0.20)",
+        tab_text="#3F2F1D",
+        text_color="#2E2518",
+        text_muted="#685742",
+        accent="#AF7E39",
+        grid="rgba(120,90,35,0.16)",
+        signal_buy="#1D8F5A",
+        signal_sell="#C66A2B",
+        fill_buy="#2F9D6B",
+        fill_sell="#C44D4D",
+    ),
+    "薄荷清晨（Mint Day）": _palette_with(
+        _BASE_LIGHT_PALETTE,
+        background="#F2F9F6",
+        sidebar_bg="#E7F5EF",
+        paper_bg="#F8FCFA",
+        plot_bg="#F8FCFA",
+        card_bg="rgba(16, 94, 79, 0.07)",
+        card_border="rgba(16, 94, 79, 0.20)",
+        control_bg="#F6FCF9",
+        control_border="rgba(16, 94, 79, 0.25)",
+        tab_bg="rgba(16, 94, 79, 0.16)",
+        tab_text="#0F4A3E",
+        text_color="#0F2F2A",
+        text_muted="#3E6960",
+        accent="#0E8B74",
+        price_up="#129A64",
+        price_down="#D1495B",
+        sma20="#1976D2",
+        sma60="#C27803",
+        vwap="#0E8B74",
+        benchmark="#5E35B1",
+        asset_palette=["#028090", "#00A896", "#5C7AEA", "#D1495B", "#2E7D32", "#9C6644"],
+    ),
+}
+
+
+def _theme_options() -> list[str]:
+    return list(_THEME_PALETTES.keys())
+
+
+def _current_theme_name() -> str:
+    legacy_dark = bool(st.session_state.get("ui_dark_mode", False))
+    default_theme = "夜間專業（Slate Pro）" if legacy_dark else "日光白（Paper Light）"
+    theme = str(st.session_state.get("ui_theme", default_theme))
+    if theme not in _THEME_PALETTES:
+        theme = default_theme
+    st.session_state["ui_theme"] = theme
+    return theme
+
+
+def _is_dark_mode() -> bool:
+    theme = _current_theme_name()
+    return bool(_THEME_PALETTES[theme].get("is_dark", False))
+
+
+def _ui_palette() -> dict[str, object]:
+    theme = _current_theme_name()
+    return _THEME_PALETTES[theme]
+
+
+def _inject_ui_styles():
+    palette = _ui_palette()
+    background = str(palette["background"])
+    sidebar_bg = str(palette["sidebar_bg"])
+    text_color = str(palette["text_color"])
+    text_muted = str(palette["text_muted"])
+    card_bg = str(palette["card_bg"])
+    card_border = str(palette["card_border"])
+    control_bg = str(palette["control_bg"])
+    control_border = str(palette["control_border"])
+    tab_bg = str(palette["tab_bg"])
+    tab_text = str(palette["tab_text"])
+    accent = str(palette["accent"])
+
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stAppViewContainer"] {{
+            background: {background};
+            color: {text_color};
+        }}
+        [data-testid="stSidebar"] {{
+            background: {sidebar_bg};
+        }}
+        .main .block-container {{
+            padding-top: 1.2rem;
+            padding-bottom: 2.2rem;
+            max-width: 1360px;
+        }}
+        .stMarkdown, .stMetricLabel, .stMetricValue {{
+            color: {text_color} !important;
+        }}
+        .stCaption {{
+            color: {text_muted} !important;
+        }}
+        [data-testid="stSidebar"] * {{
+            color: {text_color} !important;
+        }}
+        a {{
+            color: {accent} !important;
+        }}
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] label,
+        [data-testid="stWidgetLabel"] span,
+        [data-testid="stDateInput"] label,
+        [data-testid="stTextInput"] label,
+        [data-testid="stNumberInput"] label,
+        [data-testid="stSelectbox"] label,
+        [data-testid="stMultiSelect"] label,
+        [data-testid="stCheckbox"] label,
+        [data-testid="stRadio"] label,
+        [data-testid="stSlider"] label,
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stMarkdownContainer"] h3,
+        [data-testid="stMarkdownContainer"] h4 {{
+            color: {text_color} !important;
+        }}
+        [data-baseweb="input"] > div,
+        [data-baseweb="select"] > div,
+        [data-testid="stDateInput"] div {{
+            background: {control_bg} !important;
+            border-color: {control_border} !important;
+        }}
+        [data-baseweb="input"] input,
+        [data-baseweb="select"] span,
+        [data-baseweb="select"] div,
+        [data-testid="stDateInput"] input,
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTextArea"] textarea {{
+            color: {text_color} !important;
+            caret-color: {text_color} !important;
+        }}
+        [data-baseweb="popover"] *,
+        [role="listbox"] *,
+        [data-baseweb="menu"] * {{
+            color: {text_color} !important;
+        }}
+        [data-baseweb="popover"] > div,
+        [role="listbox"],
+        [data-baseweb="menu"] {{
+            background: {control_bg} !important;
+            border: 1px solid {control_border} !important;
+        }}
+        [data-testid="stButton"] button,
+        [data-testid="stDownloadButton"] button {{
+            background: {control_bg} !important;
+            color: {text_color} !important;
+            border: 1px solid {control_border} !important;
+        }}
+        [data-testid="stButton"] button:hover,
+        [data-testid="stDownloadButton"] button:hover {{
+            border-color: {accent} !important;
+        }}
+        [data-testid="stAlert"] {{
+            color: {text_color} !important;
+        }}
+        [data-testid="stCodeBlock"] pre,
+        code {{
+            color: {text_color} !important;
+        }}
+        [data-testid="stDataFrame"] * {{
+            color: {text_color} !important;
+        }}
+        div[data-testid="stMetric"] {{
+            background: {card_bg};
+            border: 1px solid {card_border};
+            border-radius: 10px;
+            padding: 8px 12px;
+        }}
+        div[data-baseweb="tab-list"] {{
+            gap: 8px;
+        }}
+        div[data-baseweb="tab"] {{
+            background: {tab_bg};
+            color: {tab_text};
+            border-radius: 10px;
+            padding-left: 14px;
+            padding-right: 14px;
+        }}
+        .stTabs [aria-selected="true"] {{
+            box-shadow: inset 0 -2px 0 {accent};
+        }}
+        [data-testid="stExpander"] details {{
+            border-radius: 10px;
+            border: 1px solid {card_border};
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_quality_bar(ctx, refresh_sec: int):
     quote = ctx.quote
     quality = ctx.quality
@@ -67,6 +393,7 @@ def _render_quality_bar(ctx, refresh_sec: int):
 
 
 def _render_live_chart(ind: pd.DataFrame):
+    palette = _ui_palette()
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.72, 0.28])
     fig.add_trace(
         go.Candlestick(
@@ -76,17 +403,21 @@ def _render_live_chart(ind: pd.DataFrame):
             low=ind["low"],
             close=ind["close"],
             name="K線",
+            increasing_line_color=str(palette["price_up"]),
+            increasing_fillcolor=str(palette["price_up"]),
+            decreasing_line_color=str(palette["price_down"]),
+            decreasing_fillcolor=str(palette["price_down"]),
         ),
         row=1,
         col=1,
     )
 
     for col, name, color in [
-        ("sma_20", "SMA20", "#1f77b4"),
-        ("sma_60", "SMA60", "#ff7f0e"),
-        ("vwap", "VWAP", "#2ca02c"),
-        ("bb_upper", "BB上軌", "rgba(255,0,0,0.35)"),
-        ("bb_lower", "BB下軌", "rgba(0,0,255,0.35)"),
+        ("sma_20", "SMA20", str(palette["sma20"])),
+        ("sma_60", "SMA60", str(palette["sma60"])),
+        ("vwap", "VWAP", str(palette["vwap"])),
+        ("bb_upper", "BB上軌", str(palette["bb_upper"])),
+        ("bb_lower", "BB下軌", str(palette["bb_lower"])),
     ]:
         if col in ind.columns:
             fig.add_trace(
@@ -95,17 +426,26 @@ def _render_live_chart(ind: pd.DataFrame):
                 col=1,
             )
 
+    volume = ind.get("volume", pd.Series(index=ind.index)).fillna(0)
+    close_diff = pd.to_numeric(ind.get("close", pd.Series(index=ind.index)), errors="coerce").diff().fillna(0.0)
+    volume_colors = np.where(close_diff >= 0, str(palette["volume_up"]), str(palette["volume_down"]))
     fig.add_trace(
-        go.Bar(x=ind.index, y=ind.get("volume", pd.Series(index=ind.index)).fillna(0), name="Volume"),
+        go.Bar(x=ind.index, y=volume, name="Volume", marker_color=volume_colors),
         row=2,
         col=1,
     )
+    fig.update_xaxes(gridcolor=str(palette["grid"]))
+    fig.update_yaxes(gridcolor=str(palette["grid"]))
     fig.update_layout(
         height=720,
         xaxis_rangeslider_visible=False,
         legend_orientation="h",
         legend_y=1.02,
         margin=dict(l=10, r=10, t=30, b=10),
+        template=str(palette["plot_template"]),
+        paper_bgcolor=str(palette["paper_bg"]),
+        plot_bgcolor=str(palette["plot_bg"]),
+        font=dict(color=str(palette["text_color"])),
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -114,6 +454,18 @@ def _render_live_view():
     service = _market_service()
 
     with st.sidebar:
+        st.subheader("介面")
+        theme_options = _theme_options()
+        current_theme = _current_theme_name()
+        default_idx = theme_options.index(current_theme) if current_theme in theme_options else 0
+        st.selectbox(
+            "配色主題",
+            options=theme_options,
+            index=default_idx,
+            key="ui_theme",
+            help="提供多種專業配色（含夜間與日間），可依閱讀情境快速切換。",
+        )
+        st.caption(f"目前主題：{st.session_state.get('ui_theme', current_theme)}")
         st.subheader("即時模式")
         market = st.selectbox("市場", options=["美股(US)", "台股(TWSE)"], index=0)
         if market == "台股(TWSE)":
@@ -122,10 +474,12 @@ def _render_live_view():
             yahoo_symbol = st.text_input("Yahoo 代碼（歷史/補K）", value=f"{stock_id}.TW")
             us_symbol = None
         else:
-            us_symbol = st.text_input("美股代碼", value="TSLA")
+            us_symbol = st.text_input("美股代碼", value="TSLA").strip().upper()
             stock_id = None
             exchange = "tse"
-            yahoo_symbol = st.text_input("Yahoo 代碼（歷史/補K）", value=us_symbol)
+            yahoo_symbol = st.text_input("Yahoo 代碼（歷史/補K）", value=us_symbol).strip().upper()
+            if not yahoo_symbol:
+                yahoo_symbol = us_symbol
 
         refresh_sec = st.slider(
             "自動更新（秒）",
@@ -163,6 +517,9 @@ def _render_live_view():
             quote = ctx.quote
         else:
             assert us_symbol is not None
+            if us_symbol.isdigit():
+                st.warning("目前為美股模式，請輸入美股代碼（例如 AAPL、TSLA）；若要查台股請切換到台股模式。")
+                return
             try:
                 ctx = service.get_us_live_context(us_symbol, yahoo_symbol, options)
             except Exception as exc:
@@ -170,12 +527,14 @@ def _render_live_view():
                 return
             quote = ctx.quote
 
+        st.markdown("#### 即時總覽")
         _render_quality_bar(ctx, refresh_sec=refresh_sec)
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("名稱", quote.extra.get("name", quote.symbol))
         col2.metric("最新價", _format_price(quote.price))
         col3.metric("漲跌", "—" if quote.change is None else f"{quote.change:+.2f}")
         col4.metric("漲跌幅", "—" if quote.change_pct is None else f"{quote.change_pct:+.2f}%")
+        col5, col6 = st.columns(2)
         col5.metric("成交量", _format_int(quote.volume))
         col6.metric("時間", quote.ts.strftime("%Y-%m-%d %H:%M:%S"))
         st.caption("非投資建議；僅供教育/研究。")
@@ -186,7 +545,6 @@ def _render_live_view():
             return
 
         ind = add_indicators(bars_intraday)
-        _render_live_chart(ind)
 
         daily_long = ctx.daily.copy() if isinstance(ctx.daily, pd.DataFrame) else pd.DataFrame()
         daily_split_events = []
@@ -206,76 +564,100 @@ def _render_live_view():
                 use_auto_detect=True,
             )
 
-        left, right = st.columns([0.55, 0.45])
-        with left:
-            st.subheader("最新指標")
-            show_cols = [
-                "close",
-                "sma_5",
-                "sma_20",
-                "sma_60",
-                "rsi_14",
-                "stoch_k",
-                "stoch_d",
-                "mfi_14",
-                "macd",
-                "macd_signal",
-                "macd_hist",
-                "bb_mid",
-                "bb_upper",
-                "bb_lower",
-                "vwap",
-                "atr_14",
-            ]
-            st.dataframe(ind.iloc[-1][show_cols].to_frame("value").T, use_container_width=True)
-
-            if ctx.fundamentals and market == "美股(US)":
-                st.subheader("基本面快照（Yahoo）")
-                st.dataframe(pd.DataFrame([ctx.fundamentals]), use_container_width=True, hide_index=True)
-
-            if market == "台股(TWSE)":
-                st.subheader("買賣五檔（TW MIS）")
-                bid_prices = quote.extra.get("bid_prices", [])
-                bid_sizes = quote.extra.get("bid_sizes", [])
-                ask_prices = quote.extra.get("ask_prices", [])
-                ask_sizes = quote.extra.get("ask_sizes", [])
-                ob = pd.DataFrame(
-                    {
-                        "bid_price": bid_prices[:5] + [np.nan] * max(0, 5 - len(bid_prices)),
-                        "bid_size": bid_sizes[:5] + [np.nan] * max(0, 5 - len(bid_sizes)),
-                        "ask_price": ask_prices[:5] + [np.nan] * max(0, 5 - len(ask_prices)),
-                        "ask_size": ask_sizes[:5] + [np.nan] * max(0, 5 - len(ask_sizes)),
-                    }
-                )
-                st.dataframe(ob, use_container_width=True, hide_index=True)
-            else:
-                st.caption("美股免費來源通常不含完整 Level 2 五檔資料。")
-
-        with right:
-            st.subheader("建議")
-            if advice_mode.startswith("股癌"):
-                if render_advice_scai_style is None:
-                    st.warning("股癌風格載入失敗，已改用一般模式。")
-                    st.text(render_advice(ind, profile))
-                else:
-                    st.text(render_advice_scai_style(ind, profile, symbol=yahoo_symbol, fundamentals=ctx.fundamentals))
-            else:
-                st.text(render_advice(ind, profile))
-
-            st.subheader("外部參考")
-            refs = service.get_reference_context("TW" if market == "台股(TWSE)" else "US")
-            if refs.empty:
-                st.caption("目前無法取得外部參考資料。")
-            else:
-                st.dataframe(refs, use_container_width=True, hide_index=True)
-
+        main_col, side_col = st.columns([0.66, 0.34], gap="large")
+        with main_col:
+            st.markdown("#### 即時走勢")
+            _render_live_chart(ind)
             if not daily_long.empty:
-                st.subheader("長期視角（Daily）")
+                st.markdown("#### 長期視角（Daily）")
                 if daily_split_events:
                     ev_txt = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in daily_split_events])
                     st.caption(f"已套用分割調整（復權）：{ev_txt}")
                 daily = add_indicators(daily_long.dropna(subset=["close"], how="any"))
                 st.line_chart(daily[["close", "sma_20", "sma_60"]].dropna(how="all"))
+
+        with side_col:
+            with st.container(border=True):
+                st.markdown("#### 建議")
+                if advice_mode.startswith("股癌"):
+                    if render_advice_scai_style is None:
+                        st.warning("股癌風格載入失敗，已改用一般模式。")
+                        st.text(render_advice(ind, profile))
+                    else:
+                        st.text(render_advice_scai_style(ind, profile, symbol=yahoo_symbol, fundamentals=ctx.fundamentals))
+                else:
+                    st.text(render_advice(ind, profile))
+
+            with st.container(border=True):
+                st.markdown("#### 技術快照")
+
+                def _val(col: str, ndigits: int = 2) -> str:
+                    if col not in ind.columns:
+                        return "—"
+                    value = pd.to_numeric(ind.iloc[-1][col], errors="coerce")
+                    if pd.isna(value):
+                        return "—"
+                    return f"{float(value):.{ndigits}f}"
+
+                m1, m2 = st.columns(2)
+                m1.metric("Close", _val("close"))
+                m2.metric("RSI14", _val("rsi_14"))
+                m3, m4 = st.columns(2)
+                m3.metric("SMA20", _val("sma_20"))
+                m4.metric("SMA60", _val("sma_60"))
+                m5, m6 = st.columns(2)
+                m5.metric("MACD", _val("macd"))
+                m6.metric("ATR14", _val("atr_14"))
+
+                show_cols = [
+                    "close",
+                    "sma_5",
+                    "sma_20",
+                    "sma_60",
+                    "rsi_14",
+                    "stoch_k",
+                    "stoch_d",
+                    "mfi_14",
+                    "macd",
+                    "macd_signal",
+                    "macd_hist",
+                    "bb_mid",
+                    "bb_upper",
+                    "bb_lower",
+                    "vwap",
+                    "atr_14",
+                ]
+                with st.expander("查看完整指標表", expanded=False):
+                    st.dataframe(ind.iloc[-1][show_cols].to_frame("value").T, use_container_width=True)
+
+            if market == "台股(TWSE)":
+                with st.container(border=True):
+                    st.markdown("#### 買賣五檔（TW MIS）")
+                    bid_prices = quote.extra.get("bid_prices", [])
+                    bid_sizes = quote.extra.get("bid_sizes", [])
+                    ask_prices = quote.extra.get("ask_prices", [])
+                    ask_sizes = quote.extra.get("ask_sizes", [])
+                    ob = pd.DataFrame(
+                        {
+                            "bid_price": bid_prices[:5] + [np.nan] * max(0, 5 - len(bid_prices)),
+                            "bid_size": bid_sizes[:5] + [np.nan] * max(0, 5 - len(bid_sizes)),
+                            "ask_price": ask_prices[:5] + [np.nan] * max(0, 5 - len(ask_prices)),
+                            "ask_size": ask_sizes[:5] + [np.nan] * max(0, 5 - len(ask_sizes)),
+                        }
+                    )
+                    st.dataframe(ob, use_container_width=True, hide_index=True)
+            elif ctx.fundamentals:
+                with st.container(border=True):
+                    st.markdown("#### 基本面快照（Yahoo）")
+                    st.dataframe(pd.DataFrame([ctx.fundamentals]), use_container_width=True, hide_index=True)
+
+            with st.container(border=True):
+                st.markdown("#### 外部參考")
+                refs = service.get_reference_context("TW" if market == "台股(TWSE)" else "US")
+                if refs.empty:
+                    st.caption("目前無法取得外部參考資料。")
+                else:
+                    st.dataframe(refs, use_container_width=True, hide_index=True)
 
     live_fragment()
 
@@ -329,10 +711,65 @@ def _render_backtest_view():
             "sharpe": float(sharpe),
         }
 
+    def _benchmark_candidates(market_code: str, choice: str) -> list[str]:
+        selected = (choice or "auto").strip().lower()
+        if selected == "off":
+            return []
+        if market_code == "TW":
+            mapping = {
+                "auto": ["^TWII", "0050", "006208"],
+                "twii": ["^TWII"],
+                "0050": ["0050"],
+                "006208": ["006208"],
+            }
+            return mapping.get(selected, ["^TWII"])
+        mapping = {
+            "auto": ["^GSPC", "SPY", "QQQ", "DIA"],
+            "gspc": ["^GSPC"],
+            "spy": ["SPY"],
+            "qqq": ["QQQ"],
+            "dia": ["DIA"],
+        }
+        return mapping.get(selected, ["^GSPC"])
+
+    def _load_benchmark_from_store(
+        market_code: str,
+        start: datetime,
+        end: datetime,
+        choice: str,
+    ) -> pd.DataFrame:
+        candidates = _benchmark_candidates(market_code, choice)
+        if not candidates:
+            return pd.DataFrame(columns=["close"])
+
+        for bench_symbol in candidates:
+            bars = store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end)
+            end_ts = pd.Timestamp(end).tz_convert("UTC")
+            needs_sync = bars.empty or pd.Timestamp(bars.index.max()).tz_convert("UTC") < end_ts
+            if needs_sync:
+                store.sync_symbol_history(symbol=bench_symbol, market=market_code, start=start, end=end)
+                bars = store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end)
+            if bars.empty or "close" not in bars.columns:
+                continue
+
+            out = bars[["close"]].copy()
+            source_text = ""
+            if "source" in bars.columns:
+                source_vals = sorted(set(bars["source"].dropna().astype(str)))
+                if source_vals:
+                    source_text = ",".join(source_vals)
+            out.attrs["symbol"] = bench_symbol
+            out.attrs["source"] = f"sqlite:{source_text}" if source_text else "sqlite"
+            return out
+
+        return pd.DataFrame(columns=["close"])
+
     store = _history_store()
     service = _market_service()
 
     st.subheader("回測工作台（日K）")
+    st.caption("先設定基本條件，再調整策略與成本參數；進階設定可用於 Walk-Forward 與分割調整。")
+    st.markdown("#### 基本設定")
     c1, c2, c3, c4 = st.columns(4)
     market = c1.selectbox("市場", ["TW", "US"], index=0, key="bt_market")
     mode = c2.selectbox("模式", ["單一標的", "投組(多標的)"], index=0, key="bt_mode")
@@ -386,16 +823,17 @@ def _render_backtest_view():
     invest_date_key = "bt_invest_start_date"
     invest_k_key = "bt_invest_start_k"
 
-    p1, p2, p3 = st.columns(3)
+    st.markdown("#### 策略參數")
+    param1, param2, _ = st.columns(3)
     if strategy in {"sma_cross", "ema_cross"}:
-        fast = p1.slider(
+        fast = param1.slider(
             "Fast",
             min_value=3,
             max_value=80,
             value=10 if strategy == "sma_cross" else 12,
             help="短週期均線。數字越小越敏感，訊號會更快但雜訊也可能變多。",
         )
-        slow = p2.slider(
+        slow = param2.slider(
             "Slow",
             min_value=10,
             max_value=240,
@@ -404,14 +842,14 @@ def _render_backtest_view():
         )
         strategy_params = {"fast": float(fast), "slow": float(slow)}
     elif strategy == "rsi_reversion":
-        buy_below = p1.slider(
+        buy_below = param1.slider(
             "RSI Buy Below",
             min_value=10,
             max_value=40,
             value=30,
             help="RSI 低於此值視為相對偏弱，策略偏向找反彈買點。",
         )
-        sell_above = p2.slider(
+        sell_above = param2.slider(
             "RSI Sell Above",
             min_value=45,
             max_value=80,
@@ -432,7 +870,9 @@ def _render_backtest_view():
     elif st.session_state.get(cost_profile_key) != current_cost_profile:
         st.session_state[cost_profile_key] = current_cost_profile
 
-    fee_rate = p1.number_input(
+    st.markdown("#### 交易成本")
+    cost1, cost2, cost3 = st.columns(3)
+    fee_rate = cost1.number_input(
         "Fee Rate",
         min_value=0.0,
         max_value=0.01,
@@ -442,7 +882,7 @@ def _render_backtest_view():
         key=fee_key,
         help="每次買進/賣出收取的手續費比例，例如 0.001425 = 0.1425%。",
     )
-    sell_tax = p2.number_input(
+    sell_tax = cost2.number_input(
         "Sell Tax",
         min_value=0.0,
         max_value=0.01,
@@ -452,7 +892,7 @@ def _render_backtest_view():
         key=tax_key,
         help="賣出時交易稅比例。台股股票常見 0.3%，ETF 常見 0.1%。",
     )
-    slippage = p3.number_input(
+    slippage = cost3.number_input(
         "Slippage",
         min_value=0.0,
         max_value=0.01,
@@ -471,6 +911,7 @@ def _render_backtest_view():
         format="%.0f",
     )
 
+    st.markdown("#### 進階設定")
     wf1, wf2, wf3 = st.columns(3)
     enable_wf = wf1.checkbox(
         "啟用 Walk-Forward",
@@ -562,6 +1003,7 @@ def _render_backtest_view():
                     "- `買賣點顯示`可切換：",
                     "  - `訊號點（價格圖）`：顯示策略由空手/持有切換的時間點。",
                     "  - `實際成交點（資產圖）`：顯示回測成交點（依規則為 T+1 開盤成交）。",
+                    "  - `同時顯示（訊號+成交）`：同時顯示訊號點與實際成交點。",
                     "- `Equity`：策略資產曲線，代表回測期間的總資產（現金 + 持倉市值）。",
                     "- `Benchmark Equity`：把基準指數（台股 `^TWII` / 美股 `^GSPC`）縮放到相同初始資產後的曲線。",
                     "- `Benchmark`：可手動選擇；`Auto` 會在主來源失敗時自動 fallback。",
@@ -810,7 +1252,9 @@ def _render_backtest_view():
         target_index=pd.DatetimeIndex(strategy_equity.index),
         initial_capital=run_initial_capital,
     )
-    benchmark_raw = service.get_benchmark_series(market=market, start=sync_start, end=sync_end, benchmark=benchmark_choice)
+    benchmark_raw = _load_benchmark_from_store(market_code=market, start=sync_start, end=sync_end, choice=benchmark_choice)
+    if benchmark_raw.empty:
+        benchmark_raw = service.get_benchmark_series(market=market, start=sync_start, end=sync_end, benchmark=benchmark_choice)
     benchmark_split_events = []
     if use_split_adjustment and not benchmark_raw.empty:
         benchmark_symbol = str(benchmark_raw.attrs.get("symbol", "")).strip() if hasattr(benchmark_raw, "attrs") else ""
@@ -887,7 +1331,7 @@ def _render_backtest_view():
     if display_mode_key not in st.session_state:
         st.session_state[display_mode_key] = "K棒"
     if marker_mode_key not in st.session_state:
-        st.session_state[marker_mode_key] = "實際成交點（資產圖）"
+        st.session_state[marker_mode_key] = "同時顯示（訊號+成交）"
     if fill_link_key not in st.session_state:
         st.session_state[fill_link_key] = True
     if viewport_mode_key not in st.session_state:
@@ -930,7 +1374,11 @@ def _render_backtest_view():
         st.session_state[idx_key] = 0
     c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
     c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
-    c6.selectbox("買賣點顯示", options=["不顯示", "訊號點（價格圖）", "實際成交點（資產圖）"], key=marker_mode_key)
+    c6.selectbox(
+        "買賣點顯示",
+        options=["不顯示", "訊號點（價格圖）", "實際成交點（資產圖）", "同時顯示（訊號+成交）"],
+        key=marker_mode_key,
+    )
     q1, q2, q3 = st.columns([2, 2, 2])
     q1.selectbox("回放視窗", options=["固定視窗", "完整區間"], key=viewport_mode_key)
     q2.slider(
@@ -955,7 +1403,7 @@ def _render_backtest_view():
         key=fill_link_key,
         help="在 Buy/Sell Fill 的時間點畫垂直細線，幫助對照價格與資產變化。",
     )
-    st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交。")
+    st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
     if st.session_state[display_mode_key] == "K棒":
         st.caption(f"目前以 K 棒序號顯示（0 ~ {max_play_idx}；0 代表最早一根）")
         slider_value = st.slider(
@@ -982,6 +1430,7 @@ def _render_backtest_view():
 
     @st.fragment(run_every="0.5s")
     def playback():
+        palette = _ui_palette()
         if st.session_state[play_key]:
             step = speed_steps[st.session_state[speed_key]]
             new_idx = min(len(focus_bars) - 1, st.session_state[idx_key] + step)
@@ -1003,12 +1452,22 @@ def _render_backtest_view():
                 low=bars_now["low"],
                 close=bars_now["close"],
                 name="Price",
+                increasing_line_color=str(palette["price_up"]),
+                increasing_fillcolor=str(palette["price_up"]),
+                decreasing_line_color=str(palette["price_down"]),
+                decreasing_fillcolor=str(palette["price_down"]),
             ),
             row=1,
             col=1,
         )
         fig.add_trace(
-            go.Scatter(x=equity_now.index, y=equity_now["equity"], mode="lines", name="Equity", line=dict(color="#2ca02c")),
+            go.Scatter(
+                x=equity_now.index,
+                y=equity_now["equity"],
+                mode="lines",
+                name="Equity",
+                line=dict(color=str(palette["equity"]), width=2.0),
+            ),
             row=2,
             col=1,
         )
@@ -1019,32 +1478,58 @@ def _render_backtest_view():
                     y=benchmark_now.values,
                     mode="lines",
                     name="Benchmark Equity",
-                    line=dict(color="#9467bd"),
+                    line=dict(color=str(palette["benchmark"]), width=1.9),
                 ),
                 row=2,
                 col=1,
             )
 
         marker_mode = st.session_state[marker_mode_key]
-        if marker_mode == "訊號點（價格圖）" and not focus_result.signals.empty:
+        signal_buy_style = dict(
+            color=str(palette["signal_buy"]),
+            size=11,
+            symbol="triangle-up",
+            line=dict(color=str(palette["marker_edge"]), width=1),
+        )
+        signal_sell_style = dict(
+            color=str(palette["signal_sell"]),
+            size=11,
+            symbol="triangle-down",
+            line=dict(color=str(palette["marker_edge"]), width=1),
+        )
+        fill_buy_style = dict(
+            color=str(palette["fill_buy"]),
+            size=13,
+            symbol="triangle-up",
+            line=dict(color=str(palette["marker_edge"]), width=1),
+        )
+        fill_sell_style = dict(
+            color=str(palette["fill_sell"]),
+            size=13,
+            symbol="triangle-down",
+            line=dict(color=str(palette["marker_edge"]), width=1),
+        )
+        show_signal_markers = marker_mode in {"訊號點（價格圖）", "同時顯示（訊號+成交）"}
+        show_fill_markers = marker_mode in {"實際成交點（資產圖）", "同時顯示（訊號+成交）"}
+        if show_signal_markers and not focus_result.signals.empty:
             sig_now = focus_result.signals.reindex(bars_now.index).ffill().fillna(0).astype(int)
             buy_idx = sig_now[(sig_now == 1) & (sig_now.shift(1).fillna(0) == 0)].index
             sell_idx = sig_now[(sig_now == 0) & (sig_now.shift(1).fillna(0) == 1)].index
             if len(buy_idx) > 0:
                 buy_px = bars_now.loc[buy_idx.intersection(bars_now.index), "close"]
                 fig.add_trace(
-                    go.Scatter(x=buy_px.index, y=buy_px.values, mode="markers", name="Buy", marker=dict(color="#1f77b4", size=8)),
+                    go.Scatter(x=buy_px.index, y=buy_px.values, mode="markers", name="Buy Signal", marker=signal_buy_style),
                     row=1,
                     col=1,
                 )
             if len(sell_idx) > 0:
                 sell_px = bars_now.loc[sell_idx.intersection(bars_now.index), "close"]
                 fig.add_trace(
-                    go.Scatter(x=sell_px.index, y=sell_px.values, mode="markers", name="Sell", marker=dict(color="#d62728", size=8)),
+                    go.Scatter(x=sell_px.index, y=sell_px.values, mode="markers", name="Sell Signal", marker=signal_sell_style),
                     row=1,
                     col=1,
                 )
-        elif marker_mode == "實際成交點（資產圖）":
+        if show_fill_markers:
             trades = focus_result.trades or []
             if trades:
                 cutoff = bars_now.index[-1]
@@ -1080,7 +1565,7 @@ def _render_backtest_view():
                                     y=[float(y1.iloc[0]), float(y2.iloc[0])],
                                     mode="lines",
                                     name="Trade Path",
-                                    line=dict(color="rgba(120,120,120,0.45)", width=1),
+                                    line=dict(color=str(palette["trade_path"]), width=1),
                                     showlegend=first_line,
                                 ),
                                 row=2,
@@ -1097,7 +1582,7 @@ def _render_backtest_view():
                             y1=1.0,
                             xref="x",
                             yref="paper",
-                            line=dict(color="rgba(120,120,120,0.22)", width=1, dash="dot"),
+                            line=dict(color=str(palette["fill_link"]), width=1, dash="dot"),
                         )
                 if buy_x:
                     fig.add_trace(
@@ -1106,7 +1591,7 @@ def _render_backtest_view():
                             y=buy_y,
                             mode="markers",
                             name="Buy Fill",
-                            marker=dict(color="#1f77b4", size=9, symbol="triangle-up"),
+                            marker=fill_buy_style,
                         ),
                         row=2,
                         col=1,
@@ -1118,7 +1603,7 @@ def _render_backtest_view():
                             y=sell_y,
                             mode="markers",
                             name="Sell Fill",
-                            marker=dict(color="#d62728", size=9, symbol="triangle-down"),
+                            marker=fill_sell_style,
                         ),
                         row=2,
                         col=1,
@@ -1141,12 +1626,18 @@ def _render_backtest_view():
             fig.update_xaxes(range=[x_start, x_end], row=1, col=1)
             fig.update_xaxes(range=[x_start, x_end], row=2, col=1)
 
+        fig.update_xaxes(gridcolor=str(palette["grid"]))
+        fig.update_yaxes(gridcolor=str(palette["grid"]))
         fig.update_layout(
             height=680,
             xaxis_rangeslider_visible=False,
             margin=dict(l=10, r=10, t=30, b=10),
             uirevision=f"playback:{run_key}",
             transition=dict(duration=0),
+            template=str(palette["plot_template"]),
+            paper_bgcolor=str(palette["paper_bg"]),
+            plot_bgcolor=str(palette["plot_bg"]),
+            font=dict(color=str(palette["text_color"])),
         )
         st.plotly_chart(fig, use_container_width=True, key=f"playback_chart:{run_key}")
         st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
@@ -1279,15 +1770,61 @@ def _render_backtest_view():
                 norm = norm.dropna(how="all")
 
             if not norm.empty:
+                palette = _ui_palette()
                 fig_cmp = go.Figure()
-                fig_cmp.add_trace(go.Scatter(x=norm.index, y=norm["strategy"], mode="lines", name="Strategy Equity"))
-                fig_cmp.add_trace(go.Scatter(x=norm.index, y=norm["benchmark"], mode="lines", name="Benchmark Equity"))
+                fig_cmp.add_trace(
+                    go.Scatter(
+                        x=norm.index,
+                        y=norm["strategy"],
+                        mode="lines",
+                        name="Strategy Equity",
+                        line=dict(color=str(palette["equity"]), width=2.2),
+                    )
+                )
+                fig_cmp.add_trace(
+                    go.Scatter(
+                        x=norm.index,
+                        y=norm["benchmark"],
+                        mode="lines",
+                        name="Benchmark Equity",
+                        line=dict(color=str(palette["benchmark"]), width=2.0),
+                    )
+                )
                 if "buy_hold" in norm.columns and norm["buy_hold"].notna().any():
-                    fig_cmp.add_trace(go.Scatter(x=norm.index, y=norm["buy_hold"], mode="lines", name=buy_hold_label))
+                    fig_cmp.add_trace(
+                        go.Scatter(
+                            x=norm.index,
+                            y=norm["buy_hold"],
+                            mode="lines",
+                            name=buy_hold_label,
+                            line=dict(color=str(palette["buy_hold"]), width=1.9),
+                        )
+                    )
+                asset_palette = list(palette["asset_palette"])
+                asset_color_idx = 0
                 for col in [c for c in norm.columns if c.startswith("asset:")]:
                     sym = col.split(":", 1)[1]
-                    fig_cmp.add_trace(go.Scatter(x=norm.index, y=norm[col], mode="lines", name=f"Buy-and-Hold Equity ({sym})"))
-                fig_cmp.update_layout(height=360, margin=dict(l=10, r=10, t=25, b=10))
+                    line_color = asset_palette[asset_color_idx % len(asset_palette)]
+                    asset_color_idx += 1
+                    fig_cmp.add_trace(
+                        go.Scatter(
+                            x=norm.index,
+                            y=norm[col],
+                            mode="lines",
+                            name=f"Buy-and-Hold Equity ({sym})",
+                            line=dict(color=line_color, width=1.6),
+                        )
+                    )
+                fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
+                fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
+                fig_cmp.update_layout(
+                    height=360,
+                    margin=dict(l=10, r=10, t=25, b=10),
+                    template=str(palette["plot_template"]),
+                    paper_bgcolor=str(palette["paper_bg"]),
+                    plot_bgcolor=str(palette["plot_bg"]),
+                    font=dict(color=str(palette["text_color"])),
+                )
                 st.plotly_chart(fig_cmp, use_container_width=True)
 
                 strategy_perf = _series_metrics(comp_view["strategy"])
@@ -1487,7 +2024,7 @@ def _render_tutorial_view():
     st.markdown("### 0) 資料會存在哪裡？")
     storage_df = pd.DataFrame(
         [
-            {"項目": "歷史日K", "位置": "SQLite `market_history.sqlite3`", "用途": "同步一次後可重複用於回測"},
+            {"項目": "歷史日K（含 Benchmark）", "位置": "SQLite `market_history.sqlite3`", "用途": "同步一次後可重複用於回測與基準比較"},
             {"項目": "回測紀錄", "位置": "SQLite `backtest_runs` 表", "用途": "保存執行過的回測摘要"},
             {"項目": "即時資料", "位置": "Session 記憶體", "用途": "即時看盤暫存，重開 app 會重抓"},
         ]
@@ -1580,6 +2117,7 @@ def _render_tutorial_view():
 
 def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
+    _inject_ui_styles()
     st.title("即時走勢 / 多來源資料 / 回測平台")
     live_tab, bt_tab, guide_tab = st.tabs(["即時看盤", "回測工作台", "新手教學"])
     with live_tab:

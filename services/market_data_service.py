@@ -84,22 +84,87 @@ class MarketDataService:
                 errors.append(f"[{provider.name}] {exc}")
         raise RuntimeError("; ".join(errors) if errors else "no provider available")
 
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        return (symbol or "").strip().upper()
+
+    def _try_quote_chain_with_symbols(
+        self,
+        market: str,
+        candidates: list[tuple[object, str]],
+    ) -> Tuple[QuoteSnapshot, List[str], Optional[str], int]:
+        errors: List[str] = []
+        chain_names = [provider.name for provider, _ in candidates]
+        for idx, (provider, symbol) in enumerate(candidates):
+            try:
+                req = ProviderRequest(symbol=symbol, market=market, interval="quote")
+                quote = provider.quote(req)
+                return quote, chain_names, errors[-1] if errors else None, idx
+            except ProviderError as exc:
+                errors.append(str(exc))
+            except Exception as exc:  # pragma: no cover
+                errors.append(f"[{provider.name}] {exc}")
+        raise RuntimeError("; ".join(errors) if errors else "no provider available")
+
+    def _try_ohlcv_chain_with_symbols(
+        self,
+        market: str,
+        interval: str,
+        candidates: list[tuple[object, str]],
+    ) -> OhlcvSnapshot:
+        errors: List[str] = []
+        for provider, symbol in candidates:
+            try:
+                req = ProviderRequest(symbol=symbol, market=market, interval=interval)
+                return provider.ohlcv(req)
+            except ProviderError as exc:
+                errors.append(str(exc))
+            except Exception as exc:  # pragma: no cover
+                errors.append(f"[{provider.name}] {exc}")
+        raise RuntimeError("; ".join(errors) if errors else "no provider available")
+
     def get_us_live_context(
         self,
         symbol: str,
         yahoo_symbol: str,
         options: LiveOptions,
     ) -> LiveContext:
+        symbol = self._normalize_symbol(symbol)
+        yahoo_symbol = self._normalize_symbol(yahoo_symbol) or symbol
         cache_key = f"us-live:{symbol}:{yahoo_symbol}:{int(options.use_yahoo)}"
         cached = self.cache.get(cache_key)
         if isinstance(cached, LiveContext):
             return cached
+        last_good_key = f"us-live:last-good:{symbol}:{yahoo_symbol}"
 
-        quote_req = ProviderRequest(symbol=symbol, market="US", interval="quote")
-        quote, chain, reason, depth = self._try_quote_chain([self.us_twelve, self.yahoo, self.us_stooq], quote_req)
+        quote_candidates: list[tuple[object, str]] = []
+        if getattr(self.us_twelve, "api_key", None):
+            quote_candidates.append((self.us_twelve, symbol))
+        quote_candidates.append((self.yahoo, yahoo_symbol))
+        quote_candidates.append((self.us_stooq, symbol))
+        try:
+            quote, chain, reason, depth = self._try_quote_chain_with_symbols("US", quote_candidates)
+        except Exception as exc:
+            last_good = self.cache.get(last_good_key)
+            if isinstance(last_good, LiveContext):
+                return last_good
+            raise RuntimeError(
+                f"{exc}; 請確認美股代碼是否正確（例如 AAPL/TSLA）或稍後再試"
+            ) from exc
 
-        daily_req = ProviderRequest(symbol=symbol, market="US", interval="1d")
-        daily = self._try_ohlcv_chain([self.us_twelve, self.yahoo, self.us_stooq], daily_req).df
+        daily_candidates: list[tuple[object, str]] = []
+        if getattr(self.us_twelve, "api_key", None):
+            daily_candidates.append((self.us_twelve, symbol))
+        daily_candidates.append((self.yahoo, yahoo_symbol))
+        daily_candidates.append((self.us_stooq, symbol))
+
+        daily = pd.DataFrame()
+        try:
+            daily = self._try_ohlcv_chain_with_symbols("US", "1d", daily_candidates).df
+        except Exception:
+            last_good = self.cache.get(last_good_key)
+            if isinstance(last_good, LiveContext) and isinstance(last_good.daily, pd.DataFrame):
+                daily = last_good.daily.copy()
 
         intraday = pd.DataFrame()
         if options.use_yahoo:
@@ -109,7 +174,40 @@ class MarketDataService:
             except Exception:
                 intraday = pd.DataFrame()
         if intraday.empty:
-            intraday = daily.tail(260).copy()
+            if not daily.empty:
+                intraday = daily.tail(260).copy()
+            else:
+                last_good = self.cache.get(last_good_key)
+                if isinstance(last_good, LiveContext) and isinstance(last_good.intraday, pd.DataFrame):
+                    intraday = last_good.intraday.copy()
+
+        if daily.empty and not intraday.empty:
+            tmp = intraday.copy()
+            tmp = tmp.sort_index()
+            daily = (
+                tmp.resample("1D")
+                .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+                .dropna(subset=["open", "high", "low", "close"], how="any")
+            )
+
+        if daily.empty and quote.price is not None:
+            ts = pd.Timestamp(quote.ts)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+            daily = pd.DataFrame(
+                [
+                    {
+                        "open": float(quote.open if quote.open is not None else quote.price),
+                        "high": float(quote.high if quote.high is not None else quote.price),
+                        "low": float(quote.low if quote.low is not None else quote.price),
+                        "close": float(quote.price),
+                        "volume": float(quote.volume or 0),
+                    }
+                ],
+                index=pd.DatetimeIndex([ts]),
+            )
 
         ctx = LiveContext(
             quote=quote,
@@ -121,6 +219,7 @@ class MarketDataService:
             fundamentals=self.yahoo.fundamentals(yahoo_symbol),
         )
         self.cache.set(cache_key, ctx, ttl_sec=10)
+        self.cache.set(last_good_key, ctx, ttl_sec=1800)
         return ctx
 
     def get_tw_live_context(
