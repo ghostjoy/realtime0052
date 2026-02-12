@@ -101,50 +101,32 @@ def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _to_rgba(color: str, alpha: float) -> str:
+    text = str(color).strip()
+    a = min(max(float(alpha), 0.0), 1.0)
+    if text.startswith("#") and len(text) == 7:
+        r = int(text[1:3], 16)
+        g = int(text[3:5], 16)
+        b = int(text[5:7], 16)
+        return f"rgba({r},{g},{b},{a:.3f})"
+    if text.startswith("#") and len(text) == 4:
+        r = int(text[1] * 2, 16)
+        g = int(text[2] * 2, 16)
+        b = int(text[3] * 2, 16)
+        return f"rgba({r},{g},{b},{a:.3f})"
+    if text.startswith("rgb(") and text.endswith(")"):
+        inner = text[4:-1]
+        return f"rgba({inner},{a:.3f})"
+    if text.startswith("rgba("):
+        return text
+    return text
+
+
 def _palette_with(base: dict[str, object], **overrides: object) -> dict[str, object]:
     out = dict(base)
     out.update(overrides)
     return out
 
-
-_BASE_DARK_PALETTE: dict[str, object] = {
-    "is_dark": True,
-    "background": "#232B3A",
-    "sidebar_bg": "#273245",
-    "text_color": "#F1F5FF",
-    "text_muted": "#CCD6EA",
-    "card_bg": "rgba(49, 62, 86, 0.74)",
-    "card_border": "rgba(162, 178, 204, 0.44)",
-    "control_bg": "rgba(58, 74, 102, 0.94)",
-    "control_border": "rgba(170, 185, 209, 0.45)",
-    "tab_bg": "rgba(63, 80, 109, 0.82)",
-    "tab_text": "#EFF4FF",
-    "accent": "#9BB9FF",
-    "plot_template": "plotly_dark",
-    "paper_bg": "#2A354A",
-    "plot_bg": "#2A354A",
-    "grid": "rgba(199,212,235,0.20)",
-    "price_up": "#87D2B2",
-    "price_down": "#F0A2A8",
-    "sma20": "#A7D4FF",
-    "sma60": "#F6CE91",
-    "vwap": "#A8DFC0",
-    "bb_upper": "rgba(240,162,168,0.36)",
-    "bb_lower": "rgba(167,212,255,0.34)",
-    "volume_up": "rgba(135,210,178,0.48)",
-    "volume_down": "rgba(240,162,168,0.46)",
-    "equity": "#7ccaa8",
-    "benchmark": "#b3a2ef",
-    "buy_hold": "#f1c27d",
-    "asset_palette": ["#98c1d9", "#b8c0ff", "#9bc53d", "#f4a261", "#80ed99", "#f6bd60"],
-    "signal_buy": "#90c4f4",
-    "signal_sell": "#f4b184",
-    "fill_buy": "#7ccaa8",
-    "fill_sell": "#e5989b",
-    "marker_edge": "#e5ecf6",
-    "trade_path": "rgba(203,213,225,0.50)",
-    "fill_link": "rgba(176,190,210,0.34)",
-}
 
 _BASE_LIGHT_PALETTE: dict[str, object] = {
     "is_dark": False,
@@ -163,8 +145,8 @@ _BASE_LIGHT_PALETTE: dict[str, object] = {
     "paper_bg": "#ffffff",
     "plot_bg": "#ffffff",
     "grid": "rgba(15,23,42,0.10)",
-    "price_up": "#16a34a",
-    "price_down": "#dc2626",
+    "price_up": "#5FA783",
+    "price_down": "#D78C95",
     "sma20": "#0284c7",
     "sma60": "#d97706",
     "vwap": "#059669",
@@ -186,83 +168,34 @@ _BASE_LIGHT_PALETTE: dict[str, object] = {
 }
 
 _THEME_PALETTES: dict[str, dict[str, object]] = {
-    "夜間專業（Slate Pro）": _palette_with(_BASE_DARK_PALETTE),
-    "北歐夜色（Nord Calm）": _palette_with(
-        _BASE_DARK_PALETTE,
-        background="#2E3440",
-        sidebar_bg="#323B4B",
-        paper_bg="#3B4252",
-        plot_bg="#3B4252",
-        accent="#81A1C1",
-        text_color="#ECEFF4",
-        text_muted="#D8DEE9",
-        card_bg="rgba(67, 76, 94, 0.78)",
-        control_bg="rgba(74, 84, 105, 0.95)",
-        sma20="#88C0D0",
-        sma60="#EBCB8B",
-        benchmark="#B48EAD",
-        asset_palette=["#8FBCBB", "#D08770", "#A3BE8C", "#5E81AC", "#EBCB8B", "#BF616A"],
-    ),
-    "深海藍（Ocean Night）": _palette_with(
-        _BASE_DARK_PALETTE,
-        background="#1E293B",
-        sidebar_bg="#243349",
-        paper_bg="#223047",
-        plot_bg="#223047",
-        accent="#7DD3FC",
-        text_color="#F8FBFF",
-        text_muted="#D6E3F2",
-        price_up="#86EFAC",
-        price_down="#FDA4AF",
-        sma20="#7DD3FC",
-        sma60="#FDE68A",
-        buy_hold="#FDE68A",
-        asset_palette=["#67E8F9", "#A7F3D0", "#C4B5FD", "#FDBA74", "#93C5FD", "#F9A8D4"],
-    ),
     "日光白（Paper Light）": _palette_with(_BASE_LIGHT_PALETTE),
-    "暖陽米白（Warm Paper）": _palette_with(
+    "灰白專業（Soft Gray）": _palette_with(
         _BASE_LIGHT_PALETTE,
-        background="#F8F4EA",
-        sidebar_bg="#F3ECDD",
-        paper_bg="#FFF9EE",
-        plot_bg="#FFF9EE",
-        card_bg="rgba(120, 90, 35, 0.08)",
-        card_border="rgba(132, 105, 60, 0.24)",
-        control_bg="#FFF6E5",
-        control_border="rgba(120, 90, 35, 0.28)",
-        tab_bg="rgba(193, 154, 90, 0.20)",
-        tab_text="#3F2F1D",
-        text_color="#2E2518",
-        text_muted="#685742",
-        accent="#AF7E39",
-        grid="rgba(120,90,35,0.16)",
-        signal_buy="#1D8F5A",
-        signal_sell="#C66A2B",
-        fill_buy="#2F9D6B",
-        fill_sell="#C44D4D",
-    ),
-    "薄荷清晨（Mint Day）": _palette_with(
-        _BASE_LIGHT_PALETTE,
-        background="#F2F9F6",
-        sidebar_bg="#E7F5EF",
-        paper_bg="#F8FCFA",
-        plot_bg="#F8FCFA",
-        card_bg="rgba(16, 94, 79, 0.07)",
-        card_border="rgba(16, 94, 79, 0.20)",
-        control_bg="#F6FCF9",
-        control_border="rgba(16, 94, 79, 0.25)",
-        tab_bg="rgba(16, 94, 79, 0.16)",
-        tab_text="#0F4A3E",
-        text_color="#0F2F2A",
-        text_muted="#3E6960",
-        accent="#0E8B74",
-        price_up="#129A64",
-        price_down="#D1495B",
-        sma20="#1976D2",
-        sma60="#C27803",
-        vwap="#0E8B74",
-        benchmark="#5E35B1",
-        asset_palette=["#028090", "#00A896", "#5C7AEA", "#D1495B", "#2E7D32", "#9C6644"],
+        background="#F3F4F6",
+        sidebar_bg="#ECEFF3",
+        paper_bg="#F7F8FA",
+        plot_bg="#F7F8FA",
+        card_bg="rgba(55, 65, 81, 0.06)",
+        card_border="rgba(75, 85, 99, 0.20)",
+        control_bg="#F9FAFB",
+        control_border="rgba(75, 85, 99, 0.24)",
+        tab_bg="rgba(107, 114, 128, 0.16)",
+        tab_text="#1F2937",
+        text_color="#1F2937",
+        text_muted="#4B5563",
+        accent="#4B5563",
+        grid="rgba(107,114,128,0.16)",
+        price_up="#5F9F84",
+        price_down="#CF8F98",
+        sma20="#3B82F6",
+        sma60="#D97706",
+        vwap="#0F766E",
+        benchmark="#6D28D9",
+        asset_palette=["#4B5563", "#0EA5E9", "#10B981", "#F59E0B", "#6366F1", "#E11D48"],
+        signal_buy="#2563EB",
+        signal_sell="#D97706",
+        fill_buy="#15803D",
+        fill_sell="#DC2626",
     ),
 }
 
@@ -272,8 +205,7 @@ def _theme_options() -> list[str]:
 
 
 def _current_theme_name() -> str:
-    legacy_dark = bool(st.session_state.get("ui_dark_mode", False))
-    default_theme = "夜間專業（Slate Pro）" if legacy_dark else "日光白（Paper Light）"
+    default_theme = "灰白專業（Soft Gray）"
     theme = str(st.session_state.get("ui_theme", default_theme))
     if theme not in _THEME_PALETTES:
         theme = default_theme
@@ -439,6 +371,10 @@ def _render_quality_bar(ctx, refresh_sec: int):
 
 def _render_live_chart(ind: pd.DataFrame):
     palette = _ui_palette()
+    price_up_line = str(palette.get("price_up_line", palette["price_up"]))
+    price_down_line = str(palette.get("price_down_line", palette["price_down"]))
+    price_up_fill = str(palette.get("price_up_fill", _to_rgba(price_up_line, 0.42)))
+    price_down_fill = str(palette.get("price_down_fill", _to_rgba(price_down_line, 0.42)))
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.72, 0.28])
     fig.add_trace(
         go.Candlestick(
@@ -448,10 +384,10 @@ def _render_live_chart(ind: pd.DataFrame):
             low=ind["low"],
             close=ind["close"],
             name="K線",
-            increasing_line_color=str(palette["price_up"]),
-            increasing_fillcolor=str(palette["price_up"]),
-            decreasing_line_color=str(palette["price_down"]),
-            decreasing_fillcolor=str(palette["price_down"]),
+            increasing_line_color=price_up_line,
+            increasing_fillcolor=price_up_fill,
+            decreasing_line_color=price_down_line,
+            decreasing_fillcolor=price_down_fill,
         ),
         row=1,
         col=1,
@@ -1335,6 +1271,30 @@ def _render_backtest_view():
     metric_cols = st.columns(4)
     for idx, (label, val) in enumerate(metric_rows):
         metric_cols[idx % 4].metric(label, val)
+    if benchmark_choice != "off" and not benchmark_equity.empty:
+        rel = pd.concat(
+            [
+                strategy_equity.rename("strategy"),
+                benchmark_equity.rename("benchmark"),
+            ],
+            axis=1,
+        ).dropna()
+        if len(rel) >= 2:
+            strategy_ret = float(rel["strategy"].iloc[-1] / rel["strategy"].iloc[0] - 1.0)
+            benchmark_ret = float(rel["benchmark"].iloc[-1] / rel["benchmark"].iloc[0] - 1.0)
+            diff_pct = (strategy_ret - benchmark_ret) * 100.0
+            verdict = "贏過大盤" if diff_pct > 0 else ("輸給大盤" if diff_pct < 0 else "與大盤持平")
+            r1, r2 = st.columns(2)
+            r1.metric("相對大盤結果", verdict)
+            r2.metric("贏/輸大盤（百分比）", f"{diff_pct:+.2f}%")
+            st.caption(
+                "計算基準：同一重疊區間的 Total Return；"
+                f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%"
+            )
+        else:
+            st.caption("Benchmark 可用資料不足，暫時無法判斷是否贏過大盤。")
+    elif benchmark_choice != "off":
+        st.caption("目前沒有可用的 Benchmark 資料，無法計算是否贏過大盤。")
 
     if payload.get("walk_forward"):
         st.subheader("Walk-Forward")
@@ -1393,8 +1353,9 @@ def _render_backtest_view():
         return
     focus_result = result.component_results[focus_symbol] if is_portfolio else result
     max_play_idx = len(focus_bars) - 1
+    default_play_idx = min(20, max_play_idx)
     if idx_key not in st.session_state:
-        st.session_state[idx_key] = 0
+        st.session_state[idx_key] = default_play_idx
     else:
         st.session_state[idx_key] = min(int(st.session_state[idx_key]), max_play_idx)
     window_min = 20
@@ -1416,7 +1377,7 @@ def _render_backtest_view():
         st.session_state[play_key] = False
     if c3.button("Reset", use_container_width=True):
         st.session_state[play_key] = False
-        st.session_state[idx_key] = 0
+        st.session_state[idx_key] = default_play_idx
     c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
     c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
     c6.selectbox(
@@ -1449,39 +1410,45 @@ def _render_backtest_view():
         help="在 Buy/Sell Fill 的時間點畫垂直細線，幫助對照價格與資產變化。",
     )
     st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
-    if st.session_state[display_mode_key] == "K棒":
-        st.caption(f"目前以 K 棒序號顯示（0 ~ {max_play_idx}；0 代表最早一根）")
-        slider_value = st.slider(
-            "回放位置（K棒）",
-            min_value=0,
-            max_value=max_play_idx,
-            value=int(st.session_state[idx_key]),
-            disabled=st.session_state[play_key],
-        )
-        if not st.session_state[play_key]:
-            st.session_state[idx_key] = int(slider_value)
-    else:
-        st.caption(f"目前以交易日期顯示（{date_options[0]} ~ {date_options[-1]}）")
-        date_value = st.select_slider(
-            "回放位置（日期）",
-            options=date_options,
-            value=date_options[int(st.session_state[idx_key])],
-            disabled=st.session_state[play_key],
-        )
-        if not st.session_state[play_key]:
-            st.session_state[idx_key] = int(date_to_idx[date_value])
+    st.caption(f"回放預設起點：第 {default_play_idx} 根K（建議先有基本形態再播放）。")
 
     speed_steps = {"0.5x": 1, "1x": 2, "2x": 4, "5x": 8, "10x": 16}
 
     @st.fragment(run_every="0.5s")
     def playback():
         palette = _ui_palette()
+        price_up_line = str(palette.get("price_up_line", palette["price_up"]))
+        price_down_line = str(palette.get("price_down_line", palette["price_down"]))
+        price_up_fill = str(palette.get("price_up_fill", _to_rgba(price_up_line, 0.42)))
+        price_down_fill = str(palette.get("price_down_fill", _to_rgba(price_down_line, 0.42)))
         if st.session_state[play_key]:
             step = speed_steps[st.session_state[speed_key]]
             new_idx = min(len(focus_bars) - 1, st.session_state[idx_key] + step)
             st.session_state[idx_key] = new_idx
             if new_idx >= len(focus_bars) - 1:
                 st.session_state[play_key] = False
+
+        if st.session_state[display_mode_key] == "K棒":
+            st.caption(f"目前以 K 棒序號顯示（0 ~ {max_play_idx}；0 代表最早一根）")
+            slider_value = st.slider(
+                "回放位置（K棒）",
+                min_value=0,
+                max_value=max_play_idx,
+                value=int(st.session_state[idx_key]),
+                disabled=st.session_state[play_key],
+            )
+            if not st.session_state[play_key]:
+                st.session_state[idx_key] = int(slider_value)
+        else:
+            st.caption(f"目前以交易日期顯示（{date_options[0]} ~ {date_options[-1]}）")
+            date_value = st.select_slider(
+                "回放位置（日期）",
+                options=date_options,
+                value=date_options[int(st.session_state[idx_key])],
+                disabled=st.session_state[play_key],
+            )
+            if not st.session_state[play_key]:
+                st.session_state[idx_key] = int(date_to_idx[date_value])
 
         idx = st.session_state[idx_key]
         bars_now = focus_bars.iloc[: idx + 1]
@@ -1497,10 +1464,10 @@ def _render_backtest_view():
                 low=bars_now["low"],
                 close=bars_now["close"],
                 name="Price",
-                increasing_line_color=str(palette["price_up"]),
-                increasing_fillcolor=str(palette["price_up"]),
-                decreasing_line_color=str(palette["price_down"]),
-                decreasing_fillcolor=str(palette["price_down"]),
+                increasing_line_color=price_up_line,
+                increasing_fillcolor=price_up_fill,
+                decreasing_line_color=price_down_line,
+                decreasing_fillcolor=price_down_fill,
             ),
             row=1,
             col=1,
