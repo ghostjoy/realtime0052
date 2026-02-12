@@ -55,6 +55,52 @@ def _format_int(v: Optional[int]) -> str:
     return f"{v:,}"
 
 
+def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
+    base_cols = ["open", "high", "low", "close", "volume"]
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=base_cols)
+
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        renamed: list[str] = []
+        for col in out.columns:
+            parts = [str(part).strip().lower() for part in col if str(part).strip()]
+            candidate = ""
+            for item in reversed(parts):
+                if item in {"open", "high", "low", "close", "adj close", "adj_close", "volume", "price"}:
+                    candidate = item
+                    break
+            renamed.append(candidate or (parts[-1] if parts else ""))
+        out.columns = renamed
+    else:
+        out.columns = [str(col).strip().lower() for col in out.columns]
+
+    if "adj close" in out.columns and "adj_close" not in out.columns:
+        out = out.rename(columns={"adj close": "adj_close"})
+
+    if "price" in out.columns and "close" not in out.columns:
+        out["close"] = out["price"]
+
+    if "close" not in out.columns:
+        return pd.DataFrame(columns=base_cols)
+
+    close = pd.to_numeric(out["close"], errors="coerce")
+    for col in ["open", "high", "low"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(close)
+        else:
+            out[col] = close
+    if "volume" in out.columns:
+        out["volume"] = pd.to_numeric(out["volume"], errors="coerce").fillna(0.0)
+    else:
+        out["volume"] = 0.0
+    out["close"] = close
+
+    out = out[base_cols].dropna(subset=["open", "high", "low", "close"], how="any")
+    out = out.sort_index()
+    return out
+
+
 def _palette_with(base: dict[str, object], **overrides: object) -> dict[str, object]:
     out = dict(base)
     out.update(overrides)
@@ -231,7 +277,6 @@ def _current_theme_name() -> str:
     theme = str(st.session_state.get("ui_theme", default_theme))
     if theme not in _THEME_PALETTES:
         theme = default_theme
-    st.session_state["ui_theme"] = theme
     return theme
 
 
@@ -539,14 +584,14 @@ def _render_live_view():
         col6.metric("時間", quote.ts.strftime("%Y-%m-%d %H:%M:%S"))
         st.caption("非投資建議；僅供教育/研究。")
 
-        bars_intraday = ctx.intraday.sort_index().dropna(subset=["open", "high", "low", "close"], how="any")
+        bars_intraday = _normalize_ohlcv_frame(ctx.intraday)
         if bars_intraday.empty:
             st.warning("目前無法取得走勢資料。")
             return
 
         ind = add_indicators(bars_intraday)
 
-        daily_long = ctx.daily.copy() if isinstance(ctx.daily, pd.DataFrame) else pd.DataFrame()
+        daily_long = _normalize_ohlcv_frame(ctx.daily)
         daily_split_events = []
         if not daily_long.empty:
             if market == "台股(TWSE)":
@@ -573,7 +618,7 @@ def _render_live_view():
                 if daily_split_events:
                     ev_txt = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in daily_split_events])
                     st.caption(f"已套用分割調整（復權）：{ev_txt}")
-                daily = add_indicators(daily_long.dropna(subset=["close"], how="any"))
+                daily = add_indicators(daily_long)
                 st.line_chart(daily[["close", "sma_20", "sma_60"]].dropna(how="all"))
 
         with side_col:
