@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -449,3 +450,93 @@ class MarketDataService:
             return pd.DataFrame(columns=["close"])
         self.cache.set(cache_key, out, ttl_sec=600)
         return out
+
+    def get_00935_constituents(self, limit: int = 60) -> tuple[list[str], str]:
+        import yfinance as yf
+
+        cache_key = f"universe:TW:00935:{int(limit)}"
+        cached = self.cache.get(cache_key)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            syms, source = cached
+            if isinstance(syms, list) and isinstance(source, str):
+                return syms, source
+
+        fallback_symbols = [
+            "2330",
+            "2454",
+            "2317",
+            "2308",
+            "2382",
+            "3711",
+            "3034",
+            "2379",
+            "2301",
+            "6669",
+            "3231",
+            "6415",
+            "3443",
+            "3017",
+            "6531",
+            "3661",
+            "3037",
+            "4919",
+            "2327",
+            "2408",
+            "3008",
+            "3533",
+            "5269",
+            "5274",
+            "2376",
+            "2439",
+            "2377",
+            "2357",
+            "2360",
+            "2345",
+        ]
+
+        symbols: list[str] = []
+        source = "fallback_manual"
+        try:
+            ticker = yf.Ticker("00935.TW")
+            tables: list[pd.DataFrame] = []
+            try:
+                top = ticker.funds_data.top_holdings
+                if isinstance(top, pd.DataFrame) and not top.empty:
+                    tables.append(top)
+            except Exception:
+                pass
+            try:
+                eq = ticker.funds_data.equity_holdings
+                if isinstance(eq, pd.DataFrame) and not eq.empty:
+                    tables.append(eq)
+            except Exception:
+                pass
+
+            found: list[str] = []
+            for table in tables:
+                raw_tokens: list[str] = []
+                if "Symbol" in table.columns:
+                    raw_tokens = [str(x) for x in table["Symbol"].tolist()]
+                else:
+                    raw_tokens = [str(x) for x in table.index.tolist()]
+
+                for token in raw_tokens:
+                    m = re.search(r"(\d{4})", token)
+                    if not m:
+                        continue
+                    code = m.group(1)
+                    if code not in found:
+                        found.append(code)
+            if found:
+                symbols = found
+                source = "yfinance_funds_data"
+        except Exception:
+            symbols = []
+
+        if not symbols:
+            symbols = fallback_symbols
+            source = "fallback_manual"
+
+        symbols = symbols[: max(1, int(limit))]
+        self.cache.set(cache_key, (symbols, source), ttl_sec=3600)
+        return symbols, source

@@ -26,6 +26,14 @@ class SyncReport:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class UniverseSnapshot:
+    universe_id: str
+    symbols: list[str]
+    source: str
+    fetched_at: datetime
+
+
 class HistoryStore:
     def __init__(self, db_path: str = "market_history.sqlite3", service: Optional[MarketDataService] = None):
         self.db_path = Path(db_path)
@@ -86,6 +94,14 @@ class HistoryStore:
                     params_json TEXT NOT NULL,
                     cost_json TEXT NOT NULL,
                     result_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS universe_snapshots (
+                    universe_id TEXT PRIMARY KEY,
+                    symbols_json TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
@@ -342,3 +358,60 @@ class HistoryStore:
                 ),
             )
             return int(cur.lastrowid)
+
+    def save_universe_snapshot(
+        self,
+        universe_id: str,
+        symbols: list[str],
+        source: str,
+    ):
+        norm_symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        payload = json.dumps(norm_symbols, ensure_ascii=False)
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO universe_snapshots(universe_id, symbols_json, source, fetched_at, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(universe_id) DO UPDATE SET
+                    symbols_json=excluded.symbols_json,
+                    source=excluded.source,
+                    fetched_at=excluded.fetched_at,
+                    updated_at=excluded.updated_at
+                """,
+                (universe_id, payload, source, now, now),
+            )
+
+    def load_universe_snapshot(self, universe_id: str) -> Optional[UniverseSnapshot]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT universe_id, symbols_json, source, fetched_at
+                FROM universe_snapshots
+                WHERE universe_id=?
+                """,
+                (universe_id,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        raw_symbols = row[1]
+        try:
+            symbols_obj = json.loads(raw_symbols or "[]")
+        except Exception:
+            symbols_obj = []
+        symbols = [str(s).strip().upper() for s in symbols_obj if str(s).strip()]
+
+        fetched = datetime.now(tz=timezone.utc)
+        try:
+            fetched = datetime.fromisoformat(str(row[3]))
+            if fetched.tzinfo is None:
+                fetched = fetched.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+        return UniverseSnapshot(
+            universe_id=str(row[0]),
+            symbols=symbols,
+            source=str(row[2] or "unknown"),
+            fetched_at=fetched,
+        )

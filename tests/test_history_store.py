@@ -88,6 +88,22 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertIsNone(second.error)
             self.assertTrue(second.stale)
 
+    def test_save_and_load_universe_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            store.save_universe_snapshot(
+                universe_id="TW:00935",
+                symbols=["2330", "2454", " 2317 "],
+                source="unit_test",
+            )
+            snap = store.load_universe_snapshot("TW:00935")
+            self.assertIsNotNone(snap)
+            assert snap is not None
+            self.assertEqual(snap.universe_id, "TW:00935")
+            self.assertEqual(snap.symbols, ["2330", "2454", "2317"])
+            self.assertEqual(snap.source, "unit_test")
+
 
 if __name__ == "__main__":
     unittest.main()

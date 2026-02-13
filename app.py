@@ -2038,6 +2038,7 @@ def _render_tutorial_view():
         [
             {"項目": "歷史日K（含 Benchmark）", "位置": "SQLite `market_history.sqlite3`", "用途": "同步一次後可重複用於回測與基準比較"},
             {"項目": "回測紀錄", "位置": "SQLite `backtest_runs` 表", "用途": "保存執行過的回測摘要"},
+            {"項目": "成分股快取", "位置": "SQLite `universe_snapshots` 表", "用途": "例如 00935 成分股抓過後可重複使用"},
             {"項目": "即時資料", "位置": "Session 記憶體", "用途": "即時看盤暫存，重開 app 會重抓"},
         ]
     )
@@ -2127,15 +2128,309 @@ def _render_tutorial_view():
     )
 
 
+def _render_00935_heatmap_view():
+    store = _history_store()
+    service = _market_service()
+
+    st.subheader("00935 成分股熱力圖回測（相對大盤）")
+    st.caption("以 00935 科技成分股逐檔回測，與大盤同區間比較；綠色代表贏過、紅色代表輸給。")
+
+    c1, c2, c3, c4 = st.columns(4)
+    start_date = c1.date_input("起始日期", value=date(date.today().year - 3, 1, 1), key="tw00935_start")
+    end_date = c2.date_input("結束日期", value=date.today(), key="tw00935_end")
+    benchmark_choice = c3.selectbox(
+        "Benchmark",
+        options=["twii", "0050", "006208"],
+        format_func=lambda x: {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(x, x),
+        index=0,
+        key="tw00935_benchmark",
+    )
+    strategy = c4.selectbox("回測策略", options=["buy_hold", "sma_cross"], index=0, key="tw00935_strategy")
+
+    strategy_params: dict[str, float] = {}
+    if strategy == "sma_cross":
+        p1, p2 = st.columns(2)
+        fast = p1.slider("Fast", min_value=3, max_value=60, value=10, key="tw00935_fast")
+        slow = p2.slider("Slow", min_value=10, max_value=180, value=30, key="tw00935_slow")
+        strategy_params = {"fast": float(fast), "slow": float(slow)}
+
+    with st.expander("成本參數（台股預設）", expanded=False):
+        k1, k2, k3 = st.columns(3)
+        fee_rate = k1.number_input("Fee Rate", min_value=0.0, max_value=0.02, value=0.001425, step=0.0001, format="%.6f", key="tw00935_fee")
+        sell_tax = k2.number_input("Sell Tax", min_value=0.0, max_value=0.02, value=0.0030, step=0.0001, format="%.6f", key="tw00935_tax")
+        slippage = k3.number_input("Slippage", min_value=0.0, max_value=0.02, value=0.0005, step=0.0001, format="%.6f", key="tw00935_slip")
+
+    universe_id = "TW:00935"
+    snapshot = store.load_universe_snapshot(universe_id)
+    u1, u2 = st.columns([1, 4])
+    refresh_constituents = u1.button("更新 00935 成分股", use_container_width=True)
+    if refresh_constituents or snapshot is None or not snapshot.symbols:
+        with st.spinner("抓取 00935 成分股中..."):
+            symbols_new, source_new = service.get_00935_constituents(limit=60)
+            if symbols_new:
+                store.save_universe_snapshot(universe_id=universe_id, symbols=symbols_new, source=source_new)
+                snapshot = store.load_universe_snapshot(universe_id)
+    if snapshot and snapshot.symbols:
+        u2.caption(
+            f"已載入 {len(snapshot.symbols)} 檔成分股 | 來源：{snapshot.source} | "
+            f"快取時間：{snapshot.fetched_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    else:
+        st.warning("目前無法取得 00935 成分股，請稍後再試。")
+        return
+
+    symbol_options = snapshot.symbols
+    symbol_key = "tw00935_symbol_pick"
+    current_pick = st.session_state.get(symbol_key, symbol_options)
+    if not isinstance(current_pick, list):
+        current_pick = symbol_options
+    current_pick = [s for s in current_pick if s in symbol_options]
+    if not current_pick:
+        current_pick = symbol_options
+    st.session_state[symbol_key] = current_pick
+    selected_symbols = st.multiselect(
+        "納入比較標的（預設全選）",
+        options=symbol_options,
+        key=symbol_key,
+    )
+
+    if not selected_symbols:
+        st.info("請至少選擇 1 檔成分股。")
+        return
+
+    if end_date < start_date:
+        st.warning("結束日期不可早於起始日期。")
+        return
+
+    start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+    end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+
+    def _benchmark_candidates_tw(choice: str) -> list[str]:
+        mapping = {
+            "twii": ["^TWII"],
+            "0050": ["0050"],
+            "006208": ["006208"],
+        }
+        return mapping.get(choice, ["^TWII"])
+
+    def _load_benchmark_close(choice: str) -> tuple[pd.Series, str]:
+        for benchmark_symbol in _benchmark_candidates_tw(choice):
+            store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            bench_bars = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            bench_bars = _normalize_ohlcv_frame(bench_bars)
+            if bench_bars.empty:
+                continue
+            bench_bars, _ = apply_split_adjustment(
+                bars=bench_bars,
+                symbol=benchmark_symbol,
+                market="TW",
+                use_known=True,
+                use_auto_detect=True,
+            )
+            close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna()
+            if len(close) >= 2:
+                return close, benchmark_symbol
+        return pd.Series(dtype=float), ""
+
+    run_key = (
+        f"tw00935_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:"
+        f"{strategy_params.get('fast', 0)}:{strategy_params.get('slow', 0)}:"
+        f"{fee_rate}:{sell_tax}:{slippage}:{','.join(selected_symbols)}"
+    )
+    payload_key = "tw00935_heatmap_payload"
+
+    if st.button("執行 00935 熱力圖回測", type="primary", use_container_width=True):
+        benchmark_close, benchmark_symbol = _load_benchmark_close(benchmark_choice)
+        if benchmark_close.empty:
+            st.error("Benchmark 取得失敗，請改選其他基準（0050 或 006208）後重試。")
+            return
+
+        progress = st.progress(0.0)
+        rows: list[dict[str, object]] = []
+        cost_model = CostModel(fee_rate=float(fee_rate), sell_tax_rate=float(sell_tax), slippage_rate=float(slippage))
+        min_required = 2 if strategy == "buy_hold" else 40
+
+        for idx, symbol in enumerate(selected_symbols):
+            store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars = _normalize_ohlcv_frame(bars)
+            if len(bars) < min_required:
+                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                continue
+
+            bars, _ = apply_split_adjustment(
+                bars=bars,
+                symbol=symbol,
+                market="TW",
+                use_known=True,
+                use_auto_detect=True,
+            )
+            if len(bars) < min_required:
+                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                continue
+
+            try:
+                bt = run_backtest(
+                    bars=bars,
+                    strategy_name=strategy,
+                    strategy_params=strategy_params,
+                    cost_model=cost_model,
+                    initial_capital=1_000_000.0,
+                )
+            except Exception:
+                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                continue
+
+            strategy_curve = pd.to_numeric(bt.equity_curve["equity"], errors="coerce").dropna()
+            if len(strategy_curve) < 2:
+                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                continue
+
+            comp = pd.concat(
+                [
+                    strategy_curve.rename("strategy"),
+                    benchmark_close.reindex(strategy_curve.index).ffill().rename("benchmark"),
+                ],
+                axis=1,
+            ).dropna()
+            if len(comp) < 2:
+                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                continue
+
+            strategy_ret = float(comp["strategy"].iloc[-1] / comp["strategy"].iloc[0] - 1.0)
+            benchmark_ret = float(comp["benchmark"].iloc[-1] / comp["benchmark"].iloc[0] - 1.0)
+            excess_pct = (strategy_ret - benchmark_ret) * 100.0
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "strategy_return_pct": strategy_ret * 100.0,
+                    "benchmark_return_pct": benchmark_ret * 100.0,
+                    "excess_pct": excess_pct,
+                    "status": "WIN" if excess_pct > 0 else ("LOSE" if excess_pct < 0 else "TIE"),
+                    "bars": int(len(comp)),
+                }
+            )
+            progress.progress((idx + 1) / max(len(selected_symbols), 1))
+
+        progress.empty()
+        st.session_state[payload_key] = {
+            "run_key": run_key,
+            "rows": rows,
+            "benchmark_symbol": benchmark_symbol,
+            "selected_count": len(selected_symbols),
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "strategy": strategy,
+        }
+
+    payload = st.session_state.get(payload_key)
+    if not payload or payload.get("run_key") != run_key:
+        st.info("設定好條件後，按下「執行 00935 熱力圖回測」。")
+        return
+
+    rows_df = pd.DataFrame(payload.get("rows", []))
+    if rows_df.empty:
+        st.warning("沒有可用回測結果（可能資料不足或期間太短）。")
+        return
+
+    rows_df = rows_df.sort_values("excess_pct", ascending=False).reset_index(drop=True)
+    winners = int((rows_df["excess_pct"] > 0).sum())
+    losers = int((rows_df["excess_pct"] < 0).sum())
+    ties = int((rows_df["excess_pct"] == 0).sum())
+    avg_excess = float(rows_df["excess_pct"].mean())
+    max_win = float(rows_df["excess_pct"].max())
+    max_loss = float(rows_df["excess_pct"].min())
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("勝過大盤檔數", f"{winners}")
+    m2.metric("輸給大盤檔數", f"{losers}")
+    m3.metric("持平檔數", f"{ties}")
+    m4.metric("平均超額報酬", f"{avg_excess:+.2f}%")
+    m5.metric("最佳/最差", f"{max_win:+.2f}% / {max_loss:+.2f}%")
+    st.caption(
+        f"Benchmark: {payload.get('benchmark_symbol', 'N/A')} | "
+        f"區間：{payload.get('start_date')} ~ {payload.get('end_date')} | "
+        f"策略：{payload.get('strategy')} | 標的數：{payload.get('selected_count')}"
+    )
+
+    palette = _ui_palette()
+    win_color = _to_rgba(str(palette["fill_buy"]), 0.95)
+    lose_color = _to_rgba(str(palette["fill_sell"]), 0.95)
+    neutral_color = "#E5E7EB"
+    tiles_per_row = 8
+    tile_rows = int(math.ceil(len(rows_df) / tiles_per_row))
+    z = np.full((tile_rows, tiles_per_row), np.nan)
+    txt = np.full((tile_rows, tiles_per_row), "", dtype=object)
+    custom = np.empty((tile_rows, tiles_per_row, 3), dtype=object)
+    custom[:, :, :] = None
+
+    for i, row in rows_df.iterrows():
+        r = i // tiles_per_row
+        c = i % tiles_per_row
+        z[r, c] = float(row["excess_pct"])
+        txt[r, c] = f"{row['symbol']}<br>{row['excess_pct']:+.2f}%"
+        custom[r, c, 0] = float(row["strategy_return_pct"])
+        custom[r, c, 1] = float(row["benchmark_return_pct"])
+        custom[r, c, 2] = str(row["status"])
+
+    max_abs = float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0
+    max_abs = max(max_abs, 0.01)
+    fig_heat = go.Figure(
+        data=[
+            go.Heatmap(
+                z=z,
+                text=txt,
+                texttemplate="%{text}",
+                textfont=dict(size=12),
+                customdata=custom,
+                zmin=-max_abs,
+                zmax=max_abs,
+                colorscale=[[0.0, lose_color], [0.5, neutral_color], [1.0, win_color]],
+                colorbar=dict(title="相對大盤 %"),
+                hovertemplate=(
+                    "策略報酬：%{customdata[0]:+.2f}%<br>"
+                    "大盤報酬：%{customdata[1]:+.2f}%<br>"
+                    "超額：%{z:+.2f}%<br>"
+                    "狀態：%{customdata[2]}"
+                    "<extra></extra>"
+                ),
+            )
+        ]
+    )
+    fig_heat.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig_heat.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, autorange="reversed")
+    fig_heat.update_layout(
+        height=max(280, 90 * tile_rows),
+        margin=dict(l=10, r=10, t=20, b=10),
+        template=str(palette["plot_template"]),
+        paper_bgcolor=str(palette["paper_bg"]),
+        plot_bgcolor=str(palette["plot_bg"]),
+        font=dict(color=str(palette["text_color"])),
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    out_df = rows_df.copy()
+    out_df["strategy_return_pct"] = out_df["strategy_return_pct"].map(lambda v: round(float(v), 2))
+    out_df["benchmark_return_pct"] = out_df["benchmark_return_pct"].map(lambda v: round(float(v), 2))
+    out_df["excess_pct"] = out_df["excess_pct"].map(lambda v: round(float(v), 2))
+    st.dataframe(
+        out_df[["symbol", "strategy_return_pct", "benchmark_return_pct", "excess_pct", "status", "bars"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
     st.title("即時走勢 / 多來源資料 / 回測平台")
-    live_tab, bt_tab, guide_tab = st.tabs(["即時看盤", "回測工作台", "新手教學"])
+    live_tab, bt_tab, heat_tab, guide_tab = st.tabs(["即時看盤", "回測工作台", "00935 熱力圖", "新手教學"])
     with live_tab:
         _render_live_view()
     with bt_tab:
         _render_backtest_view()
+    with heat_tab:
+        _render_00935_heatmap_view()
     with guide_tab:
         _render_tutorial_view()
 
