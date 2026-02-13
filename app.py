@@ -2384,6 +2384,15 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
     end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
 
+    def _show_sync_issues(prefix: str, issues: list[str]):
+        if not issues:
+            return
+        preview = [" ".join(str(item).split()) for item in issues[:3]]
+        preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+        remain = len(issues) - len(preview)
+        remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
+        st.warning(f"{prefix}：{preview_text}{remain_text}")
+
     def _benchmark_candidates_tw(choice: str) -> list[str]:
         mapping = {
             "twii": ["^TWII"],
@@ -2392,9 +2401,12 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         }
         return mapping.get(choice, ["^TWII"])
 
-    def _load_benchmark_close(choice: str) -> tuple[pd.Series, str]:
+    def _load_benchmark_close(choice: str) -> tuple[pd.Series, str, list[str]]:
+        sync_issues: list[str] = []
         for benchmark_symbol in _benchmark_candidates_tw(choice):
-            store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            if report.error:
+                sync_issues.append(f"{benchmark_symbol}: {report.error}")
             bench_bars = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
             bench_bars = _normalize_ohlcv_frame(bench_bars)
             if bench_bars.empty:
@@ -2408,8 +2420,8 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             )
             close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna()
             if len(close) >= 2:
-                return close, benchmark_symbol
-        return pd.Series(dtype=float), ""
+                return close, benchmark_symbol, sync_issues
+        return pd.Series(dtype=float), "", sync_issues
 
     strategy_token = json.dumps(strategy_params, sort_keys=True, ensure_ascii=False)
     run_key = (
@@ -2441,19 +2453,23 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
             f"{fee_rate}:{sell_tax}:{slippage}:{','.join(run_symbols)}"
         )
-        benchmark_close, benchmark_symbol = _load_benchmark_close(benchmark_choice)
+        benchmark_close, benchmark_symbol, benchmark_sync_issues = _load_benchmark_close(benchmark_choice)
+        _show_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
         if benchmark_close.empty:
             st.error("Benchmark 取得失敗，請改選其他基準（0050 或 006208）後重試。")
             return
 
         progress = st.progress(0.0)
         rows: list[dict[str, object]] = []
+        symbol_sync_issues: list[str] = []
         cost_model = CostModel(fee_rate=float(fee_rate), sell_tax_rate=float(sell_tax), slippage_rate=float(slippage))
         min_required = get_strategy_min_bars(strategy)
         name_map = service.get_tw_symbol_names(run_symbols)
 
         for idx, symbol in enumerate(run_symbols):
-            store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            if report.error:
+                symbol_sync_issues.append(f"{symbol}: {report.error}")
             bars = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
             bars = _normalize_ohlcv_frame(bars)
             if len(bars) < min_required:
@@ -2516,6 +2532,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             progress.progress((idx + 1) / max(len(run_symbols), 1))
 
         progress.empty()
+        _show_sync_issues("部分成分股同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
         payload = {
             "run_key": run_key,
             "rows": rows,
@@ -2739,6 +2756,15 @@ def _render_tw_etf_rotation_view():
     start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
     end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
 
+    def _show_sync_issues(prefix: str, issues: list[str]):
+        if not issues:
+            return
+        preview = [" ".join(str(item).split()) for item in issues[:3]]
+        preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+        remain = len(issues) - len(preview)
+        remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
+        st.warning(f"{prefix}：{preview_text}{remain_text}")
+
     def _benchmark_candidates_tw(choice: str) -> list[str]:
         mapping = {
             "twii": ["^TWII", "0050", "006208"],
@@ -2747,9 +2773,12 @@ def _render_tw_etf_rotation_view():
         }
         return mapping.get(choice, ["^TWII", "0050", "006208"])
 
-    def _load_benchmark_bars(choice: str) -> tuple[pd.DataFrame, str]:
+    def _load_benchmark_bars(choice: str) -> tuple[pd.DataFrame, str, list[str]]:
+        sync_issues: list[str] = []
         for benchmark_symbol in _benchmark_candidates_tw(choice):
-            store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            if report.error:
+                sync_issues.append(f"{benchmark_symbol}: {report.error}")
             bench = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
             bench = _normalize_ohlcv_frame(bench)
             if bench.empty:
@@ -2762,8 +2791,8 @@ def _render_tw_etf_rotation_view():
                 use_auto_detect=True,
             )
             if len(bench) >= 60:
-                return bench, benchmark_symbol
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]), ""
+                return bench, benchmark_symbol, sync_issues
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]), "", sync_issues
 
     run_key = (
         f"tw_rotation:{start_date}:{end_date}:{benchmark_choice}:"
@@ -2777,9 +2806,12 @@ def _render_tw_etf_rotation_view():
 
         bars_by_symbol: dict[str, pd.DataFrame] = {}
         skipped_symbols: list[str] = []
+        symbol_sync_issues: list[str] = []
         progress = st.progress(0.0)
         for idx, symbol in enumerate(ROTATION_DEFAULT_UNIVERSE):
-            store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            if report.error:
+                symbol_sync_issues.append(f"{symbol}: {report.error}")
             bars = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
             bars = _normalize_ohlcv_frame(bars)
             if bars.empty:
@@ -2799,12 +2831,14 @@ def _render_tw_etf_rotation_view():
                 bars_by_symbol[symbol] = bars
             progress.progress((idx + 1) / len(ROTATION_DEFAULT_UNIVERSE))
         progress.empty()
+        _show_sync_issues("部分 ETF 同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
 
         if not bars_by_symbol:
             st.error(f"可用資料不足（每檔至少需 {ROTATION_MIN_BARS} 根K），無法執行。")
             return
 
-        benchmark_bars, benchmark_symbol = _load_benchmark_bars(benchmark_choice)
+        benchmark_bars, benchmark_symbol, benchmark_sync_issues = _load_benchmark_bars(benchmark_choice)
+        _show_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
         if benchmark_bars.empty:
             st.error("Benchmark 取得失敗，請改選 0050 或 006208 後重試。")
             return

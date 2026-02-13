@@ -38,6 +38,38 @@ class _GoodProvider:
         )
 
 
+class _OhlcvProvider:
+    def __init__(self, name: str, fail: bool = False):
+        self.name = name
+        self.fail = fail
+        self.last_symbol: str | None = None
+
+    def ohlcv(self, request: ProviderRequest):
+        self.last_symbol = request.symbol
+        if self.fail:
+            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "ohlcv failed")
+        idx = pd.date_range("2024-01-01", periods=3, freq="B", tz="UTC")
+        return OhlcvSnapshot(
+            symbol=request.symbol,
+            market=request.market,
+            interval=request.interval,
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [1.0, 1.0, 1.0],
+                    "high": [1.0, 1.0, 1.0],
+                    "low": [1.0, 1.0, 1.0],
+                    "close": [1.0, 1.0, 1.0],
+                    "volume": [1.0, 1.0, 1.0],
+                },
+                index=idx,
+            ),
+            source=self.name,
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+
+
 class MarketDataServiceTests(unittest.TestCase):
     def test_quote_chain_fallback(self):
         service = MarketDataService()
@@ -66,6 +98,28 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertTrue(quality.degraded)
         self.assertEqual(quality.fallback_depth, 2)
         self.assertEqual(quality.reason, "fallback")
+
+    def test_try_ohlcv_chain_normalizes_tw_symbol_for_yahoo(self):
+        service = MarketDataService()
+        tw_openapi = _OhlcvProvider("tw_openapi", fail=True)
+        yahoo = _OhlcvProvider("yahoo")
+        request = ProviderRequest(symbol="0050", market="TW", interval="1d")
+
+        snap = service._try_ohlcv_chain([tw_openapi, yahoo], request)  # noqa: SLF001
+
+        self.assertEqual(tw_openapi.last_symbol, "0050")
+        self.assertEqual(yahoo.last_symbol, "0050.TW")
+        self.assertEqual(snap.symbol, "0050.TW")
+
+    def test_try_ohlcv_chain_keeps_tw_index_symbol_for_yahoo(self):
+        service = MarketDataService()
+        tw_openapi = _OhlcvProvider("tw_openapi", fail=True)
+        yahoo = _OhlcvProvider("yahoo")
+        request = ProviderRequest(symbol="^TWII", market="TW", interval="1d")
+
+        service._try_ohlcv_chain([tw_openapi, yahoo], request)  # noqa: SLF001
+
+        self.assertEqual(yahoo.last_symbol, "^TWII")
 
     @patch("yfinance.download")
     def test_get_benchmark_series(self, mock_download):

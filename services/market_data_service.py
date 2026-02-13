@@ -77,8 +77,20 @@ class MarketDataService:
     def _try_ohlcv_chain(self, providers, request: ProviderRequest) -> OhlcvSnapshot:
         errors: List[str] = []
         for provider in providers:
+            provider_request = request
+            if request.market == "TW" and getattr(provider, "name", "") == "yahoo":
+                yahoo_symbol = self._normalize_tw_yahoo_symbol(request.symbol)
+                if yahoo_symbol and yahoo_symbol != request.symbol:
+                    provider_request = ProviderRequest(
+                        symbol=yahoo_symbol,
+                        market=request.market,
+                        interval=request.interval,
+                        start=request.start,
+                        end=request.end,
+                        exchange=request.exchange,
+                    )
             try:
-                return provider.ohlcv(request)
+                return provider.ohlcv(provider_request)
             except ProviderError as exc:
                 errors.append(str(exc))
             except Exception as exc:  # pragma: no cover
@@ -88,6 +100,16 @@ class MarketDataService:
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
         return (symbol or "").strip().upper()
+
+    @staticmethod
+    def _normalize_tw_yahoo_symbol(symbol: str) -> str:
+        text = (symbol or "").strip().upper()
+        if not text or "." in text:
+            return text
+        # TW individual stocks/ETFs are typically 4~6 digit codes on Yahoo.
+        if re.fullmatch(r"\d{4,6}", text):
+            return f"{text}.TW"
+        return text
 
     def _try_quote_chain_with_symbols(
         self,

@@ -30,6 +30,7 @@
 - 新增 `scripts/setup_git_hooks.sh`，可一鍵設定 `core.hooksPath=.githooks`。
 
 ### Changed
+- Auto: updated README.md, app.py, services/market_data_service.py, tests/test_market_data_service.py [id:4b701c5149]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, backtest/rotation.py, backtest/types.py, ... (+3) [id:3bd6d76b10]
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 - 主介面分頁調整為：`即時看盤 / 回測工作台 / 00935 熱力圖 / 新手教學`。
@@ -37,11 +38,17 @@
 - 主介面分頁調整為：`即時看盤 / 回測工作台 / ETF輪動 / 00935 熱力圖 / 0050 熱力圖 / 新手教學`。
 - 新手教學中補充「成分股快取」資料儲存位置說明。
 - `00935 熱力圖` 回測結果新增公司名稱欄位（含熱力圖文字與 hover 顯示）。
+- 維護檢查紀錄：完成 `compileall`、`unittest(38)`、六分頁冒煙測試、SQLite 快取一致性檢查與文件對齊檢查。
+
+### Fixed
+- 修正台股日K走 Yahoo fallback 時未正規化代碼問題：4~6 碼代號自動改為 `.TW`（如 `0050 -> 0050.TW`），指數代碼（如 `^TWII`）維持原樣。
+- 熱力圖與 ETF 輪動分頁新增同步錯誤可見提示：若部分標的或 Benchmark 同步失敗，UI 會顯示摘要警示且仍盡量使用本地可用資料。
 
 ### Docs
 - `README.md` 補充 00935 熱力圖分頁與功能說明。
 - `README.md` 補充「LLM 初始化自動化」使用說明。
 - `README.md`、`AGENTS.md`、`PROJECT_CONTEXT.md` 補充「自動更新 CHANGELOG」啟用方式與行為。
+- `README.md` 補上 `universe_snapshots` 資料表，並更新 `app.py` 說明為六分頁主流程。
 
 ## [0.3.0] - 2026-02-13
 

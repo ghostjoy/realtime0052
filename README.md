@@ -65,6 +65,7 @@ git config --get core.hooksPath
   - `daily_bars`
   - `sync_state`
   - `backtest_runs`
+  - `universe_snapshots`
   - `heatmap_runs`
   - `rotation_runs`
 
@@ -188,7 +189,7 @@ uv run python -m unittest discover -s tests -v
 
 ## 專案結構（主要）
 
-- `app.py`：Streamlit UI（即時看盤 + 回測工作台）
+- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / ETF輪動 / 00935 熱力圖 / 0050 熱力圖 / 新手教學）
 - `services/market_data_service.py`：多來源 provider chain 與資料品質封裝
 - `providers/`：各資料來源 adapter
 - `storage/history_store.py`：SQLite schema、增量同步、回測紀錄
