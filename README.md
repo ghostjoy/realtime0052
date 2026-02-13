@@ -18,6 +18,7 @@
 - 專案脈絡（給 LLM/新接手）：`PROJECT_CONTEXT.md`
 - Prompt 範本：`PROMPT_TEMPLATES.md`
 - GitHub 新手說明：`GIT_GITHUB_GUIDE.md`
+- Fugle MCP 協作指南：`FUGLE_MCP_GUIDE.md`
 - 更新紀錄：`CHANGELOG.md`
 
 ## LLM 初始化自動化
@@ -51,10 +52,11 @@ git config --get core.hooksPath
 ### 1) 多來源資料策略
 
 - 美股：`Twelve Data -> Yahoo -> Stooq`（自動降級）
-- 台股即時：`TW MIS -> TW OpenAPI`（自動降級）
-- 台股日K：`TW OpenAPI/TWSE 官方歷史端點`，必要時可用 Yahoo 補
+- 台股即時：`Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`（自動降級）
+- 台股日K：`TW OpenAPI(TWSE) / TPEx OpenAPI(上櫃最新日資料)`，必要時可用 Yahoo 補
 - 每次顯示來源與資料品質（是否延遲、fallback depth、freshness）
 - 即時模式 UI：改為「即時總覽 / 即時走勢 / 側邊分析卡」版面，資訊密度更清楚
+- 台股即時資料可批次落地到 SQLite（`intraday_ticks`），供後續查詢與回放擴充
 - `Theme` 主題切換：可在側邊欄切換 `日光白` / `灰白專業`
 
 ### 2) 自建歷史資料庫（SQLite）
@@ -66,6 +68,7 @@ git config --get core.hooksPath
 - 表：
   - `instruments`
   - `daily_bars`
+  - `intraday_ticks`
   - `sync_state`
   - `backtest_runs`
   - `universe_snapshots`
@@ -99,6 +102,7 @@ git config --get core.hooksPath
 - 可開啟 `顯示成交連線`，用垂直細線對照價格圖與資產圖的成交時刻
 - 分項績效：投組中每一檔標的的獨立績效明細
 - 分割調整（復權）：回測頁可開啟 `分割調整（復權）`，避免像 `0052` 分割後造成歷史曲線與報酬失真
+- 回測頁可開啟 `回測前自動補資料缺口（推薦）`，僅同步缺口標的，降低「天數不足」機率
 
 ### 3.6) 00935 成分股熱力圖回測
 
@@ -176,10 +180,54 @@ export TWELVE_DATA_API_KEY="your_api_key"
 
 未設定時，系統會自動從下一個來源（Yahoo）開始。
 
+若要啟用台股即時主來源 Fugle WebSocket，請設定：
+
+```bash
+export FUGLE_MARKETDATA_API_KEY="your_fugle_key"
+```
+
+若你不想每次 export，也可把 key 放到預設檔案（App 與 MCP 腳本都會自動讀）：
+
+```text
+~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/fuglekey
+```
+
+也可用環境變數改成其他檔案路徑：
+
+```bash
+export FUGLE_MARKETDATA_API_KEY_FILE="/your/path/fuglekey"
+```
+
+可選：若你要改走 MCP/代理 relay，可覆蓋 WS endpoint：
+
+```bash
+export FUGLE_WS_URL="wss://your-relay-or-proxy-endpoint"
+```
+
+若要把 Fugle MCP server 交給 Agent 使用（Claude / 其他 MCP client），可直接用本 repo 腳本作為 command：
+
+```json
+{
+  "mcpServers": {
+    "fugle-marketdata": {
+      "command": "/Users/ztw/codexapp/realtime0052/scripts/run_fugle_mcp_server.sh"
+    }
+  }
+}
+```
+
+更多細節請看：`FUGLE_MCP_GUIDE.md`
+
 若要手動指定 SQLite 路徑（會覆蓋預設 iCloud/本地判斷），可設定：
 
 ```bash
 export REALTIME0052_DB_PATH="/your/path/market_history.sqlite3"
+```
+
+若要調整即時資料（`intraday_ticks`）保留天數（預設 1095 天），可設定：
+
+```bash
+export REALTIME0052_INTRADAY_RETAIN_DAYS="1095"
 ```
 
 ## 執行

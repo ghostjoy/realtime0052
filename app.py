@@ -105,6 +105,61 @@ def _sync_symbols_history(
     return reports, issues
 
 
+def _bars_need_backfill(bars: pd.DataFrame, *, start: datetime, end: datetime) -> bool:
+    if bars is None or bars.empty:
+        return True
+    idx = pd.to_datetime(bars.index, utc=True, errors="coerce")
+    idx = idx.dropna()
+    if idx.empty:
+        return True
+    first_ts = pd.Timestamp(idx.min()).to_pydatetime().replace(tzinfo=timezone.utc)
+    last_ts = pd.Timestamp(idx.max()).to_pydatetime().replace(tzinfo=timezone.utc)
+    return first_ts > start or last_ts < end
+
+
+def _persist_live_tick_buffer(
+    *,
+    store: HistoryStore,
+    symbol: str,
+    market: str,
+    quote,
+    buffer_key: str,
+    flush_key: str,
+    batch_size: int = 24,
+    flush_interval_sec: int = 5,
+):
+    if quote is None or quote.price is None:
+        return
+    ts = pd.Timestamp(quote.ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    row = {
+        "ts": ts.isoformat(),
+        "price": float(quote.price),
+        "cum_volume": float(quote.volume or 0.0),
+        "source": str(getattr(quote, "source", "") or "unknown"),
+    }
+
+    buffer_raw = st.session_state.get(buffer_key, [])
+    buffer = list(buffer_raw) if isinstance(buffer_raw, list) else []
+    if not buffer or any(buffer[-1].get(k) != row.get(k) for k in ("ts", "price", "cum_volume")):
+        buffer.append(row)
+
+    now_ts = datetime.now(tz=timezone.utc).timestamp()
+    last_flush = float(st.session_state.get(flush_key, 0.0) or 0.0)
+    should_flush = bool(buffer) and (len(buffer) >= max(1, int(batch_size)) or now_ts - last_flush >= float(flush_interval_sec))
+    if should_flush:
+        try:
+            store.save_intraday_ticks(symbol=symbol, market=market, ticks=buffer)
+            buffer = []
+            st.session_state[flush_key] = now_ts
+        except Exception as exc:
+            st.warning(f"即時資料寫入 SQLite 失敗（已略過本輪）：{exc}")
+    st.session_state[buffer_key] = buffer
+
+
 DAILY_STRATEGY_OPTIONS = [
     "buy_hold",
     "sma_trend_filter",
@@ -456,8 +511,29 @@ def _inject_ui_styles():
 
 
 def _render_quality_bar(ctx, refresh_sec: int):
+    provider_labels = {
+        "fugle_ws": "Fugle WebSocket",
+        "tw_mis": "TW MIS",
+        "tw_openapi": "TW OpenAPI",
+        "tw_tpex": "TPEx OpenAPI",
+        "twelvedata": "Twelve Data",
+        "yahoo": "Yahoo",
+        "stooq": "Stooq",
+    }
+
+    def _label(name: str) -> str:
+        key = str(name or "").strip().lower()
+        if not key:
+            return "unknown"
+        return provider_labels.get(key, key)
+
     quote = ctx.quote
     quality = ctx.quality
+    source_chain = [str(s or "").strip() for s in list(getattr(ctx, "source_chain", [])) if str(s or "").strip()]
+    chain_text = " -> ".join([_label(s) for s in source_chain]) if source_chain else "—"
+    current_source = _label(str(getattr(quote, "source", "") or "unknown"))
+    st.caption(f"即時來源：{current_source} | 鏈路：{chain_text}")
+
     freshness = "—" if quality.freshness_sec is None else f"{quality.freshness_sec}s"
     st.caption(
         f"資料品質：source={quote.source} | delayed={'yes' if quote.is_delayed else 'no'} | "
@@ -530,6 +606,7 @@ def _render_live_chart(ind: pd.DataFrame):
 
 def _render_live_view():
     service = _market_service()
+    store = _history_store()
 
     with st.sidebar:
         st.subheader("介面")
@@ -569,6 +646,13 @@ def _render_live_view():
         )
         keep_minutes = st.slider("保留即時資料（分鐘）", min_value=30, max_value=360, value=180, step=30)
         use_yahoo = st.checkbox("允許 Yahoo 補K", value=True)
+        use_fugle_ws = False
+        if market == "台股(TWSE)":
+            use_fugle_ws = st.checkbox(
+                "啟用 Fugle WebSocket（需 API Key）",
+                value=True,
+                help="有設定 FUGLE_MARKETDATA_API_KEY，或已放置 key 檔（iCloud 預設路徑）時，台股即時會優先走 Fugle；失敗會自動回退。",
+            )
 
         st.subheader("建議偏好")
         advice_mode = st.selectbox("建議模式", options=["一般(技術面)", "股癌風格(心法/檢核)"], index=1)
@@ -581,7 +665,12 @@ def _render_live_view():
 
     @st.fragment(run_every=run_every)
     def live_fragment():
-        options = LiveOptions(use_yahoo=use_yahoo, keep_minutes=keep_minutes, exchange=exchange)
+        options = LiveOptions(
+            use_yahoo=use_yahoo,
+            keep_minutes=keep_minutes,
+            exchange=exchange,
+            use_fugle_ws=use_fugle_ws,
+        )
         if market == "台股(TWSE)":
             assert stock_id is not None
             tick_key = f"ticks:TW:{stock_id}:{exchange}"
@@ -593,6 +682,16 @@ def _render_live_view():
                 st.error(f"台股資料取得失敗：{exc}")
                 return
             quote = ctx.quote
+            buffer_key = f"intraday_buffer:TW:{stock_id}:{exchange}"
+            flush_key = f"intraday_buffer_flush:TW:{stock_id}:{exchange}"
+            _persist_live_tick_buffer(
+                store=store,
+                symbol=stock_id,
+                market="TW",
+                quote=quote,
+                buffer_key=buffer_key,
+                flush_key=flush_key,
+            )
         else:
             assert us_symbol is not None
             if us_symbol.isdigit():
@@ -710,7 +809,7 @@ def _render_live_view():
 
             if market == "台股(TWSE)":
                 with st.container(border=True):
-                    st.markdown("#### 買賣五檔（TW MIS）")
+                    st.markdown("#### 買賣五檔（即時來源）")
                     bid_prices = quote.extra.get("bid_prices", [])
                     bid_sizes = quote.extra.get("bid_sizes", [])
                     ask_prices = quote.extra.get("ask_prices", [])
@@ -1168,7 +1267,13 @@ def _render_backtest_view():
         value=False,
         help="關閉可先直接使用本地 SQLite；需要時再手動同步。",
     )
+    auto_fill_gaps = st.checkbox(
+        "回測前自動補資料缺口（推薦）",
+        value=True,
+        help="若發現本地資料起訖缺口，會只同步缺口標的；可減少「回測天數不夠」問題。",
+    )
     sync_key = f"synced:{market}:{','.join(symbols)}:{start_date}:{end_date}"
+    gapfill_key = f"gapfill:{market}:{','.join(symbols)}:{start_date}:{end_date}"
     sync_start = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
     sync_end = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
     if auto_sync and not st.session_state.get(sync_key):
@@ -1197,6 +1302,40 @@ def _render_backtest_view():
         if sync_issues:
             st.warning("部分同步失敗，請檢查下方同步結果。")
         st.dataframe(sync_df, use_container_width=True, hide_index=True)
+
+    if auto_fill_gaps and not st.session_state.get(gapfill_key):
+        gap_symbols: list[str] = []
+        for symbol in symbols:
+            bars = store.load_daily_bars(symbol=symbol, market=market, start=sync_start, end=sync_end)
+            if _bars_need_backfill(bars, start=sync_start, end=sync_end):
+                gap_symbols.append(symbol)
+        if gap_symbols:
+            reports, sync_issues = _sync_symbols_history(
+                store,
+                market=market,
+                symbols=gap_symbols,
+                start=sync_start,
+                end=sync_end,
+                parallel=sync_parallel,
+            )
+            sync_rows = []
+            for symbol in gap_symbols:
+                report = reports.get(symbol)
+                sync_rows.append(
+                    {
+                        "symbol": symbol,
+                        "rows": int(getattr(report, "rows_upserted", 0) or 0),
+                        "source": str(getattr(report, "source", "unknown") or "unknown"),
+                        "fallback": int(getattr(report, "fallback_depth", 0) or 0),
+                        "error": str(getattr(report, "error", "") or ""),
+                    }
+                )
+            if sync_issues:
+                st.warning("缺口補齊時有部分同步失敗，請檢查下方結果。")
+            else:
+                st.caption("已自動補齊回測區間資料缺口。")
+            st.dataframe(pd.DataFrame(sync_rows), use_container_width=True, hide_index=True)
+        st.session_state[gapfill_key] = True
 
     b1, b2 = st.columns(2)
     if b1.button("同步歷史資料", use_container_width=True):

@@ -29,8 +29,20 @@
 - 新增 Prompt 範本文件：`PROMPT_TEMPLATES.md`（由初始化腳本建立）。
 - 新增 `pre-commit` hook（`.githooks/pre-commit`）與 `scripts/auto_changelog.py`，可在 commit 前自動補 `CHANGELOG.md`。
 - 新增 `scripts/setup_git_hooks.sh`，可一鍵設定 `core.hooksPath=.githooks`。
+- 新增 Fugle MCP 啟動腳本：`scripts/run_fugle_mcp_server.sh`（支援 `FUGLE_MARKETDATA_API_KEY -> API_KEY` 映射）。
+- 新增 `intraday_ticks`（SQLite）即時資料表與讀寫 API：
+  - `save_intraday_ticks(...)`
+  - `load_intraday_ticks(...)`
+  - 支援 `REALTIME0052_INTRADAY_RETAIN_DAYS`（預設 1095 天）控管保留天數。
+- Fugle API key 讀取新增 key file fallback：
+  - 預設讀取 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/fuglekey`
+  - 可用 `FUGLE_MARKETDATA_API_KEY_FILE` / `FUGLE_API_KEY_FILE` 覆蓋。
+- 回測工作台新增 `回測前自動補資料缺口（推薦）`：
+  - 先檢查本地區間覆蓋度
+  - 僅對缺口標的做增量同步，降低「回測天數不夠」機率。
 
 ### Changed
+- 台股資料鏈路升級：即時改為 `Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`，日K同步新增 `TPEx OpenAPI`（短區間/最新日資料）後再回退 Yahoo。
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py [id:8cdb1d9956]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py [id:2531f53664]
 - Auto: updated README.md, app.py, services/market_data_service.py, tests/test_market_data_service.py [id:4b701c5149]
@@ -50,12 +62,15 @@
 - 回測工作台「App 啟動時自動增量同步」預設改為關閉，並新增平行同步選項。
 - 主介面分頁名稱由 `ETF輪動` 調整為 `ETF 輪動策略`，並同步更新該分頁按鈕/提示文案。
 - `持有最久 ETF` 推薦由前兩名改為前三名（Top3）。
+- `sync_symbol_history(...)` 起始日期邏輯調整：若使用者指定起點早於本地最早資料，會正確回補舊資料；若請求區間已在本地覆蓋範圍內，則維持增量向前同步。
 
 ### Fixed
+- 修正 Fugle WebSocket 連線細節：改用官方 `.../stock/streaming` endpoint、`auth.data.apikey` 欄位，並修正微秒時間戳解析，避免 `year out of range` 導致即時報價失敗。
 - 修正台股日K走 Yahoo fallback 時未正規化代碼問題：4~6 碼代號自動改為 `.TW`（如 `0050 -> 0050.TW`），指數代碼（如 `^TWII`）維持原樣。
 - 熱力圖與 ETF 輪動分頁新增同步錯誤可見提示：若部分標的或 Benchmark 同步失敗，UI 會顯示摘要警示且仍盡量使用本地可用資料。
 
 ### Docs
+- 新增 `FUGLE_MCP_GUIDE.md`：整理 Fugle MCP Server 與 Agent 協作設定步驟與設定範本。
 - `README.md` 補充 00935 熱力圖分頁與功能說明。
 - `README.md` 補充「LLM 初始化自動化」使用說明。
 - `README.md`、`AGENTS.md`、`PROJECT_CONTEXT.md` 補充「自動更新 CHANGELOG」啟用方式與行為。

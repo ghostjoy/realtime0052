@@ -15,7 +15,9 @@ from providers.base import ProviderRequest
 from services.market_data_service import MarketDataService
 
 DB_PATH_ENV_VAR = "REALTIME0052_DB_PATH"
+INTRADAY_RETAIN_DAYS_ENV_VAR = "REALTIME0052_INTRADAY_RETAIN_DAYS"
 DEFAULT_DB_FILENAME = "market_history.sqlite3"
+DEFAULT_INTRADAY_RETAIN_DAYS = 365 * 3
 ICLOUD_DOCS_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
 DEFAULT_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_DB_FILENAME
 
@@ -41,6 +43,21 @@ def _copy_legacy_local_db_if_needed(target_path: Path):
         return
     target_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(local_path, target_path)
+
+
+def resolve_intraday_retain_days(days: Optional[int] = None) -> int:
+    if days is not None:
+        try:
+            return max(1, int(days))
+        except Exception:
+            return DEFAULT_INTRADAY_RETAIN_DAYS
+    raw = str(os.getenv(INTRADAY_RETAIN_DAYS_ENV_VAR, "")).strip()
+    if not raw:
+        return DEFAULT_INTRADAY_RETAIN_DAYS
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return DEFAULT_INTRADAY_RETAIN_DAYS
 
 
 @dataclass(frozen=True)
@@ -86,6 +103,7 @@ class HistoryStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if db_path is None and not str(os.getenv(DB_PATH_ENV_VAR, "")).strip():
             _copy_legacy_local_db_if_needed(self.db_path)
+        self.intraday_retain_days = resolve_intraday_retain_days()
         self.service = service or MarketDataService()
         self._init_db()
 
@@ -122,6 +140,17 @@ class HistoryStore:
                     source TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
                     PRIMARY KEY(instrument_id, date),
+                    FOREIGN KEY(instrument_id) REFERENCES instruments(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS intraday_ticks (
+                    instrument_id INTEGER NOT NULL,
+                    ts_utc TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    cum_volume REAL NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY(instrument_id, ts_utc),
                     FOREIGN KEY(instrument_id) REFERENCES instruments(id)
                 );
 
@@ -172,6 +201,9 @@ class HistoryStore:
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
+                CREATE INDEX IF NOT EXISTS idx_intraday_ticks_instrument_ts
+                    ON intraday_ticks(instrument_id, ts_utc);
+
                 CREATE INDEX IF NOT EXISTS idx_sync_state_updated_at
                     ON sync_state(updated_at);
 
@@ -182,6 +214,13 @@ class HistoryStore:
                     ON rotation_runs(universe_id, created_at DESC);
                 """
             )
+
+    def _load_first_bar_date(self, instrument_id: int) -> Optional[datetime]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT MIN(date) FROM daily_bars WHERE instrument_id=?", (instrument_id,)).fetchone()
+        if not row or not row[0]:
+            return None
+        return datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
 
     @staticmethod
     def _normalize_yahoo_symbol(symbol: str, market: str) -> str:
@@ -252,9 +291,16 @@ class HistoryStore:
         end = end or started_at
         instrument_id = self._get_or_create_instrument(symbol, market)
         last_success = self._load_last_success_date(instrument_id)
-        fetch_start = start or last_success or datetime(end.year - 5, 1, 1, tzinfo=timezone.utc)
-        if last_success:
-            fetch_start = max(fetch_start, last_success + pd.Timedelta(days=1))
+        first_bar_date = self._load_first_bar_date(instrument_id)
+        if start is None:
+            fetch_start = last_success or datetime(end.year - 5, 1, 1, tzinfo=timezone.utc)
+            if last_success:
+                fetch_start = max(fetch_start, last_success + pd.Timedelta(days=1))
+        else:
+            fetch_start = start
+            if last_success and first_bar_date is not None and start >= first_bar_date and start <= last_success:
+                # Requested start is already covered locally: keep incremental forward sync.
+                fetch_start = max(fetch_start, last_success + pd.Timedelta(days=1))
         if fetch_start.date() > end.date():
             return SyncReport(
                 symbol=symbol,
@@ -273,7 +319,7 @@ class HistoryStore:
         providers = (
             [self.service.us_twelve, self.service.yahoo, self.service.us_stooq]
             if market == "US"
-            else [self.service.tw_openapi, self.service.yahoo]
+            else [self.service.tw_openapi, self.service.tw_tpex, self.service.yahoo]
         )
         source = "unknown"
         fallback_depth = 0
@@ -401,6 +447,110 @@ class HistoryStore:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "adj_close", "source"])
         df["date"] = pd.to_datetime(df["date"], utc=True)
         df = df.set_index("date")
+        return df
+
+    def save_intraday_ticks(
+        self,
+        symbol: str,
+        market: str,
+        ticks: list[dict[str, object]],
+        retain_days: Optional[int] = None,
+    ) -> int:
+        if not ticks:
+            return 0
+        instrument_id = self._get_or_create_instrument(symbol, market)
+        normalized: dict[str, tuple[float, float, str]] = {}
+        for row in ticks:
+            ts_value = row.get("ts") or row.get("ts_utc")
+            if ts_value is None:
+                continue
+            ts = pd.Timestamp(ts_value)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+            price_val = pd.to_numeric(row.get("price"), errors="coerce")
+            if pd.isna(price_val):
+                continue
+            cum_val = pd.to_numeric(row.get("cum_volume", 0.0), errors="coerce")
+            source = str(row.get("source", "unknown") or "unknown")
+            normalized[ts.isoformat()] = (float(price_val), 0.0 if pd.isna(cum_val) else float(cum_val), source)
+
+        if not normalized:
+            return 0
+
+        retain = resolve_intraday_retain_days(self.intraday_retain_days if retain_days is None else retain_days)
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        rows = sorted(normalized.items(), key=lambda item: item[0])
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO intraday_ticks(instrument_id, ts_utc, price, cum_volume, source, fetched_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(instrument_id, ts_utc) DO UPDATE SET
+                    price=excluded.price,
+                    cum_volume=excluded.cum_volume,
+                    source=excluded.source,
+                    fetched_at=excluded.fetched_at
+                """,
+                [
+                    (
+                        instrument_id,
+                        ts_utc,
+                        payload[0],
+                        payload[1],
+                        payload[2],
+                        now_iso,
+                    )
+                    for ts_utc, payload in rows
+                ],
+            )
+            cutoff = datetime.now(tz=timezone.utc) - pd.Timedelta(days=retain)
+            conn.execute(
+                "DELETE FROM intraday_ticks WHERE instrument_id=? AND ts_utc<?",
+                (instrument_id, cutoff.isoformat()),
+            )
+        return len(rows)
+
+    def load_intraday_ticks(
+        self,
+        symbol: str,
+        market: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+    ) -> pd.DataFrame:
+        instrument_id = self._get_or_create_instrument(symbol, market)
+        where = ["instrument_id=?"]
+        params: list[object] = [instrument_id]
+        if start is not None:
+            start_ts = pd.Timestamp(start)
+            if start_ts.tzinfo is None:
+                start_ts = start_ts.tz_localize("UTC")
+            else:
+                start_ts = start_ts.tz_convert("UTC")
+            where.append("ts_utc>=?")
+            params.append(start_ts.isoformat())
+        if end is not None:
+            end_ts = pd.Timestamp(end)
+            if end_ts.tzinfo is None:
+                end_ts = end_ts.tz_localize("UTC")
+            else:
+                end_ts = end_ts.tz_convert("UTC")
+            where.append("ts_utc<=?")
+            params.append(end_ts.isoformat())
+
+        sql = f"""
+            SELECT ts_utc, price, cum_volume, source
+            FROM intraday_ticks
+            WHERE {" AND ".join(where)}
+            ORDER BY ts_utc ASC
+        """
+        with self._connect() as conn:
+            df = pd.read_sql_query(sql, conn, params=params)
+        if df.empty:
+            return pd.DataFrame(columns=["price", "cum_volume", "source"])
+        df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
+        df = df.dropna(subset=["ts_utc"]).set_index("ts_utc")
         return df
 
     def save_backtest_run(

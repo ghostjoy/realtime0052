@@ -9,7 +9,15 @@ import pandas as pd
 
 from data_sources import TAIPEI_TZ
 from market_data_types import DataQuality, LiveContext, OhlcvSnapshot, QuoteSnapshot
-from providers import TwMisProvider, TwOpenApiProvider, UsStooqProvider, UsTwelveDataProvider, UsYahooProvider
+from providers import (
+    TwFugleWebSocketProvider,
+    TwMisProvider,
+    TwOpenApiProvider,
+    TwTpexOpenApiProvider,
+    UsStooqProvider,
+    UsTwelveDataProvider,
+    UsYahooProvider,
+)
 from providers.base import ProviderError, ProviderRequest
 
 
@@ -18,6 +26,7 @@ class LiveOptions:
     use_yahoo: bool
     keep_minutes: int
     exchange: str = "tse"
+    use_fugle_ws: bool = True
 
 
 @dataclass
@@ -48,8 +57,10 @@ class MarketDataService:
         self.yahoo = UsYahooProvider()
         self.us_twelve = UsTwelveDataProvider()
         self.us_stooq = UsStooqProvider()
+        self.tw_fugle_ws = TwFugleWebSocketProvider()
         self.tw_mis = TwMisProvider()
         self.tw_openapi = TwOpenApiProvider()
+        self.tw_tpex = TwTpexOpenApiProvider()
         self.cache = _TtlCache()
 
     @staticmethod
@@ -252,14 +263,22 @@ class MarketDataService:
         ticks: pd.DataFrame,
         options: LiveOptions,
     ) -> Tuple[LiveContext, pd.DataFrame]:
+        quote_providers: list[object] = []
+        if options.use_fugle_ws and getattr(self.tw_fugle_ws, "api_key", None):
+            quote_providers.append(self.tw_fugle_ws)
+        quote_providers.extend([self.tw_mis, self.tw_openapi, self.tw_tpex])
+
         quote_req = ProviderRequest(symbol=symbol, market="TW", interval="quote", exchange=options.exchange)
-        quote, chain, reason, depth = self._try_quote_chain([self.tw_mis, self.tw_openapi], quote_req)
+        quote, chain, reason, depth = self._try_quote_chain(quote_providers, quote_req)
 
         if quote.price is not None:
             new_tick = pd.DataFrame(
                 [{"ts": quote.ts, "price": float(quote.price), "cum_volume": float(quote.volume or 0)}]
             )
-            ticks = pd.concat([ticks, new_tick], ignore_index=True)
+            if ticks.empty:
+                ticks = new_tick.copy()
+            else:
+                ticks = pd.concat([ticks, new_tick], ignore_index=True)
             ticks = ticks.drop_duplicates(subset=["ts", "price", "cum_volume"], keep="last")
             cutoff = TwMisProvider.now() - pd.Timedelta(minutes=options.keep_minutes)
             ticks = ticks[ticks["ts"] >= cutoff].copy()
@@ -275,9 +294,14 @@ class MarketDataService:
             except Exception:
                 pass
 
+        if str(options.exchange or "tse").strip().lower() == "otc":
+            daily_providers = [self.tw_tpex, self.tw_openapi]
+        else:
+            daily_providers = [self.tw_openapi, self.tw_tpex]
+
         try:
             daily_req = ProviderRequest(symbol=symbol, market="TW", interval="1d")
-            daily = self.tw_openapi.ohlcv(daily_req).df
+            daily = self._try_ohlcv_chain(daily_providers, daily_req).df
         except Exception:
             if options.use_yahoo:
                 try:

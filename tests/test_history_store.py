@@ -22,6 +22,7 @@ class _FakeService:
         self.yahoo = _Provider("yahoo")
         self.us_stooq = _Provider("stooq")
         self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex = _Provider("tw_tpex")
         self.source = source
         self.fail = fail
 
@@ -49,6 +50,42 @@ class _FakeService:
             df=df,
             source=provider.name,
             is_delayed=provider.name != "twelvedata",
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+
+
+class _CaptureService:
+    def __init__(self):
+        self.us_twelve = _Provider("twelvedata")
+        self.yahoo = _Provider("yahoo")
+        self.us_stooq = _Provider("stooq")
+        self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex = _Provider("tw_tpex")
+        self.last_request: ProviderRequest | None = None
+
+    def _try_ohlcv_chain(self, providers, request: ProviderRequest):
+        self.last_request = request
+        start = request.start or datetime(2024, 1, 1, tzinfo=timezone.utc)
+        dates = pd.date_range(start=start, periods=5, freq="B", tz="UTC")
+        provider = providers[0]
+        df = pd.DataFrame(
+            {
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "volume": 1000.0,
+            },
+            index=dates,
+        )
+        return OhlcvSnapshot(
+            symbol=request.symbol,
+            market=request.market,
+            interval="1d",
+            tz="UTC",
+            df=df,
+            source=provider.name,
+            is_delayed=True,
             fetched_at=datetime.now(tz=timezone.utc),
         )
 
@@ -143,6 +180,45 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(latest.run_key, "run:new")
             self.assertEqual(latest.params.get("top_n"), 3)
             self.assertEqual(latest.payload.get("generated_at"), "2026-01-02T00:00:00+00:00")
+
+    def test_sync_history_backfills_when_start_before_local_first_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            service = _CaptureService()
+            store = HistoryStore(db_path=db_path, service=service)
+            first_start = datetime(2024, 1, 10, tzinfo=timezone.utc)
+            end = datetime(2024, 1, 31, tzinfo=timezone.utc)
+
+            store.sync_symbol_history(symbol="2330", market="TW", start=first_start, end=end)
+            assert service.last_request is not None
+            self.assertEqual(service.last_request.start.date().isoformat(), "2024-01-10")
+
+            backfill_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            store.sync_symbol_history(symbol="2330", market="TW", start=backfill_start, end=end)
+            assert service.last_request is not None
+            self.assertEqual(service.last_request.start.date().isoformat(), "2024-01-01")
+
+    def test_save_and_load_intraday_ticks_with_retention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            now = datetime.now(tz=timezone.utc)
+            old_ts = now - pd.Timedelta(days=5)
+            rows = [
+                {"ts": old_ts.isoformat(), "price": 100.0, "cum_volume": 10.0, "source": "fugle_ws"},
+                {"ts": now.isoformat(), "price": 110.0, "cum_volume": 20.0, "source": "fugle_ws"},
+            ]
+            written = store.save_intraday_ticks("2330", "TW", rows, retain_days=2)
+            self.assertEqual(written, 2)
+            loaded = store.load_intraday_ticks(
+                "2330",
+                "TW",
+                start=now - pd.Timedelta(days=30),
+                end=now + pd.Timedelta(days=1),
+            )
+            self.assertEqual(len(loaded), 1)
+            self.assertAlmostEqual(float(loaded["price"].iloc[0]), 110.0)
+            self.assertEqual(str(loaded["source"].iloc[0]), "fugle_ws")
 
 
 if __name__ == "__main__":

@@ -20,10 +20,11 @@
   - 各分頁渲染函式
 - `services/market_data_service.py`
   - 多來源市場資料邏輯（含 fallback）
+  - 台股即時來源：`Fugle WS -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`
   - Benchmark / 00935 成分股來源整合
 - `storage/history_store.py`
   - SQLite schema 與歷史資料同步
-  - 回測結果與成分股快取持久化
+  - 回測結果、成分股快取與台股即時 tick 持久化
 - `backtest/*`
   - 回測核心邏輯、績效計算、walk-forward
   - `backtest/rotation.py`：ETF 輪動策略回測核心
@@ -41,6 +42,7 @@
 - 預設 DB 路徑：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`（若無 iCloud 則回退 `market_history.sqlite3`；可由 `REALTIME0052_DB_PATH` 覆蓋）
 - `instruments`
 - `daily_bars`
+- `intraday_ticks`（台股即時 tick；保留天數可由 `REALTIME0052_INTRADAY_RETAIN_DAYS` 調整，預設 1095 天）
 - `sync_state`
 - `backtest_runs`
 - `universe_snapshots`（成分股清單快取）
@@ -62,12 +64,15 @@
 - 新增 ETF 輪動分頁（固定 6 檔 ETF，月調倉）
 - 新增 00935 成分股熱力圖分頁
 - 成分股清單改為 SQLite 快取，避免反覆抓取
+- 回測工作台新增「回測前自動補資料缺口」，可針對缺口標的增量回補
 
 ## 7) 常見故障點（已踩過）
 
 - Streamlit `session_state` 在 widget 建立後再寫入同 key 會拋錯
 - 外部來源有時只回 `close` 欄，需先標準化 OHLC
 - 免費資料源會限流，需有 fallback 與快取
+- Fugle WebSocket 需 API key；若未設定會自動退回 TW MIS / OpenAPI
+- 新增 `scripts/run_fugle_mcp_server.sh` 與 `FUGLE_MCP_GUIDE.md`，供 Agent 直接連接 Fugle MCP server
 
 ## 8) 建議維護流程
 

@@ -9,7 +9,7 @@ import pandas as pd
 from market_data_types import OhlcvSnapshot
 from market_data_types import QuoteSnapshot
 from providers.base import ProviderError, ProviderErrorKind, ProviderRequest
-from services.market_data_service import MarketDataService
+from services.market_data_service import LiveOptions, MarketDataService
 
 
 class _BrokenProvider:
@@ -210,6 +210,60 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertEqual(MarketDataService.get_tw_etf_expected_count("0050"), 50)
         self.assertEqual(MarketDataService.get_tw_etf_expected_count("00935"), 50)
         self.assertIsNone(MarketDataService.get_tw_etf_expected_count("9999"))
+
+    def test_get_tw_live_context_prefers_fugle_when_key_exists(self):
+        service = MarketDataService()
+        service.tw_fugle_ws.api_key = "fake-key"
+        service.tw_mis.quote = unittest.mock.MagicMock(side_effect=RuntimeError("should not be called"))
+        service.tw_openapi.quote = unittest.mock.MagicMock(side_effect=RuntimeError("should not be called"))
+        service.tw_tpex.quote = unittest.mock.MagicMock(side_effect=RuntimeError("should not be called"))
+
+        quote = QuoteSnapshot(
+            symbol="2330",
+            market="TW",
+            ts=datetime.now(tz=timezone.utc),
+            price=100.0,
+            prev_close=99.0,
+            open=99.0,
+            high=101.0,
+            low=98.0,
+            volume=1000,
+            source="fugle_ws",
+            is_delayed=False,
+            extra={},
+        )
+        idx = pd.date_range("2024-01-01", periods=3, freq="B", tz="UTC")
+        snap = OhlcvSnapshot(
+            symbol="2330",
+            market="TW",
+            interval="1d",
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [1.0, 1.0, 1.0],
+                    "high": [1.0, 1.0, 1.0],
+                    "low": [1.0, 1.0, 1.0],
+                    "close": [1.0, 1.0, 1.0],
+                    "volume": [1.0, 1.0, 1.0],
+                },
+                index=idx,
+            ),
+            source="tw_openapi",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+        with patch.object(service.tw_fugle_ws, "quote", return_value=quote):
+            with patch.object(service, "_try_ohlcv_chain", return_value=snap):
+                ctx, _ = service.get_tw_live_context(
+                    symbol="2330",
+                    yahoo_symbol="2330.TW",
+                    ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
+                    options=LiveOptions(use_yahoo=False, keep_minutes=60, exchange="tse", use_fugle_ws=True),
+                )
+        self.assertEqual(ctx.quote.source, "fugle_ws")
+        service.tw_mis.quote.assert_not_called()
+        service.tw_openapi.quote.assert_not_called()
+        service.tw_tpex.quote.assert_not_called()
 
 
 if __name__ == "__main__":
