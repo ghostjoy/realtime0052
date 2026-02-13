@@ -3,6 +3,7 @@ from backtest.comparison import build_buy_hold_equity, interval_return
 from backtest.engine import BacktestEngine, CostModel, run_backtest
 from backtest.portfolio import run_portfolio_backtest
 from backtest.start_point import apply_start_to_bars_map, resolve_start_index
+from backtest.strategy_library import get_strategy_min_bars
 from backtest.types import (
     BacktestMetrics,
     BacktestResult,
@@ -11,7 +12,7 @@ from backtest.types import (
     Trade,
     WalkForwardResult,
 )
-from backtest.walkforward import walk_forward_portfolio, walk_forward_single
+from backtest.walkforward import required_walkforward_bars, walk_forward_portfolio, walk_forward_single
 
 __all__ = [
     "BacktestEngine",
@@ -32,4 +33,6 @@ __all__ = [
     "run_portfolio_backtest",
     "walk_forward_single",
     "walk_forward_portfolio",
+    "get_strategy_min_bars",
+    "required_walkforward_bars",
 ]

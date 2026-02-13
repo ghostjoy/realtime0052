@@ -493,13 +493,102 @@ class MarketDataService:
         self.cache.set(cache_key, out, ttl_sec=600)
         return out
 
-    def get_tw_etf_constituents(self, etf_code: str, limit: int = 60) -> tuple[list[str], str]:
+    @staticmethod
+    def _dedupe_4digit_codes(values: list[str]) -> list[str]:
+        out: list[str] = []
+        for value in values:
+            token = str(value or "").strip().upper()
+            if not re.fullmatch(r"\d{4}", token):
+                continue
+            if token not in out:
+                out.append(token)
+        return out
+
+    def _fetch_00935_nomura_constituents(self) -> list[str]:
+        import requests
+
+        url_date = "https://www.nomurafunds.com.tw/API/ETFAPI/api/Fund/GetFundTradeInfoDate"
+        url_trade = "https://www.nomurafunds.com.tw/API/ETFAPI/api/Fund/GetFundTradeInfo"
+        payload_date = {"Type": 0, "Keyword": None, "FundNo": "00935", "Date": None}
+        payload_trade = {"Type": 0, "Keyword": None, "FundNo": "00935", "Date": None}
+        headers = {"Content-Type": "application/json"}
+
+        date_resp = requests.post(url_date, json=payload_date, headers=headers, timeout=12)
+        date_resp.raise_for_status()
+        date_data = date_resp.json() if date_resp.content else {}
+        entries = date_data.get("Entries") if isinstance(date_data, dict) else {}
+        latest_date = ""
+        if isinstance(entries, dict):
+            latest_date = str(entries.get("LatestDate") or "").strip()
+            if not latest_date:
+                all_dates = entries.get("AllDate")
+                if isinstance(all_dates, list) and all_dates:
+                    latest_date = str(all_dates[0]).strip()
+        if not latest_date:
+            return []
+
+        payload_trade["Date"] = latest_date
+        trade_resp = requests.post(url_trade, json=payload_trade, headers=headers, timeout=16)
+        trade_resp.raise_for_status()
+        trade_data = trade_resp.json() if trade_resp.content else {}
+        trade_entries = trade_data.get("Entries") if isinstance(trade_data, dict) else {}
+        stocks = trade_entries.get("Stocks") if isinstance(trade_entries, dict) else None
+        if not isinstance(stocks, list):
+            return []
+
+        codes: list[str] = []
+        for row in stocks:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("CStockCode") or "").strip().upper()
+            codes.append(code)
+        return self._dedupe_4digit_codes(codes)
+
+    def _fetch_0050_yuanta_constituents(self) -> list[str]:
+        import requests
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+        for _ in range(2):
+            html = requests.get("https://www.yuantaetfs.com/tradeInfo/pcf/0050", headers=headers, timeout=20).text
+            start_marker = '元大台灣卓越50證券投資信託基金"'
+            end_marker = '"en",{},"股票實物申贖"'
+            start_idx = html.find(start_marker)
+            end_idx = html.find(end_marker, start_idx if start_idx >= 0 else 0)
+            if start_idx >= 0 and end_idx > start_idx:
+                search_text = html[start_idx:end_idx]
+            else:
+                search_text = html
+
+            pairs = re.findall(r'"(\d{4})","([^"]*[\u4e00-\u9fff][^"]*)","[^"]+"', search_text)
+            codes = [str(code).strip().upper() for code, _ in pairs]
+            deduped = self._dedupe_4digit_codes(codes)
+            if len(deduped) >= 45:
+                return deduped[:50]
+        return []
+
+    @staticmethod
+    def get_tw_etf_expected_count(etf_code: str) -> Optional[int]:
+        mapping = {
+            "0050": 50,
+            "00935": 50,
+        }
+        return mapping.get(str(etf_code or "").strip().upper())
+
+    def get_tw_etf_constituents(self, etf_code: str, limit: Optional[int] = None) -> tuple[list[str], str]:
         import yfinance as yf
 
         code = str(etf_code or "").strip().upper()
         if not code:
             return [], "invalid_symbol"
-        cache_key = f"universe:TW:{code}:{int(limit)}"
+        expected_count = self.get_tw_etf_expected_count(code)
+        limit_token = "all" if limit is None else str(max(1, int(limit)))
+        cache_key = f"universe:TW:{code}:{limit_token}"
         cached = self.cache.get(cache_key)
         if isinstance(cached, tuple) and len(cached) == 2:
             syms, source = cached
@@ -510,119 +599,172 @@ class MarketDataService:
             "00935": [
                 "2330",
                 "2454",
-                "2317",
                 "2308",
-                "2382",
                 "3711",
+                "2345",
+                "2303",
+                "3017",
+                "2327",
+                "3037",
+                "2360",
+                "3231",
+                "2449",
+                "3653",
+                "5274",
+                "2368",
+                "3665",
+                "3661",
                 "3034",
                 "2379",
-                "2301",
-                "6669",
-                "3231",
-                "6415",
+                "6223",
                 "3443",
-                "3017",
-                "6531",
-                "3661",
-                "3037",
-                "4919",
-                "2327",
-                "2408",
-                "3008",
+                "2313",
+                "3293",
+                "6239",
+                "6515",
+                "2356",
                 "3533",
+                "5347",
+                "6442",
+                "4958",
+                "6488",
+                "6510",
+                "3324",
+                "5483",
+                "6285",
                 "5269",
-                "5274",
-                "2376",
-                "2439",
-                "2377",
-                "2357",
-                "2360",
-                "2345",
+                "6531",
+                "1560",
+                "3023",
+                "2492",
+                "2352",
+                "6147",
+                "3131",
+                "4966",
+                "2458",
+                "3374",
+                "6789",
+                "6526",
+                "6548",
+                "6412",
             ],
             "0050": [
-                "2330",
-                "2317",
-                "2454",
+                "1216",
+                "1301",
+                "1303",
+                "2002",
+                "2059",
+                "2207",
+                "2301",
+                "2303",
                 "2308",
+                "2317",
+                "2327",
+                "2330",
+                "2345",
+                "2357",
+                "2360",
+                "2379",
+                "2382",
+                "2383",
+                "2395",
+                "2408",
+                "2412",
+                "2454",
+                "2603",
+                "2615",
+                "2880",
                 "2881",
                 "2882",
-                "2891",
-                "2886",
-                "2884",
-                "2892",
-                "5880",
-                "1303",
-                "1301",
-                "1216",
-                "2002",
-                "2412",
-                "2603",
-                "2609",
-                "6505",
-                "2303",
-                "2301",
-                "2880",
-                "2885",
-                "3045",
-                "3711",
-                "2207",
-                "3034",
                 "2883",
-                "5871",
-                "2327",
+                "2884",
+                "2885",
+                "2886",
+                "2887",
+                "2890",
+                "2891",
+                "2892",
+                "2912",
+                "3008",
+                "3017",
+                "3034",
+                "3045",
+                "3231",
+                "3653",
+                "3661",
+                "3665",
+                "3711",
+                "4904",
+                "5880",
+                "6505",
+                "6669",
+                "6919",
             ],
         }
-        fallback_symbols = fallback_map.get(code, fallback_map["00935"])
+        fallback_symbols = self._dedupe_4digit_codes(fallback_map.get(code, fallback_map["00935"]))
 
         symbols: list[str] = []
         source = "fallback_manual"
+
         try:
-            ticker = yf.Ticker(f"{code}.TW")
-            tables: list[pd.DataFrame] = []
-            try:
-                top = ticker.funds_data.top_holdings
-                if isinstance(top, pd.DataFrame) and not top.empty:
-                    tables.append(top)
-            except Exception:
-                pass
-            try:
-                eq = ticker.funds_data.equity_holdings
-                if isinstance(eq, pd.DataFrame) and not eq.empty:
-                    tables.append(eq)
-            except Exception:
-                pass
-
-            found: list[str] = []
-            for table in tables:
-                raw_tokens: list[str] = []
-                if "Symbol" in table.columns:
-                    raw_tokens = [str(x) for x in table["Symbol"].tolist()]
-                else:
-                    raw_tokens = [str(x) for x in table.index.tolist()]
-
-                for token in raw_tokens:
-                    m = re.search(r"(\d{4})", token)
-                    if not m:
-                        continue
-                    code = m.group(1)
-                    if code not in found:
-                        found.append(code)
-            if found:
-                symbols = found
-                source = "yfinance_funds_data"
+            if code == "00935":
+                symbols = self._fetch_00935_nomura_constituents()
+                if symbols:
+                    source = "nomura_etfapi"
+            elif code == "0050":
+                symbols = self._fetch_0050_yuanta_constituents()
+                if symbols:
+                    source = "yuanta_pcf_html"
         except Exception:
             symbols = []
+
+        if not symbols:
+            try:
+                ticker = yf.Ticker(f"{code}.TW")
+                tables: list[pd.DataFrame] = []
+                try:
+                    top = ticker.funds_data.top_holdings
+                    if isinstance(top, pd.DataFrame) and not top.empty:
+                        tables.append(top)
+                except Exception:
+                    pass
+                try:
+                    eq = ticker.funds_data.equity_holdings
+                    if isinstance(eq, pd.DataFrame) and not eq.empty:
+                        tables.append(eq)
+                except Exception:
+                    pass
+
+                found: list[str] = []
+                for table in tables:
+                    raw_tokens: list[str] = []
+                    if "Symbol" in table.columns:
+                        raw_tokens = [str(x) for x in table["Symbol"].tolist()]
+                    else:
+                        raw_tokens = [str(x) for x in table.index.tolist()]
+                    for token in raw_tokens:
+                        m = re.search(r"(\d{4})", token)
+                        if m:
+                            found.append(m.group(1))
+                symbols = self._dedupe_4digit_codes(found)
+                if expected_count is not None and len(symbols) < max(1, expected_count - 5):
+                    symbols = []
+                if symbols:
+                    source = "yfinance_funds_data"
+            except Exception:
+                symbols = []
 
         if not symbols:
             symbols = fallback_symbols
             source = "fallback_manual"
 
-        symbols = symbols[: max(1, int(limit))]
+        if limit is not None:
+            symbols = symbols[: max(1, int(limit))]
         self.cache.set(cache_key, (symbols, source), ttl_sec=3600)
         return symbols, source
 
-    def get_00935_constituents(self, limit: int = 60) -> tuple[list[str], str]:
+    def get_00935_constituents(self, limit: Optional[int] = None) -> tuple[list[str], str]:
         return self.get_tw_etf_constituents("00935", limit=limit)
 
-    def get_0050_constituents(self, limit: int = 60) -> tuple[list[str], str]:
+    def get_0050_constituents(self, limit: Optional[int] = None) -> tuple[list[str], str]:
         return self.get_tw_etf_constituents("0050", limit=limit)

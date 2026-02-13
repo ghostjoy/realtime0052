@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from typing import Dict, Iterable, Optional
 
 import pandas as pd
 
 from backtest.engine import CostModel, run_backtest
 from backtest.portfolio import portfolio_from_components
+from backtest.strategy_library import get_strategy_min_bars
 from backtest.types import PortfolioWalkForwardResult, WalkForwardResult
 
 
@@ -14,6 +16,28 @@ def strategy_param_grid(strategy_name: str) -> list[Dict[str, float]]:
         fast_values = [5.0, 10.0, 15.0, 20.0]
         slow_values = [20.0, 30.0, 50.0, 80.0, 120.0]
         return [{"fast": f, "slow": s} for f in fast_values for s in slow_values if f < s]
+    if strategy_name == "sma_trend_filter":
+        fast_values = [10.0, 20.0, 30.0]
+        slow_values = [50.0, 80.0, 120.0]
+        trend_values = [120.0, 160.0, 200.0]
+        return [
+            {"fast": f, "slow": s, "trend": t}
+            for f in fast_values
+            for s in slow_values
+            for t in trend_values
+            if f < s < t
+        ]
+    if strategy_name == "donchian_breakout":
+        entry_values = [20.0, 40.0, 55.0, 80.0]
+        exit_values = [10.0, 15.0, 20.0, 30.0]
+        trend_values = [100.0, 120.0, 160.0]
+        return [
+            {"entry_n": e, "exit_n": x, "trend": t}
+            for e in entry_values
+            for x in exit_values
+            for t in trend_values
+            if x < e
+        ]
     if strategy_name == "rsi_reversion":
         buy_values = [20.0, 25.0, 30.0, 35.0]
         sell_values = [50.0, 55.0, 60.0, 65.0, 70.0]
@@ -31,6 +55,15 @@ def _score(result, objective: str) -> float:
     return result.metrics.sharpe
 
 
+def required_walkforward_bars(strategy_name: str, train_ratio: float = 0.7) -> int:
+    ratio = float(train_ratio)
+    ratio = min(max(ratio, 0.4), 0.9)
+    strategy_min = max(2, int(get_strategy_min_bars(strategy_name)))
+    req_train = int(math.ceil(strategy_min / ratio))
+    req_test = int(math.ceil(max(strategy_min - 1, 1) / max(1.0 - ratio, 0.01)))
+    return max(80, req_train, req_test)
+
+
 def walk_forward_single(
     bars: pd.DataFrame,
     strategy_name: str,
@@ -40,15 +73,22 @@ def walk_forward_single(
     initial_capital: float = 1_000_000.0,
     custom_grid: Optional[Iterable[Dict[str, float]]] = None,
 ) -> WalkForwardResult:
-    if len(bars) < 80:
-        raise ValueError("not enough bars for walk-forward (need >= 80)")
     if train_ratio <= 0.4 or train_ratio >= 0.9:
         raise ValueError("train_ratio must be between 0.4 and 0.9")
+    required_bars = required_walkforward_bars(strategy_name, train_ratio)
+    if len(bars) < required_bars:
+        raise ValueError(f"not enough bars for walk-forward ({strategy_name} need >= {required_bars})")
 
     frame = bars.sort_index().dropna(subset=["open", "high", "low", "close"], how="any")
     split_idx = int(len(frame) * train_ratio)
+    strategy_min = max(2, int(get_strategy_min_bars(strategy_name)))
     if split_idx < 40 or len(frame) - split_idx < 30:
         raise ValueError("invalid train/test split for the available sample")
+    if split_idx < strategy_min or (len(frame) - split_idx + 1) < strategy_min:
+        raise ValueError(
+            "invalid train/test split for strategy minimum sample "
+            f"(train >= {strategy_min}, test >= {strategy_min})"
+        )
 
     train = frame.iloc[:split_idx]
     test = frame.iloc[split_idx - 1 :]

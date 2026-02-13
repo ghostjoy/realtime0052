@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -18,6 +19,8 @@ from backtest import (
     interval_return,
     run_backtest,
     run_portfolio_backtest,
+    get_strategy_min_bars,
+    required_walkforward_bars,
     walk_forward_portfolio,
     walk_forward_single,
 )
@@ -41,6 +44,41 @@ def _market_service() -> MarketDataService:
 @st.cache_resource
 def _history_store() -> HistoryStore:
     return HistoryStore(service=_market_service())
+
+
+DAILY_STRATEGY_OPTIONS = [
+    "buy_hold",
+    "sma_trend_filter",
+    "donchian_breakout",
+    "sma_cross",
+    "ema_cross",
+    "rsi_reversion",
+    "macd_trend",
+]
+
+STRATEGY_LABELS = {
+    "buy_hold": "buy_hold（買進持有）",
+    "sma_trend_filter": "sma_trend_filter（日K 趨勢濾網）",
+    "donchian_breakout": "donchian_breakout（日K 通道突破）",
+    "sma_cross": "sma_cross（短中期均線交叉）",
+    "ema_cross": "ema_cross（EMA 交叉）",
+    "rsi_reversion": "rsi_reversion（RSI 反轉）",
+    "macd_trend": "macd_trend（MACD 趨勢）",
+}
+
+STRATEGY_DESC = {
+    "buy_hold": "不做擇時，直接持有到區間結束，適合當基準線。",
+    "sma_trend_filter": "以 Fast/Slow + 長期趨勢均線過濾，降低日K短期雜訊。",
+    "donchian_breakout": "突破近 N 日高點進場、跌破近 M 日低點出場，偏趨勢追蹤。",
+    "sma_cross": "短中期 SMA 交叉，反應較快但也較容易來回洗。",
+    "ema_cross": "EMA 交叉，對近期價格更敏感。",
+    "rsi_reversion": "RSI 低檔買、高檔賣，偏均值回歸。",
+    "macd_trend": "MACD 快慢線方向判斷趨勢。",
+}
+
+
+def _strategy_label(name: str) -> str:
+    return STRATEGY_LABELS.get(str(name), str(name))
 
 
 def _format_price(v: Optional[float]) -> str:
@@ -760,7 +798,12 @@ def _render_backtest_view():
         value=default_symbol if mode == "單一標的" else ("0052,2330" if market == "TW" else "AAPL,MSFT,TSLA"),
         key="bt_symbol",
     ).strip().upper()
-    strategy = c4.selectbox("策略", ["buy_hold", "sma_cross", "ema_cross", "rsi_reversion", "macd_trend"], index=1)
+    strategy = c4.selectbox(
+        "策略",
+        options=DAILY_STRATEGY_OPTIONS,
+        index=1,
+        format_func=_strategy_label,
+    )
     symbols = _parse_symbols(symbol_text)
     if mode == "單一標的":
         symbols = symbols[:1]
@@ -805,23 +848,71 @@ def _render_backtest_view():
     invest_k_key = "bt_invest_start_k"
 
     st.markdown("#### 策略參數")
-    param1, param2, _ = st.columns(3)
+    st.caption(f"目前策略：{_strategy_label(strategy)} | {STRATEGY_DESC.get(strategy, '')}")
+    param1, param2, param3 = st.columns(3)
     if strategy in {"sma_cross", "ema_cross"}:
         fast = param1.slider(
             "Fast",
             min_value=3,
             max_value=80,
-            value=10 if strategy == "sma_cross" else 12,
+            value=20 if strategy == "sma_cross" else 12,
             help="短週期均線。數字越小越敏感，訊號會更快但雜訊也可能變多。",
         )
         slow = param2.slider(
             "Slow",
             min_value=10,
             max_value=240,
-            value=30 if strategy == "sma_cross" else 26,
+            value=60 if strategy == "sma_cross" else 26,
             help="長週期均線。通常要大於 Fast，用來過濾趨勢方向。",
         )
         strategy_params = {"fast": float(fast), "slow": float(slow)}
+    elif strategy == "sma_trend_filter":
+        fast = param1.slider(
+            "Fast",
+            min_value=5,
+            max_value=80,
+            value=20,
+            help="短期均線（反應速度）。",
+        )
+        slow = param2.slider(
+            "Slow",
+            min_value=20,
+            max_value=240,
+            value=60,
+            help="中期均線（趨勢確認）。",
+        )
+        trend = param3.slider(
+            "Trend Filter",
+            min_value=60,
+            max_value=300,
+            value=120,
+            help="長期濾網均線；收盤要在其上方才允許持有。",
+        )
+        strategy_params = {"fast": float(fast), "slow": float(slow), "trend": float(trend)}
+    elif strategy == "donchian_breakout":
+        entry_n = param1.slider(
+            "Breakout Lookback",
+            min_value=20,
+            max_value=120,
+            value=55,
+            help="突破判定視窗（N日新高）。",
+        )
+        exit_max = max(10, int(entry_n) - 1)
+        exit_n = param2.slider(
+            "Exit Lookback",
+            min_value=5,
+            max_value=exit_max,
+            value=min(20, exit_max),
+            help="出場判定視窗（M日新低）；通常 M < N。",
+        )
+        trend = param3.slider(
+            "Trend Filter",
+            min_value=60,
+            max_value=300,
+            value=120,
+            help="長期均線濾網，避免逆大方向追突破。",
+        )
+        strategy_params = {"entry_n": float(entry_n), "exit_n": float(exit_n), "trend": float(trend)}
     elif strategy == "rsi_reversion":
         buy_below = param1.slider(
             "RSI Buy Below",
@@ -971,14 +1062,19 @@ def _render_backtest_view():
                     "- `自動套用市場成本參數`：切換台/美股或標的時，自動帶入該市場預設手續費、交易稅、滑價。",
                     "- `Walk-Forward`：先在訓練區（Train）找最佳參數，再到測試區（Test）驗證穩健性。",
                     "- `Train 比例`：決定資料切分比例；例如 `0.70` = 前 70% 訓練、後 30% 測試。",
+                    "- Walk-Forward 所需最少K數會依策略自動提高（長週期策略通常需要更多資料）。",
                     "- `參數挑選目標`（Walk-Forward）：",
                     "  - `sharpe`：風險調整後報酬（越高越好）。",
                     "  - `cagr`：年化報酬率（越高越好）。",
                     "  - `total_return`：區間總報酬（越高越好）。",
                     "  - `mdd`：最大回撤（越小越好，系統會挑回撤較小的參數）。",
                     "- `Fast/Slow`：均線短週期/長週期參數（通常 `Fast < Slow`）。",
+                    "- `Trend Filter`：長期趨勢濾網（如 120 日均線），可降低日K雜訊。",
+                    "- `Breakout Lookback / Exit Lookback`：突破/出場視窗（通常 Exit < Breakout）。",
                     "- `RSI Buy Below / Sell Above`：RSI 的進出場門檻值。",
                     "- `buy_hold`：買進後持有到回測結束，適合快速檢查「近期投入」表現。",
+                    "- `sma_trend_filter`：均線交叉 + 長期濾網，偏中期日K趨勢。",
+                    "- `donchian_breakout`：日K通道突破追蹤，適合波段趨勢市場。",
                     "- `實際投入起點`：決定本金從哪個時間點開始參與回測；",
                     "  `回放位置`只是看圖播放進度，不會改變回測結果。",
                     "- `買賣點顯示`可切換：",
@@ -1094,15 +1190,26 @@ def _render_backtest_view():
     if not invest_df.empty:
         st.markdown("**投入起點檢查**")
         st.dataframe(invest_df, use_container_width=True, hide_index=True)
-    min_required_bars = 80 if enable_wf else (2 if strategy == "buy_hold" else 40)
+    base_min_bars = get_strategy_min_bars(strategy)
+    min_required_bars = (
+        required_walkforward_bars(strategy_name=strategy, train_ratio=float(train_ratio))
+        if enable_wf
+        else base_min_bars
+    )
     bars_by_symbol = {sym: bars for sym, bars in bars_by_symbol.items() if len(bars) >= min_required_bars}
     if not bars_by_symbol:
         if enable_wf:
-            st.warning("投入起點後可用資料太少（Walk-Forward 至少需要 80 根K），請調整起點或日期區間。")
+            st.warning(
+                f"投入起點後可用資料太少（{strategy} + Walk-Forward 至少需要 {min_required_bars} 根K），"
+                "請調整起點或日期區間。"
+            )
         elif strategy == "buy_hold":
             st.warning("投入起點後可用資料太少（buy_hold 至少需要 2 根K），請調整起點或日期區間。")
         else:
-            st.warning("投入起點後可用資料太少（策略回測至少需要 40 根K）。若只想看近期投入，可改用 `buy_hold`。")
+            st.warning(
+                f"投入起點後可用資料太少（{strategy} 至少需要 {min_required_bars} 根K）。"
+                "若只想看近期投入，可改用 `buy_hold`。"
+            )
         return
 
     run_key = (
@@ -2049,7 +2156,7 @@ def _render_tutorial_view():
         [
             {"步驟": "A. 選回測區間", "說明": "決定要抓哪些歷史資料（例如 2021-01-01 ~ 今天）。"},
             {"步驟": "B. 設定實際投入起點", "說明": "本金從哪一天（或第幾根K）開始投入，這會改變結果。"},
-            {"步驟": "C. 選策略與參數", "說明": "buy_hold / 均線 / RSI / MACD。"},
+            {"步驟": "C. 選策略與參數", "說明": "buy_hold / 日K趨勢濾網 / 通道突破 / 均線 / RSI / MACD。"},
             {"步驟": "D. 設成本", "說明": "手續費、稅、滑價（都會影響績效）。"},
             {"步驟": "E. 執行回測", "說明": "產出績效、交易明細、買進持有比較。"},
             {"步驟": "F. 回放看圖", "說明": "只是在播放結果，不會改變回測數字。"},
@@ -2062,7 +2169,8 @@ def _render_tutorial_view():
         [
             {"模式": "buy_hold", "最少K數": "2", "原因": "至少要有起點與終點，才能算報酬率。"},
             {"模式": "一般策略（SMA/EMA/RSI/MACD）", "最少K數": "40", "原因": "需要足夠樣本讓指標與訊號有意義。"},
-            {"模式": "Walk-Forward", "最少K數": "80", "原因": "要切 Train/Test，太短會失真。"},
+            {"模式": "日K趨勢策略（sma_trend_filter / donchian_breakout）", "最少K數": "120", "原因": "需要長期視窗（趨勢濾網/突破區間）。"},
+            {"模式": "Walk-Forward", "最少K數": "至少 80（長視窗策略會更高）", "原因": "Train/Test 兩段都要足夠長，系統會依策略自動提高門檻。"},
         ]
     )
     st.dataframe(threshold_df, use_container_width=True, hide_index=True)
@@ -2093,6 +2201,9 @@ def _render_tutorial_view():
         [
             {"參數": "Fast", "白話意思": "短天期均線", "單位/格式": "天數（整數）", "新手建議": "先用 10~20"},
             {"參數": "Slow", "白話意思": "長天期均線", "單位/格式": "天數（整數）", "新手建議": "先用 30~120，且大於 Fast"},
+            {"參數": "Trend Filter", "白話意思": "長期趨勢濾網均線", "單位/格式": "天數（整數）", "新手建議": "先用 120"},
+            {"參數": "Breakout Lookback", "白話意思": "突破進場看的回朔天數", "單位/格式": "天數（整數）", "新手建議": "先用 55"},
+            {"參數": "Exit Lookback", "白話意思": "出場看的回朔天數", "單位/格式": "天數（整數）", "新手建議": "先用 20，且小於 Breakout"},
             {"參數": "RSI Buy Below", "白話意思": "RSI 低於此值才考慮買入", "單位/格式": "0~100 指標值", "新手建議": "先用 30"},
             {"參數": "RSI Sell Above", "白話意思": "RSI 高於此值才考慮賣出", "單位/格式": "0~100 指標值", "新手建議": "先用 55~65"},
             {"參數": "Fee Rate", "白話意思": "券商手續費比例", "單位/格式": "小數比例", "新手建議": "台股常見 0.001425"},
@@ -2121,7 +2232,7 @@ def _render_tutorial_view():
         "\n".join(
             [
                 "1. 先用 `buy_hold` 熟悉投入起點與區間報酬。",
-                "2. 確認成本參數（手續費/稅/滑價）後，再換 `sma_cross`。",
+                "2. 確認成本參數（手續費/稅/滑價）後，先測 `sma_trend_filter` 或 `donchian_breakout`。",
                 "3. 最後再開 Walk-Forward 比較參數穩健性。",
             ]
         )
@@ -2147,7 +2258,14 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         index=0,
         key=f"{page_key}_benchmark",
     )
-    strategy = c4.selectbox("回測策略", options=["buy_hold", "sma_cross"], index=0, key=f"{page_key}_strategy")
+    heatmap_strategy_options = ["buy_hold", "sma_trend_filter", "donchian_breakout", "sma_cross"]
+    strategy = c4.selectbox(
+        "回測策略",
+        options=heatmap_strategy_options,
+        index=1,
+        key=f"{page_key}_strategy",
+        format_func=_strategy_label,
+    )
 
     strategy_params: dict[str, float] = {}
     if strategy == "sma_cross":
@@ -2155,6 +2273,25 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         fast = p1.slider("Fast", min_value=3, max_value=60, value=10, key=f"{page_key}_fast")
         slow = p2.slider("Slow", min_value=10, max_value=180, value=30, key=f"{page_key}_slow")
         strategy_params = {"fast": float(fast), "slow": float(slow)}
+    elif strategy == "sma_trend_filter":
+        p1, p2, p3 = st.columns(3)
+        fast = p1.slider("Fast", min_value=5, max_value=80, value=20, key=f"{page_key}_fast")
+        slow = p2.slider("Slow", min_value=20, max_value=220, value=60, key=f"{page_key}_slow")
+        trend = p3.slider("Trend Filter", min_value=60, max_value=300, value=120, key=f"{page_key}_trend")
+        strategy_params = {"fast": float(fast), "slow": float(slow), "trend": float(trend)}
+    elif strategy == "donchian_breakout":
+        p1, p2, p3 = st.columns(3)
+        entry_n = p1.slider("Breakout Lookback", min_value=20, max_value=120, value=55, key=f"{page_key}_entry")
+        exit_max = max(10, int(entry_n) - 1)
+        exit_n = p2.slider(
+            "Exit Lookback",
+            min_value=5,
+            max_value=exit_max,
+            value=min(20, exit_max),
+            key=f"{page_key}_exit",
+        )
+        trend = p3.slider("Trend Filter", min_value=60, max_value=300, value=120, key=f"{page_key}_trend")
+        strategy_params = {"entry_n": float(entry_n), "exit_n": float(exit_n), "trend": float(trend)}
 
     with st.expander("成本參數（台股預設）", expanded=False):
         k1, k2, k3 = st.columns(3)
@@ -2187,22 +2324,36 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         )
 
     universe_id = f"TW:{etf_text}"
+    payload_key = f"{page_key}_heatmap_payload"
+    cached_run = store.load_latest_heatmap_run(universe_id)
+    if payload_key not in st.session_state and cached_run and isinstance(cached_run.payload, dict):
+        initial_payload = dict(cached_run.payload)
+        initial_payload.setdefault("generated_at", cached_run.created_at.isoformat())
+        st.session_state[payload_key] = initial_payload
+
     snapshot = store.load_universe_snapshot(universe_id)
     u1, u2 = st.columns([1, 4])
     refresh_constituents = u1.button(f"更新 {etf_text} 成分股", use_container_width=True)
     if refresh_constituents or snapshot is None or not snapshot.symbols:
         with st.spinner(f"抓取 {etf_text} 成分股中..."):
-            symbols_new, source_new = service.get_tw_etf_constituents(etf_text, limit=60)
+            symbols_new, source_new = service.get_tw_etf_constituents(etf_text, limit=None)
             if symbols_new:
                 store.save_universe_snapshot(universe_id=universe_id, symbols=symbols_new, source=source_new)
                 snapshot = store.load_universe_snapshot(universe_id)
     if snapshot and snapshot.symbols:
+        expected_count = service.get_tw_etf_expected_count(etf_text)
+        if expected_count is None:
+            count_text = f"{len(snapshot.symbols)}"
+            completeness = "無預設檔數"
+        else:
+            count_text = f"{len(snapshot.symbols)} / {expected_count}"
+            completeness = "完整" if len(snapshot.symbols) >= expected_count else "可能不完整"
         u2.caption(
-            f"已載入 {len(snapshot.symbols)} 檔成分股 | 來源：{snapshot.source} | "
+            f"已載入成分股：{count_text}（{completeness}） | 來源：{snapshot.source} | "
             f"快取時間：{snapshot.fetched_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
         )
     else:
-        st.warning("目前無法取得 00935 成分股，請稍後再試。")
+        st.warning(f"目前無法取得 {etf_text} 成分股，請稍後再試。")
         return
 
     symbol_options = snapshot.symbols
@@ -2221,15 +2372,14 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     )
 
     if not selected_symbols:
-        st.info("請至少選擇 1 檔成分股。")
-        return
+        st.info("目前未選取標的。你仍可先看上次結果，或選取後按下執行。")
 
-    if end_date < start_date:
+    date_is_valid = end_date >= start_date
+    if not date_is_valid:
         st.warning("結束日期不可早於起始日期。")
-        return
 
-    start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-    end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+    start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
+    end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
 
     def _benchmark_candidates_tw(choice: str) -> list[str]:
         mapping = {
@@ -2258,14 +2408,36 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                 return close, benchmark_symbol
         return pd.Series(dtype=float), ""
 
+    strategy_token = json.dumps(strategy_params, sort_keys=True, ensure_ascii=False)
     run_key = (
-        f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:"
-        f"{strategy_params.get('fast', 0)}:{strategy_params.get('slow', 0)}:"
+        f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
         f"{fee_rate}:{sell_tax}:{slippage}:{','.join(selected_symbols)}"
     )
-    payload_key = f"{page_key}_heatmap_payload"
-
     if st.button(f"執行 {etf_text} 熱力圖回測", type="primary", use_container_width=True):
+        if not date_is_valid:
+            st.error("日期區間無效，請先修正起訖日期。")
+            return
+        if not selected_symbols:
+            st.error("請至少選擇 1 檔成分股。")
+            return
+
+        run_symbols = list(selected_symbols)
+        with st.spinner("同步最新成分股中..."):
+            symbols_latest, source_latest = service.get_tw_etf_constituents(etf_text, limit=None)
+            if symbols_latest:
+                store.save_universe_snapshot(universe_id=universe_id, symbols=symbols_latest, source=source_latest)
+                snapshot = store.load_universe_snapshot(universe_id)
+                if set(selected_symbols) == set(symbol_options):
+                    run_symbols = symbols_latest
+                else:
+                    run_symbols = [s for s in selected_symbols if s in symbols_latest]
+                    if not run_symbols:
+                        run_symbols = symbols_latest
+
+        run_key = (
+            f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
+            f"{fee_rate}:{sell_tax}:{slippage}:{','.join(run_symbols)}"
+        )
         benchmark_close, benchmark_symbol = _load_benchmark_close(benchmark_choice)
         if benchmark_close.empty:
             st.error("Benchmark 取得失敗，請改選其他基準（0050 或 006208）後重試。")
@@ -2274,15 +2446,15 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         progress = st.progress(0.0)
         rows: list[dict[str, object]] = []
         cost_model = CostModel(fee_rate=float(fee_rate), sell_tax_rate=float(sell_tax), slippage_rate=float(slippage))
-        min_required = 2 if strategy == "buy_hold" else 40
-        name_map = service.get_tw_symbol_names(selected_symbols)
+        min_required = get_strategy_min_bars(strategy)
+        name_map = service.get_tw_symbol_names(run_symbols)
 
-        for idx, symbol in enumerate(selected_symbols):
+        for idx, symbol in enumerate(run_symbols):
             store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
             bars = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
             bars = _normalize_ohlcv_frame(bars)
             if len(bars) < min_required:
-                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                progress.progress((idx + 1) / max(len(run_symbols), 1))
                 continue
 
             bars, _ = apply_split_adjustment(
@@ -2293,7 +2465,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                 use_auto_detect=True,
             )
             if len(bars) < min_required:
-                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                progress.progress((idx + 1) / max(len(run_symbols), 1))
                 continue
 
             try:
@@ -2305,12 +2477,12 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                     initial_capital=1_000_000.0,
                 )
             except Exception:
-                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                progress.progress((idx + 1) / max(len(run_symbols), 1))
                 continue
 
             strategy_curve = pd.to_numeric(bt.equity_curve["equity"], errors="coerce").dropna()
             if len(strategy_curve) < 2:
-                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                progress.progress((idx + 1) / max(len(run_symbols), 1))
                 continue
 
             comp = pd.concat(
@@ -2321,7 +2493,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                 axis=1,
             ).dropna()
             if len(comp) < 2:
-                progress.progress((idx + 1) / max(len(selected_symbols), 1))
+                progress.progress((idx + 1) / max(len(run_symbols), 1))
                 continue
 
             strategy_ret = float(comp["strategy"].iloc[-1] / comp["strategy"].iloc[0] - 1.0)
@@ -2338,23 +2510,30 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                     "bars": int(len(comp)),
                 }
             )
-            progress.progress((idx + 1) / max(len(selected_symbols), 1))
+            progress.progress((idx + 1) / max(len(run_symbols), 1))
 
         progress.empty()
-        st.session_state[payload_key] = {
+        payload = {
             "run_key": run_key,
             "rows": rows,
             "benchmark_symbol": benchmark_symbol,
-            "selected_count": len(selected_symbols),
+            "selected_count": len(run_symbols),
+            "universe_count": len(snapshot.symbols) if snapshot else len(run_symbols),
             "start_date": str(start_date),
             "end_date": str(end_date),
             "strategy": strategy,
+            "strategy_label": _strategy_label(strategy),
+            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         }
+        st.session_state[payload_key] = payload
+        store.save_heatmap_run(universe_id=universe_id, payload=payload)
 
     payload = st.session_state.get(payload_key)
-    if not payload or payload.get("run_key") != run_key:
+    if not payload:
         st.info(f"設定好條件後，按下「執行 {etf_text} 熱力圖回測」。")
         return
+    if payload.get("run_key") != run_key:
+        st.caption("目前顯示的是上一次執行結果；若要套用目前設定，請重新按下執行。")
 
     rows_df = pd.DataFrame(payload.get("rows", []))
     if rows_df.empty:
@@ -2379,10 +2558,21 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     m3.metric("持平檔數", f"{ties}")
     m4.metric("平均超額報酬", f"{avg_excess:+.2f}%")
     m5.metric("最佳/最差", f"{max_win:+.2f}% / {max_loss:+.2f}%")
+    generated_at_text = str(payload.get("generated_at", "")).strip()
+    if generated_at_text:
+        try:
+            generated_at = datetime.fromisoformat(generated_at_text)
+            if generated_at.tzinfo is None:
+                generated_at = generated_at.replace(tzinfo=timezone.utc)
+            generated_at_text = generated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
     st.caption(
+        f"上次執行：{generated_at_text or 'N/A'} | "
         f"Benchmark: {payload.get('benchmark_symbol', 'N/A')} | "
         f"區間：{payload.get('start_date')} ~ {payload.get('end_date')} | "
-        f"策略：{payload.get('strategy')} | 標的數：{payload.get('selected_count')}"
+        f"策略：{payload.get('strategy_label', payload.get('strategy'))} | "
+        f"回測標的數：{payload.get('selected_count')} | 全成分股數：{payload.get('universe_count', 'N/A')}"
     )
 
     palette = _ui_palette()

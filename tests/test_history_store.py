@@ -104,6 +104,20 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(snap.symbols, ["2330", "2454", "2317"])
             self.assertEqual(snap.source, "unit_test")
 
+    def test_save_and_load_latest_heatmap_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            payload_old = {"rows": [{"symbol": "2330", "excess_pct": 1.2}], "generated_at": "2026-01-01T00:00:00+00:00"}
+            payload_new = {"rows": [{"symbol": "2454", "excess_pct": 2.3}], "generated_at": "2026-01-02T00:00:00+00:00"}
+            store.save_heatmap_run(universe_id="TW:00935", payload=payload_old)
+            store.save_heatmap_run(universe_id="TW:00935", payload=payload_new)
+            latest = store.load_latest_heatmap_run("TW:00935")
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.universe_id, "TW:00935")
+            self.assertEqual(latest.payload.get("generated_at"), "2026-01-02T00:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

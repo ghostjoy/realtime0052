@@ -34,6 +34,13 @@ class UniverseSnapshot:
     fetched_at: datetime
 
 
+@dataclass(frozen=True)
+class HeatmapRun:
+    universe_id: str
+    payload: Dict[str, object]
+    created_at: datetime
+
+
 class HistoryStore:
     def __init__(self, db_path: str = "market_history.sqlite3", service: Optional[MarketDataService] = None):
         self.db_path = Path(db_path)
@@ -104,11 +111,21 @@ class HistoryStore:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS heatmap_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    universe_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
                 CREATE INDEX IF NOT EXISTS idx_sync_state_updated_at
                     ON sync_state(updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_heatmap_runs_universe_created_at
+                    ON heatmap_runs(universe_id, created_at DESC);
                 """
             )
 
@@ -414,4 +431,56 @@ class HistoryStore:
             symbols=symbols,
             source=str(row[2] or "unknown"),
             fetched_at=fetched,
+        )
+
+    def save_heatmap_run(self, universe_id: str, payload: Dict[str, object]) -> int:
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO heatmap_runs(universe_id, created_at, payload_json)
+                VALUES(?, ?, ?)
+                """,
+                (str(universe_id or "").strip().upper(), now, json.dumps(payload, ensure_ascii=False)),
+            )
+            return int(cur.lastrowid)
+
+    def load_latest_heatmap_run(self, universe_id: str) -> Optional[HeatmapRun]:
+        universe_key = str(universe_id or "").strip().upper()
+        if not universe_key:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT universe_id, created_at, payload_json
+                FROM heatmap_runs
+                WHERE universe_id=?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (universe_key,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        created_at = datetime.now(tz=timezone.utc)
+        try:
+            created_at = datetime.fromisoformat(str(row[1]))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+        payload: Dict[str, object] = {}
+        try:
+            obj = json.loads(str(row[2] or "{}"))
+            if isinstance(obj, dict):
+                payload = obj
+        except Exception:
+            payload = {}
+
+        return HeatmapRun(
+            universe_id=str(row[0]),
+            payload=payload,
+            created_at=created_at,
         )
