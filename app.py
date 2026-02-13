@@ -2826,7 +2826,7 @@ def _render_tw_etf_rotation_view():
         initial_payload.setdefault("run_key", cached_run.run_key)
         st.session_state[payload_key] = initial_payload
 
-    st.subheader("台股多ETF輪動（日K）")
+    st.subheader("台股多 ETF 輪動策略（日K）")
     st.caption(
         "固定標的池：0050、0052、00935、0056、00878、00919。每月第一個交易日評分，"
         "並於下一交易日開盤調整持股；大盤不在 60MA 上方時全數空手。"
@@ -3009,7 +3009,7 @@ def _render_tw_etf_rotation_view():
         f"{top_n}:{fee_rate}:{sell_tax}:{slippage}:{initial_capital}"
     )
 
-    if st.button("執行ETF輪動回測", type="primary", use_container_width=True):
+    if st.button("執行 ETF 輪動策略回測", type="primary", use_container_width=True):
         if not date_is_valid:
             st.error("日期區間無效，請先修正起訖日期。")
             return
@@ -3191,7 +3191,7 @@ def _render_tw_etf_rotation_view():
 
     payload = st.session_state.get(payload_key)
     if not payload:
-        st.info("設定條件後按下「執行ETF輪動回測」，之後會自動顯示最近一次快取結果。")
+        st.info("設定條件後按下「執行 ETF 輪動策略回測」，之後會自動顯示最近一次快取結果。")
         return
     if payload.get("run_key") != run_key:
         st.caption("目前顯示的是上一次執行結果；若要套用目前設定，請重新按下執行。")
@@ -3313,11 +3313,11 @@ def _render_tw_etf_rotation_view():
                     selected_symbol_lists.append([str(s) for s in symbols])
         holding_rank = _build_rotation_holding_rank(weights_df=None, selected_symbol_lists=selected_symbol_lists)
 
-    top2_rank = [row for row in holding_rank if isinstance(row, dict)][:2]
-    if top2_rank:
-        st.markdown("#### 持有最久 ETF（策略推薦 Top2）")
-        cols = st.columns(min(2, len(top2_rank)))
-        for idx, row in enumerate(top2_rank):
+    top3_rank = [row for row in holding_rank if isinstance(row, dict)][:3]
+    if top3_rank:
+        st.markdown("#### 持有最久 ETF（策略推薦 Top3）")
+        cols = st.columns(min(3, len(top3_rank)))
+        for idx, row in enumerate(top3_rank):
             symbol = str(row.get("symbol", "N/A"))
             name = str(row.get("name", symbol))
             hold_days = int(float(row.get("hold_days", 0) or 0))
@@ -3474,7 +3474,7 @@ def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
     st.title("即時走勢 / 多來源資料 / 回測平台")
-    page_options = ["即時看盤", "回測工作台", "ETF輪動", "00935 熱力圖", "0050 熱力圖", "資料庫檢視", "新手教學"]
+    page_options = ["即時看盤", "回測工作台", "ETF 輪動策略", "00935 熱力圖", "0050 熱力圖", "資料庫檢視", "新手教學"]
     active_page = st.radio(
         "分頁",
         options=page_options,
@@ -3484,7 +3484,7 @@ def main():
     page_renderers = {
         "即時看盤": _render_live_view,
         "回測工作台": _render_backtest_view,
-        "ETF輪動": _render_tw_etf_rotation_view,
+        "ETF 輪動策略": _render_tw_etf_rotation_view,
         "00935 熱力圖": _render_00935_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
         "資料庫檢視": _render_db_browser_view,

@@ -4,7 +4,7 @@
 
 - `即時看盤`：台股/美股即時與近即時走勢、技術指標、文字建議
 - `回測工作台`：日K歷史下載、本地資料庫同步、策略回測、播放式回放
-- `ETF輪動`：台股多ETF（月頻）動能輪動策略回測與Benchmark對照
+- `ETF 輪動策略`：台股多ETF（月頻）動能輪動策略回測與Benchmark對照
 - `00935 熱力圖`：00935 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `0050 熱力圖`：0050 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `資料庫檢視`：查看 SQLite 內各資料表筆數、欄位結構與分頁資料
@@ -114,7 +114,7 @@ git config --get core.hooksPath
   - 紅色：輸給大盤（輸越多越深）
 - 每格標示代碼/公司名稱與超額報酬 `%`，並可查看表格明細
 
-### 3.8) 台股多ETF輪動（日K）
+### 3.8) 台股多ETF輪動策略（日K）
 
 - 固定標的池：`0050 / 0052 / 00935 / 0056 / 00878 / 00919`
 - 大盤濾網：`Benchmark close > SMA60` 才允許持有，否則全數空手
@@ -190,7 +190,7 @@ uv run python -m unittest discover -s tests -v
 
 ## 專案結構（主要）
 
-- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / ETF輪動 / 00935 熱力圖 / 0050 熱力圖 / 資料庫檢視 / 新手教學）
+- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / ETF 輪動策略 / 00935 熱力圖 / 0050 熱力圖 / 資料庫檢視 / 新手教學）
 - `services/market_data_service.py`：多來源 provider chain 與資料品質封裝
 - `providers/`：各資料來源 adapter
 - `storage/history_store.py`：SQLite schema、增量同步、回測紀錄
