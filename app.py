@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -47,6 +49,60 @@ def _market_service() -> MarketDataService:
 @st.cache_resource
 def _history_store() -> HistoryStore:
     return HistoryStore(service=_market_service())
+
+
+def _sync_symbols_history(
+    store: HistoryStore,
+    *,
+    market: str,
+    symbols: list[str],
+    start: datetime,
+    end: datetime,
+    parallel: bool = True,
+    max_workers: int = 6,
+) -> tuple[dict[str, object], list[str]]:
+    ordered_symbols: list[str] = []
+    for symbol in symbols:
+        text = str(symbol or "").strip().upper()
+        if text and text not in ordered_symbols:
+            ordered_symbols.append(text)
+    reports: dict[str, object] = {}
+    issues: list[str] = []
+    if not ordered_symbols:
+        return reports, issues
+
+    def _run_one(symbol: str) -> object:
+        return store.sync_symbol_history(symbol=symbol, market=market, start=start, end=end)
+
+    use_parallel = parallel and len(ordered_symbols) > 1
+    if not use_parallel:
+        for symbol in ordered_symbols:
+            try:
+                report = _run_one(symbol)
+                reports[symbol] = report
+                err = str(getattr(report, "error", "") or "").strip()
+                if err:
+                    issues.append(f"{symbol}: {err}")
+            except Exception as exc:
+                reports[symbol] = None
+                issues.append(f"{symbol}: {exc}")
+        return reports, issues
+
+    workers = max(1, min(int(max_workers), len(ordered_symbols)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_run_one, symbol): symbol for symbol in ordered_symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                report = future.result()
+                reports[symbol] = report
+                err = str(getattr(report, "error", "") or "").strip()
+                if err:
+                    issues.append(f"{symbol}: {err}")
+            except Exception as exc:
+                reports[symbol] = None
+                issues.append(f"{symbol}: {exc}")
+    return reports, issues
 
 
 DAILY_STRATEGY_OPTIONS = [
@@ -1102,45 +1158,70 @@ def _render_backtest_view():
             )
         )
 
-    auto_sync = st.checkbox("App 啟動時自動增量同步", value=True)
+    sync_parallel = st.checkbox(
+        "多標的同步平行處理",
+        value=True,
+        help="多檔標的時通常更快；若網路不穩可關閉改為逐檔同步。",
+    )
+    auto_sync = st.checkbox(
+        "App 啟動時自動增量同步（較慢）",
+        value=False,
+        help="關閉可先直接使用本地 SQLite；需要時再手動同步。",
+    )
     sync_key = f"synced:{market}:{','.join(symbols)}:{start_date}:{end_date}"
     sync_start = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
     sync_end = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
     if auto_sync and not st.session_state.get(sync_key):
+        reports, sync_issues = _sync_symbols_history(
+            store,
+            market=market,
+            symbols=symbols,
+            start=sync_start,
+            end=sync_end,
+            parallel=sync_parallel,
+        )
         sync_rows = []
         for symbol in symbols:
-            report = store.sync_symbol_history(symbol=symbol, market=market, start=sync_start, end=sync_end)
+            report = reports.get(symbol)
             sync_rows.append(
                 {
                     "symbol": symbol,
-                    "rows": report.rows_upserted,
-                    "source": report.source,
-                    "fallback": report.fallback_depth,
-                    "error": report.error or "",
+                    "rows": int(getattr(report, "rows_upserted", 0) or 0),
+                    "source": str(getattr(report, "source", "unknown") or "unknown"),
+                    "fallback": int(getattr(report, "fallback_depth", 0) or 0),
+                    "error": str(getattr(report, "error", "") or ""),
                 }
             )
         st.session_state[sync_key] = True
         sync_df = pd.DataFrame(sync_rows)
-        if (sync_df["error"] != "").any():
+        if sync_issues:
             st.warning("部分同步失敗，請檢查下方同步結果。")
         st.dataframe(sync_df, use_container_width=True, hide_index=True)
 
     b1, b2 = st.columns(2)
     if b1.button("同步歷史資料", use_container_width=True):
+        reports, sync_issues = _sync_symbols_history(
+            store,
+            market=market,
+            symbols=symbols,
+            start=sync_start,
+            end=sync_end,
+            parallel=sync_parallel,
+        )
         sync_rows = []
         for symbol in symbols:
-            report = store.sync_symbol_history(symbol=symbol, market=market, start=sync_start, end=sync_end)
+            report = reports.get(symbol)
             sync_rows.append(
                 {
                     "symbol": symbol,
-                    "rows": report.rows_upserted,
-                    "source": report.source,
-                    "fallback": report.fallback_depth,
-                    "error": report.error or "",
+                    "rows": int(getattr(report, "rows_upserted", 0) or 0),
+                    "source": str(getattr(report, "source", "unknown") or "unknown"),
+                    "fallback": int(getattr(report, "fallback_depth", 0) or 0),
+                    "error": str(getattr(report, "error", "") or ""),
                 }
             )
         sync_df = pd.DataFrame(sync_rows)
-        if (sync_df["error"] != "").any():
+        if sync_issues:
             st.error("部分同步失敗，請檢查同步結果。")
         else:
             st.success("同步成功。")
@@ -2383,6 +2464,19 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
 
     start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
     end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
+    s1, s2 = st.columns(2)
+    sync_before_run = s1.checkbox(
+        "執行前同步最新日K（較慢）",
+        value=False,
+        key=f"{page_key}_sync_before_run",
+        help="預設關閉：優先使用本地 SQLite；資料不足時才補同步。",
+    )
+    parallel_sync = s2.checkbox(
+        "平行同步多標的",
+        value=True,
+        key=f"{page_key}_parallel_sync",
+        help="標的較多時通常更快；若網路不穩可關閉改逐檔同步。",
+    )
 
     def _show_sync_issues(prefix: str, issues: list[str]):
         if not issues:
@@ -2401,13 +2495,19 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         }
         return mapping.get(choice, ["^TWII"])
 
-    def _load_benchmark_close(choice: str) -> tuple[pd.Series, str, list[str]]:
+    def _load_benchmark_close(choice: str, *, sync_first: bool) -> tuple[pd.Series, str, list[str]]:
         sync_issues: list[str] = []
         for benchmark_symbol in _benchmark_candidates_tw(choice):
-            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            if report.error:
-                sync_issues.append(f"{benchmark_symbol}: {report.error}")
+            if sync_first:
+                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+                if report.error:
+                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
             bench_bars = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            if bench_bars.empty and not sync_first:
+                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+                if report.error:
+                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
+                bench_bars = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
             bench_bars = _normalize_ohlcv_frame(bench_bars)
             if bench_bars.empty:
                 continue
@@ -2453,7 +2553,47 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
             f"{fee_rate}:{sell_tax}:{slippage}:{','.join(run_symbols)}"
         )
-        benchmark_close, benchmark_symbol, benchmark_sync_issues = _load_benchmark_close(benchmark_choice)
+        symbol_sync_issues: list[str] = []
+        if sync_before_run:
+            with st.spinner("同步成分股日K中..."):
+                _, symbol_sync_issues = _sync_symbols_history(
+                    store,
+                    market="TW",
+                    symbols=run_symbols,
+                    start=start_dt,
+                    end=end_dt,
+                    parallel=parallel_sync,
+                )
+
+        bars_cache: dict[str, pd.DataFrame] = {}
+        min_required = get_strategy_min_bars(strategy)
+        symbols_need_sync: list[str] = []
+        for symbol in run_symbols:
+            bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars_local = _normalize_ohlcv_frame(bars_local)
+            bars_cache[symbol] = bars_local
+            if len(bars_local) < min_required:
+                symbols_need_sync.append(symbol)
+
+        if symbols_need_sync and not sync_before_run:
+            with st.spinner("本地資料不足，補同步中..."):
+                _, lazy_sync_issues = _sync_symbols_history(
+                    store,
+                    market="TW",
+                    symbols=symbols_need_sync,
+                    start=start_dt,
+                    end=end_dt,
+                    parallel=parallel_sync,
+                )
+                symbol_sync_issues.extend(lazy_sync_issues)
+            for symbol in symbols_need_sync:
+                bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+                bars_cache[symbol] = _normalize_ohlcv_frame(bars_local)
+
+        benchmark_close, benchmark_symbol, benchmark_sync_issues = _load_benchmark_close(
+            benchmark_choice,
+            sync_first=sync_before_run,
+        )
         _show_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
         if benchmark_close.empty:
             st.error("Benchmark 取得失敗，請改選其他基準（0050 或 006208）後重試。")
@@ -2461,17 +2601,11 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
 
         progress = st.progress(0.0)
         rows: list[dict[str, object]] = []
-        symbol_sync_issues: list[str] = []
         cost_model = CostModel(fee_rate=float(fee_rate), sell_tax_rate=float(sell_tax), slippage_rate=float(slippage))
-        min_required = get_strategy_min_bars(strategy)
         name_map = service.get_tw_symbol_names(run_symbols)
 
         for idx, symbol in enumerate(run_symbols):
-            report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-            if report.error:
-                symbol_sync_issues.append(f"{symbol}: {report.error}")
-            bars = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-            bars = _normalize_ohlcv_frame(bars)
+            bars = bars_cache.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
             if len(bars) < min_required:
                 progress.progress((idx + 1) / max(len(run_symbols), 1))
                 continue
@@ -2578,6 +2712,19 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     m3.metric("持平檔數", f"{ties}")
     m4.metric("平均超額報酬", f"{avg_excess:+.2f}%")
     m5.metric("最佳/最差", f"{max_win:+.2f}% / {max_loss:+.2f}%")
+    with st.expander("結果怎麼看（越大/越小）", expanded=False):
+        st.markdown(
+            "\n".join(
+                [
+                    "- `勝過大盤檔數`：越大越好（代表更多成分股跑贏基準）。",
+                    "- `輸給大盤檔數`：越小越好（越大代表弱勢標的較多）。",
+                    "- `持平檔數`：中性，通常代表差異接近 0%。",
+                    "- `平均超額報酬`：越大越好；`> 0` 代表整體贏過基準。",
+                    "- `最佳/最差`：最佳越大越好；最差希望不要太負值（絕對值越小越穩）。",
+                    "- `Bars`：策略與 Benchmark 對齊後可比較的 K 棒數，不是交易次數；通常越大結果越有參考性。",
+                ]
+            )
+        )
     generated_at_text = str(payload.get("generated_at", "")).strip()
     if generated_at_text:
         try:
@@ -2755,6 +2902,19 @@ def _render_tw_etf_rotation_view():
 
     start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
     end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
+    s1, s2 = st.columns(2)
+    sync_before_run = s1.checkbox(
+        "執行前同步最新日K（較慢）",
+        value=False,
+        key="rotation_sync_before_run",
+        help="預設關閉：優先使用本地 SQLite；資料不足時才補同步。",
+    )
+    parallel_sync = s2.checkbox(
+        "平行同步多標的",
+        value=True,
+        key="rotation_parallel_sync",
+        help="多檔 ETF 時通常更快；若網路不穩可關閉改逐檔同步。",
+    )
 
     def _show_sync_issues(prefix: str, issues: list[str]):
         if not issues:
@@ -2773,13 +2933,19 @@ def _render_tw_etf_rotation_view():
         }
         return mapping.get(choice, ["^TWII", "0050", "006208"])
 
-    def _load_benchmark_bars(choice: str) -> tuple[pd.DataFrame, str, list[str]]:
+    def _load_benchmark_bars(choice: str, *, sync_first: bool) -> tuple[pd.DataFrame, str, list[str]]:
         sync_issues: list[str] = []
         for benchmark_symbol in _benchmark_candidates_tw(choice):
-            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            if report.error:
-                sync_issues.append(f"{benchmark_symbol}: {report.error}")
+            if sync_first:
+                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+                if report.error:
+                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
             bench = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            if bench.empty and not sync_first:
+                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+                if report.error:
+                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
+                bench = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
             bench = _normalize_ohlcv_frame(bench)
             if bench.empty:
                 continue
@@ -2794,6 +2960,50 @@ def _render_tw_etf_rotation_view():
                 return bench, benchmark_symbol, sync_issues
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]), "", sync_issues
 
+    def _build_rotation_holding_rank(
+        *,
+        weights_df: Optional[pd.DataFrame],
+        selected_symbol_lists: list[list[str]],
+    ) -> list[dict[str, object]]:
+        name_map = service.get_tw_symbol_names(list(ROTATION_DEFAULT_UNIVERSE))
+        selected_counts = {sym: 0 for sym in ROTATION_DEFAULT_UNIVERSE}
+        for symbols in selected_symbol_lists:
+            for sym in symbols:
+                if sym in selected_counts:
+                    selected_counts[sym] += 1
+
+        total_days = int(len(weights_df)) if isinstance(weights_df, pd.DataFrame) and not weights_df.empty else 0
+        total_signals = max(1, len(selected_symbol_lists))
+        rows: list[dict[str, object]] = []
+        for sym in ROTATION_DEFAULT_UNIVERSE:
+            hold_days = 0
+            if total_days > 0 and weights_df is not None and sym in weights_df.columns:
+                hold_days = int((pd.to_numeric(weights_df[sym], errors="coerce").fillna(0.0) > 1e-10).sum())
+            selected_months = int(selected_counts.get(sym, 0))
+            if hold_days <= 0 and selected_months <= 0:
+                continue
+            hold_ratio_pct = (hold_days / total_days * 100.0) if total_days > 0 else 0.0
+            selected_ratio_pct = selected_months / total_signals * 100.0
+            rows.append(
+                {
+                    "symbol": sym,
+                    "name": name_map.get(sym, sym),
+                    "hold_days": hold_days,
+                    "hold_ratio_pct": hold_ratio_pct,
+                    "selected_months": selected_months,
+                    "selected_ratio_pct": selected_ratio_pct,
+                }
+            )
+        rows.sort(
+            key=lambda r: (
+                int(r.get("hold_days", 0)),
+                int(r.get("selected_months", 0)),
+                str(r.get("symbol", "")),
+            ),
+            reverse=True,
+        )
+        return rows
+
     run_key = (
         f"tw_rotation:{start_date}:{end_date}:{benchmark_choice}:"
         f"{top_n}:{fee_rate}:{sell_tax}:{slippage}:{initial_capital}"
@@ -2804,16 +3014,47 @@ def _render_tw_etf_rotation_view():
             st.error("日期區間無效，請先修正起訖日期。")
             return
 
+        symbol_sync_issues: list[str] = []
+        if sync_before_run:
+            with st.spinner("同步 ETF 池日K中..."):
+                _, symbol_sync_issues = _sync_symbols_history(
+                    store,
+                    market="TW",
+                    symbols=list(ROTATION_DEFAULT_UNIVERSE),
+                    start=start_dt,
+                    end=end_dt,
+                    parallel=parallel_sync,
+                )
+
+        bars_cache: dict[str, pd.DataFrame] = {}
+        symbols_need_sync: list[str] = []
+        for symbol in ROTATION_DEFAULT_UNIVERSE:
+            bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars_local = _normalize_ohlcv_frame(bars_local)
+            bars_cache[symbol] = bars_local
+            if len(bars_local) < ROTATION_MIN_BARS:
+                symbols_need_sync.append(symbol)
+
+        if symbols_need_sync and not sync_before_run:
+            with st.spinner("本地資料不足，補同步 ETF 日K中..."):
+                _, lazy_sync_issues = _sync_symbols_history(
+                    store,
+                    market="TW",
+                    symbols=symbols_need_sync,
+                    start=start_dt,
+                    end=end_dt,
+                    parallel=parallel_sync,
+                )
+                symbol_sync_issues.extend(lazy_sync_issues)
+            for symbol in symbols_need_sync:
+                bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+                bars_cache[symbol] = _normalize_ohlcv_frame(bars_local)
+
         bars_by_symbol: dict[str, pd.DataFrame] = {}
         skipped_symbols: list[str] = []
-        symbol_sync_issues: list[str] = []
         progress = st.progress(0.0)
         for idx, symbol in enumerate(ROTATION_DEFAULT_UNIVERSE):
-            report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-            if report.error:
-                symbol_sync_issues.append(f"{symbol}: {report.error}")
-            bars = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-            bars = _normalize_ohlcv_frame(bars)
+            bars = bars_cache.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
             if bars.empty:
                 skipped_symbols.append(symbol)
                 progress.progress((idx + 1) / len(ROTATION_DEFAULT_UNIVERSE))
@@ -2837,7 +3078,10 @@ def _render_tw_etf_rotation_view():
             st.error(f"可用資料不足（每檔至少需 {ROTATION_MIN_BARS} 根K），無法執行。")
             return
 
-        benchmark_bars, benchmark_symbol, benchmark_sync_issues = _load_benchmark_bars(benchmark_choice)
+        benchmark_bars, benchmark_symbol, benchmark_sync_issues = _load_benchmark_bars(
+            benchmark_choice,
+            sync_first=sync_before_run,
+        )
         _show_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
         if benchmark_bars.empty:
             st.error("Benchmark 取得失敗，請改選 0050 或 006208 後重試。")
@@ -2876,7 +3120,9 @@ def _render_tw_etf_rotation_view():
             benchmark_equity = float(initial_capital) * (benchmark_close / float(benchmark_non_na.iloc[0]))
 
         rebalance_rows: list[dict[str, object]] = []
+        selected_symbol_lists: list[list[str]] = []
         for rec in result.rebalance_records:
+            selected_symbol_lists.append(list(rec.selected_symbols))
             rebalance_rows.append(
                 {
                     "signal_date": rec.signal_date.isoformat(),
@@ -2887,6 +3133,11 @@ def _render_tw_etf_rotation_view():
                     "scores": rec.scores,
                 }
             )
+
+        holding_rank = _build_rotation_holding_rank(
+            weights_df=result.weights,
+            selected_symbol_lists=selected_symbol_lists,
+        )
 
         trades_df = result.trades.copy()
         if not trades_df.empty and "date" in trades_df.columns:
@@ -2919,6 +3170,7 @@ def _render_tw_etf_rotation_view():
             ],
             "rebalance_records": rebalance_rows,
             "trades": trades_df.to_dict("records"),
+            "holding_rank": holding_rank,
         }
         st.session_state[payload_key] = payload
         store.save_rotation_run(
@@ -3049,6 +3301,35 @@ def _render_tw_etf_rotation_view():
             verdict = "贏過大盤" if excess > 0 else ("輸給大盤" if excess < 0 else "與大盤持平")
             st.info(f"相對Benchmark：{verdict} {excess:+.2f}%（策略 {strat_ret*100:+.2f}% / Benchmark {bench_ret*100:+.2f}%）")
 
+    holding_rank = payload.get("holding_rank")
+    if not isinstance(holding_rank, list):
+        holding_rank = []
+    if not holding_rank:
+        selected_symbol_lists: list[list[str]] = []
+        for item in payload.get("rebalance_records", []):
+            if isinstance(item, dict):
+                symbols = item.get("selected_symbols")
+                if isinstance(symbols, list):
+                    selected_symbol_lists.append([str(s) for s in symbols])
+        holding_rank = _build_rotation_holding_rank(weights_df=None, selected_symbol_lists=selected_symbol_lists)
+
+    top2_rank = [row for row in holding_rank if isinstance(row, dict)][:2]
+    if top2_rank:
+        st.markdown("#### 持有最久 ETF（策略推薦 Top2）")
+        cols = st.columns(min(2, len(top2_rank)))
+        for idx, row in enumerate(top2_rank):
+            symbol = str(row.get("symbol", "N/A"))
+            name = str(row.get("name", symbol))
+            hold_days = int(float(row.get("hold_days", 0) or 0))
+            hold_ratio = float(row.get("hold_ratio_pct", 0.0) or 0.0)
+            selected_months = int(float(row.get("selected_months", 0) or 0))
+            cols[idx].metric(
+                f"Top {idx + 1}",
+                f"{symbol} {name}".strip(),
+                f"持有 {hold_days} 天（{hold_ratio:.1f}%）｜入選 {selected_months} 次",
+            )
+        st.caption("說明：此排名反映本次回測參數下的策略偏好（持有天數/入選次數），不代表未來保證報酬。")
+
     rebalance_df = pd.DataFrame(payload.get("rebalance_records", []))
     if not rebalance_df.empty:
         name_map = service.get_tw_symbol_names(list(ROTATION_DEFAULT_UNIVERSE))
@@ -3089,25 +3370,131 @@ def _render_0050_heatmap_view():
     _render_tw_etf_heatmap_view("0050", page_desc="台灣50")
 
 
+def _render_db_browser_view():
+    st.subheader("SQLite 資料庫檢視")
+    store = _history_store()
+    db_path = store.db_path
+
+    st.caption(f"資料庫路徑：`{db_path}`")
+    if not db_path.exists():
+        st.error("找不到資料庫檔案 `market_history.sqlite3`。")
+        return
+
+    db_size_mb = db_path.stat().st_size / (1024 * 1024)
+    st.caption(f"檔案大小：約 {db_size_mb:.2f} MB")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        tables_df = pd.read_sql_query(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name NOT LIKE 'sqlite_%'
+            ORDER BY name ASC
+            """,
+            conn,
+        )
+        if tables_df.empty:
+            st.info("目前資料庫中沒有可檢視的資料表。")
+            return
+
+        table_names = tables_df["name"].astype(str).tolist()
+        summary_rows: list[dict[str, object]] = []
+        count_map: dict[str, int] = {}
+        for table in table_names:
+            escaped = table.replace('"', '""')
+            count = int(conn.execute(f'SELECT COUNT(*) FROM "{escaped}"').fetchone()[0])
+            count_map[table] = count
+            summary_rows.append({"資料表": table, "筆數": count})
+
+        st.markdown("#### 資料表總覽")
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+        c1, c2, c3 = st.columns([2, 1, 1])
+        selected_table = c1.selectbox("選擇資料表", options=table_names, key="db_view_table")
+        page_size = int(c2.selectbox("每頁筆數", options=[20, 50, 100, 200, 500], index=2, key="db_view_page_size"))
+        order_mode = c3.selectbox("排序", options=["最新在前", "舊到新"], index=0, key="db_view_order_mode")
+
+        total_rows = int(count_map.get(selected_table, 0))
+        total_pages = max(1, int(math.ceil(total_rows / max(page_size, 1))))
+        page = int(
+            st.number_input(
+                "頁碼",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                step=1,
+                key=f"db_view_page_{selected_table}",
+            )
+        )
+        offset = (page - 1) * page_size
+        st.caption(f"目前資料表 `{selected_table}`：共 {total_rows} 筆，頁 {page} / {total_pages}")
+
+        escaped_table = selected_table.replace('"', '""')
+        schema_df = pd.read_sql_query(f'PRAGMA table_info("{escaped_table}")', conn)
+        col_names = schema_df["name"].astype(str).tolist() if not schema_df.empty else []
+        order_candidates = ["updated_at", "created_at", "date", "fetched_at", "id"]
+        order_col = next((col for col in order_candidates if col in col_names), None)
+        direction = "DESC" if order_mode == "最新在前" else "ASC"
+
+        query = f'SELECT * FROM "{escaped_table}"'
+        if order_col:
+            query += f' ORDER BY "{order_col}" {direction}'
+        query += " LIMIT ? OFFSET ?"
+
+        data_df = pd.read_sql_query(query, conn, params=[page_size, offset])
+        st.markdown("#### 資料表內容")
+        if data_df.empty:
+            st.info("此頁沒有資料。")
+        else:
+            st.dataframe(data_df, use_container_width=True, hide_index=True)
+
+        with st.expander("欄位結構（Schema）", expanded=False):
+            if schema_df.empty:
+                st.caption("無法讀取欄位資訊。")
+            else:
+                schema_out = schema_df.rename(
+                    columns={
+                        "name": "欄位",
+                        "type": "型別",
+                        "notnull": "不可為空",
+                        "dflt_value": "預設值",
+                        "pk": "主鍵",
+                    }
+                )
+                show_cols = [c for c in ["cid", "欄位", "型別", "不可為空", "預設值", "主鍵"] if c in schema_out.columns]
+                st.dataframe(schema_out[show_cols], use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error(f"讀取資料庫失敗：{exc}")
+    finally:
+        conn.close()
+
+
 def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
     st.title("即時走勢 / 多來源資料 / 回測平台")
-    live_tab, bt_tab, rotation_tab, heat_00935_tab, heat_0050_tab, guide_tab = st.tabs(
-        ["即時看盤", "回測工作台", "ETF輪動", "00935 熱力圖", "0050 熱力圖", "新手教學"]
+    page_options = ["即時看盤", "回測工作台", "ETF輪動", "00935 熱力圖", "0050 熱力圖", "資料庫檢視", "新手教學"]
+    active_page = st.radio(
+        "分頁",
+        options=page_options,
+        horizontal=True,
+        key="active_page",
     )
-    with live_tab:
-        _render_live_view()
-    with bt_tab:
-        _render_backtest_view()
-    with rotation_tab:
-        _render_tw_etf_rotation_view()
-    with heat_00935_tab:
-        _render_00935_heatmap_view()
-    with heat_0050_tab:
-        _render_0050_heatmap_view()
-    with guide_tab:
-        _render_tutorial_view()
+    page_renderers = {
+        "即時看盤": _render_live_view,
+        "回測工作台": _render_backtest_view,
+        "ETF輪動": _render_tw_etf_rotation_view,
+        "00935 熱力圖": _render_00935_heatmap_view,
+        "0050 熱力圖": _render_0050_heatmap_view,
+        "資料庫檢視": _render_db_browser_view,
+        "新手教學": _render_tutorial_view,
+    }
+    render_fn = page_renderers.get(active_page)
+    if render_fn is None:
+        st.error("頁面載入失敗，請重新整理後再試。")
+        return
+    render_fn()
 
 
 if __name__ == "__main__":
