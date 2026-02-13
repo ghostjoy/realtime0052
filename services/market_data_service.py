@@ -337,6 +337,48 @@ class MarketDataService:
         self.cache.set(cache_key, df, ttl_sec=90)
         return df
 
+    def get_tw_symbol_names(self, symbols: list[str]) -> dict[str, str]:
+        import requests
+
+        normalized = []
+        for symbol in symbols:
+            text = str(symbol or "").strip().upper()
+            if not text:
+                continue
+            if text not in normalized:
+                normalized.append(text)
+        if not normalized:
+            return {}
+
+        cache_key = f"tw_names:{','.join(sorted(normalized))}"
+        cached = self.cache.get(cache_key)
+        if isinstance(cached, dict):
+            return {str(k): str(v) for k, v in cached.items()}
+
+        out = {symbol: symbol for symbol in normalized}
+        url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+        try:
+            resp = requests.get(url, timeout=12)
+            resp.raise_for_status()
+            rows = resp.json()
+        except Exception:
+            self.cache.set(cache_key, out, ttl_sec=900)
+            return out
+
+        if isinstance(rows, list):
+            wanted = set(normalized)
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                code = str(row.get("Code", "")).strip().upper()
+                if code not in wanted:
+                    continue
+                name = str(row.get("Name", "")).strip()
+                if name:
+                    out[code] = name
+        self.cache.set(cache_key, out, ttl_sec=21600)
+        return out
+
     def get_benchmark_series(
         self,
         market: str,
@@ -451,53 +493,91 @@ class MarketDataService:
         self.cache.set(cache_key, out, ttl_sec=600)
         return out
 
-    def get_00935_constituents(self, limit: int = 60) -> tuple[list[str], str]:
+    def get_tw_etf_constituents(self, etf_code: str, limit: int = 60) -> tuple[list[str], str]:
         import yfinance as yf
 
-        cache_key = f"universe:TW:00935:{int(limit)}"
+        code = str(etf_code or "").strip().upper()
+        if not code:
+            return [], "invalid_symbol"
+        cache_key = f"universe:TW:{code}:{int(limit)}"
         cached = self.cache.get(cache_key)
         if isinstance(cached, tuple) and len(cached) == 2:
             syms, source = cached
             if isinstance(syms, list) and isinstance(source, str):
                 return syms, source
 
-        fallback_symbols = [
-            "2330",
-            "2454",
-            "2317",
-            "2308",
-            "2382",
-            "3711",
-            "3034",
-            "2379",
-            "2301",
-            "6669",
-            "3231",
-            "6415",
-            "3443",
-            "3017",
-            "6531",
-            "3661",
-            "3037",
-            "4919",
-            "2327",
-            "2408",
-            "3008",
-            "3533",
-            "5269",
-            "5274",
-            "2376",
-            "2439",
-            "2377",
-            "2357",
-            "2360",
-            "2345",
-        ]
+        fallback_map: dict[str, list[str]] = {
+            "00935": [
+                "2330",
+                "2454",
+                "2317",
+                "2308",
+                "2382",
+                "3711",
+                "3034",
+                "2379",
+                "2301",
+                "6669",
+                "3231",
+                "6415",
+                "3443",
+                "3017",
+                "6531",
+                "3661",
+                "3037",
+                "4919",
+                "2327",
+                "2408",
+                "3008",
+                "3533",
+                "5269",
+                "5274",
+                "2376",
+                "2439",
+                "2377",
+                "2357",
+                "2360",
+                "2345",
+            ],
+            "0050": [
+                "2330",
+                "2317",
+                "2454",
+                "2308",
+                "2881",
+                "2882",
+                "2891",
+                "2886",
+                "2884",
+                "2892",
+                "5880",
+                "1303",
+                "1301",
+                "1216",
+                "2002",
+                "2412",
+                "2603",
+                "2609",
+                "6505",
+                "2303",
+                "2301",
+                "2880",
+                "2885",
+                "3045",
+                "3711",
+                "2207",
+                "3034",
+                "2883",
+                "5871",
+                "2327",
+            ],
+        }
+        fallback_symbols = fallback_map.get(code, fallback_map["00935"])
 
         symbols: list[str] = []
         source = "fallback_manual"
         try:
-            ticker = yf.Ticker("00935.TW")
+            ticker = yf.Ticker(f"{code}.TW")
             tables: list[pd.DataFrame] = []
             try:
                 top = ticker.funds_data.top_holdings
@@ -540,3 +620,9 @@ class MarketDataService:
         symbols = symbols[: max(1, int(limit))]
         self.cache.set(cache_key, (symbols, source), ttl_sec=3600)
         return symbols, source
+
+    def get_00935_constituents(self, limit: int = 60) -> tuple[list[str], str]:
+        return self.get_tw_etf_constituents("00935", limit=limit)
+
+    def get_0050_constituents(self, limit: int = 60) -> tuple[list[str], str]:
+        return self.get_tw_etf_constituents("0050", limit=limit)

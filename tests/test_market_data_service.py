@@ -116,6 +116,34 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertEqual(out.attrs.get("symbol"), "SPY")
         self.assertEqual(out.attrs.get("source"), "stooq")
 
+    @patch("requests.get")
+    def test_get_tw_symbol_names(self, mock_get):
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = [
+            {"Code": "2330", "Name": "台積電"},
+            {"Code": "3017", "Name": "奇鋐"},
+        ]
+        mock_get.return_value = mock_resp
+
+        service = MarketDataService()
+        out = service.get_tw_symbol_names(["2330", "3017", "9999"])
+        self.assertEqual(out["2330"], "台積電")
+        self.assertEqual(out["3017"], "奇鋐")
+        self.assertEqual(out["9999"], "9999")
+        out2 = service.get_tw_symbol_names(["2330", "3017", "9999"])
+        self.assertEqual(out2["2330"], "台積電")
+        self.assertTrue(mock_get.called)
+
+    @patch("yfinance.Ticker")
+    def test_get_tw_etf_constituents_fallback(self, mock_ticker):
+        mock_ticker.side_effect = RuntimeError("upstream down")
+        service = MarketDataService()
+        symbols, source = service.get_tw_etf_constituents("0050", limit=5)
+        self.assertEqual(source, "fallback_manual")
+        self.assertEqual(len(symbols), 5)
+        self.assertTrue(all(len(s) == 4 and s.isdigit() for s in symbols))
+
 
 if __name__ == "__main__":
     unittest.main()

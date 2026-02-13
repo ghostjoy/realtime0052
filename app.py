@@ -2128,45 +2128,71 @@ def _render_tutorial_view():
     )
 
 
-def _render_00935_heatmap_view():
+def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     store = _history_store()
     service = _market_service()
+    etf_text = str(etf_code).strip().upper()
+    page_key = f"tw{etf_text.lower()}"
 
-    st.subheader("00935 成分股熱力圖回測（相對大盤）")
-    st.caption("以 00935 科技成分股逐檔回測，與大盤同區間比較；綠色代表贏過、紅色代表輸給。")
+    st.subheader(f"{etf_text} 成分股熱力圖回測（相對大盤）")
+    st.caption(f"以 {etf_text}{page_desc}成分股逐檔回測，與大盤同區間比較；綠色代表贏過、紅色代表輸給。")
 
     c1, c2, c3, c4 = st.columns(4)
-    start_date = c1.date_input("起始日期", value=date(date.today().year - 3, 1, 1), key="tw00935_start")
-    end_date = c2.date_input("結束日期", value=date.today(), key="tw00935_end")
+    start_date = c1.date_input("起始日期", value=date(date.today().year - 3, 1, 1), key=f"{page_key}_start")
+    end_date = c2.date_input("結束日期", value=date.today(), key=f"{page_key}_end")
     benchmark_choice = c3.selectbox(
         "Benchmark",
         options=["twii", "0050", "006208"],
         format_func=lambda x: {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(x, x),
         index=0,
-        key="tw00935_benchmark",
+        key=f"{page_key}_benchmark",
     )
-    strategy = c4.selectbox("回測策略", options=["buy_hold", "sma_cross"], index=0, key="tw00935_strategy")
+    strategy = c4.selectbox("回測策略", options=["buy_hold", "sma_cross"], index=0, key=f"{page_key}_strategy")
 
     strategy_params: dict[str, float] = {}
     if strategy == "sma_cross":
         p1, p2 = st.columns(2)
-        fast = p1.slider("Fast", min_value=3, max_value=60, value=10, key="tw00935_fast")
-        slow = p2.slider("Slow", min_value=10, max_value=180, value=30, key="tw00935_slow")
+        fast = p1.slider("Fast", min_value=3, max_value=60, value=10, key=f"{page_key}_fast")
+        slow = p2.slider("Slow", min_value=10, max_value=180, value=30, key=f"{page_key}_slow")
         strategy_params = {"fast": float(fast), "slow": float(slow)}
 
     with st.expander("成本參數（台股預設）", expanded=False):
         k1, k2, k3 = st.columns(3)
-        fee_rate = k1.number_input("Fee Rate", min_value=0.0, max_value=0.02, value=0.001425, step=0.0001, format="%.6f", key="tw00935_fee")
-        sell_tax = k2.number_input("Sell Tax", min_value=0.0, max_value=0.02, value=0.0030, step=0.0001, format="%.6f", key="tw00935_tax")
-        slippage = k3.number_input("Slippage", min_value=0.0, max_value=0.02, value=0.0005, step=0.0001, format="%.6f", key="tw00935_slip")
+        fee_rate = k1.number_input(
+            "Fee Rate",
+            min_value=0.0,
+            max_value=0.02,
+            value=0.001425,
+            step=0.0001,
+            format="%.6f",
+            key=f"{page_key}_fee",
+        )
+        sell_tax = k2.number_input(
+            "Sell Tax",
+            min_value=0.0,
+            max_value=0.02,
+            value=0.0030,
+            step=0.0001,
+            format="%.6f",
+            key=f"{page_key}_tax",
+        )
+        slippage = k3.number_input(
+            "Slippage",
+            min_value=0.0,
+            max_value=0.02,
+            value=0.0005,
+            step=0.0001,
+            format="%.6f",
+            key=f"{page_key}_slip",
+        )
 
-    universe_id = "TW:00935"
+    universe_id = f"TW:{etf_text}"
     snapshot = store.load_universe_snapshot(universe_id)
     u1, u2 = st.columns([1, 4])
-    refresh_constituents = u1.button("更新 00935 成分股", use_container_width=True)
+    refresh_constituents = u1.button(f"更新 {etf_text} 成分股", use_container_width=True)
     if refresh_constituents or snapshot is None or not snapshot.symbols:
-        with st.spinner("抓取 00935 成分股中..."):
-            symbols_new, source_new = service.get_00935_constituents(limit=60)
+        with st.spinner(f"抓取 {etf_text} 成分股中..."):
+            symbols_new, source_new = service.get_tw_etf_constituents(etf_text, limit=60)
             if symbols_new:
                 store.save_universe_snapshot(universe_id=universe_id, symbols=symbols_new, source=source_new)
                 snapshot = store.load_universe_snapshot(universe_id)
@@ -2180,7 +2206,7 @@ def _render_00935_heatmap_view():
         return
 
     symbol_options = snapshot.symbols
-    symbol_key = "tw00935_symbol_pick"
+    symbol_key = f"{page_key}_symbol_pick"
     current_pick = st.session_state.get(symbol_key, symbol_options)
     if not isinstance(current_pick, list):
         current_pick = symbol_options
@@ -2233,13 +2259,13 @@ def _render_00935_heatmap_view():
         return pd.Series(dtype=float), ""
 
     run_key = (
-        f"tw00935_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:"
+        f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:"
         f"{strategy_params.get('fast', 0)}:{strategy_params.get('slow', 0)}:"
         f"{fee_rate}:{sell_tax}:{slippage}:{','.join(selected_symbols)}"
     )
-    payload_key = "tw00935_heatmap_payload"
+    payload_key = f"{page_key}_heatmap_payload"
 
-    if st.button("執行 00935 熱力圖回測", type="primary", use_container_width=True):
+    if st.button(f"執行 {etf_text} 熱力圖回測", type="primary", use_container_width=True):
         benchmark_close, benchmark_symbol = _load_benchmark_close(benchmark_choice)
         if benchmark_close.empty:
             st.error("Benchmark 取得失敗，請改選其他基準（0050 或 006208）後重試。")
@@ -2249,6 +2275,7 @@ def _render_00935_heatmap_view():
         rows: list[dict[str, object]] = []
         cost_model = CostModel(fee_rate=float(fee_rate), sell_tax_rate=float(sell_tax), slippage_rate=float(slippage))
         min_required = 2 if strategy == "buy_hold" else 40
+        name_map = service.get_tw_symbol_names(selected_symbols)
 
         for idx, symbol in enumerate(selected_symbols):
             store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
@@ -2303,6 +2330,7 @@ def _render_00935_heatmap_view():
             rows.append(
                 {
                     "symbol": symbol,
+                    "name": name_map.get(symbol, symbol),
                     "strategy_return_pct": strategy_ret * 100.0,
                     "benchmark_return_pct": benchmark_ret * 100.0,
                     "excess_pct": excess_pct,
@@ -2325,13 +2353,17 @@ def _render_00935_heatmap_view():
 
     payload = st.session_state.get(payload_key)
     if not payload or payload.get("run_key") != run_key:
-        st.info("設定好條件後，按下「執行 00935 熱力圖回測」。")
+        st.info(f"設定好條件後，按下「執行 {etf_text} 熱力圖回測」。")
         return
 
     rows_df = pd.DataFrame(payload.get("rows", []))
     if rows_df.empty:
         st.warning("沒有可用回測結果（可能資料不足或期間太短）。")
         return
+    if "name" not in rows_df.columns:
+        name_map = service.get_tw_symbol_names(rows_df["symbol"].astype(str).tolist())
+        rows_df["name"] = rows_df["symbol"].map(name_map).fillna(rows_df["symbol"])
+    rows_df["name"] = rows_df["name"].astype(str)
 
     rows_df = rows_df.sort_values("excess_pct", ascending=False).reset_index(drop=True)
     winners = int((rows_df["excess_pct"] > 0).sum())
@@ -2361,17 +2393,19 @@ def _render_00935_heatmap_view():
     tile_rows = int(math.ceil(len(rows_df) / tiles_per_row))
     z = np.full((tile_rows, tiles_per_row), np.nan)
     txt = np.full((tile_rows, tiles_per_row), "", dtype=object)
-    custom = np.empty((tile_rows, tiles_per_row, 3), dtype=object)
+    custom = np.empty((tile_rows, tiles_per_row, 4), dtype=object)
     custom[:, :, :] = None
 
     for i, row in rows_df.iterrows():
         r = i // tiles_per_row
         c = i % tiles_per_row
         z[r, c] = float(row["excess_pct"])
-        txt[r, c] = f"{row['symbol']}<br>{row['excess_pct']:+.2f}%"
+        label = f"{row['symbol']} {row['name']}" if str(row["name"]) != str(row["symbol"]) else f"{row['symbol']}"
+        txt[r, c] = f"{label}<br>{row['excess_pct']:+.2f}%"
         custom[r, c, 0] = float(row["strategy_return_pct"])
         custom[r, c, 1] = float(row["benchmark_return_pct"])
         custom[r, c, 2] = str(row["status"])
+        custom[r, c, 3] = str(row["name"])
 
     max_abs = float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0
     max_abs = max(max_abs, 0.01)
@@ -2388,6 +2422,7 @@ def _render_00935_heatmap_view():
                 colorscale=[[0.0, lose_color], [0.5, neutral_color], [1.0, win_color]],
                 colorbar=dict(title="相對大盤 %"),
                 hovertemplate=(
+                    "公司：%{customdata[3]}<br>"
                     "策略報酬：%{customdata[0]:+.2f}%<br>"
                     "大盤報酬：%{customdata[1]:+.2f}%<br>"
                     "超額：%{z:+.2f}%<br>"
@@ -2414,23 +2449,35 @@ def _render_00935_heatmap_view():
     out_df["benchmark_return_pct"] = out_df["benchmark_return_pct"].map(lambda v: round(float(v), 2))
     out_df["excess_pct"] = out_df["excess_pct"].map(lambda v: round(float(v), 2))
     st.dataframe(
-        out_df[["symbol", "strategy_return_pct", "benchmark_return_pct", "excess_pct", "status", "bars"]],
+        out_df[["symbol", "name", "strategy_return_pct", "benchmark_return_pct", "excess_pct", "status", "bars"]],
         use_container_width=True,
         hide_index=True,
     )
+
+
+def _render_00935_heatmap_view():
+    _render_tw_etf_heatmap_view("00935", page_desc="科技類")
+
+
+def _render_0050_heatmap_view():
+    _render_tw_etf_heatmap_view("0050", page_desc="台灣50")
 
 
 def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
     st.title("即時走勢 / 多來源資料 / 回測平台")
-    live_tab, bt_tab, heat_tab, guide_tab = st.tabs(["即時看盤", "回測工作台", "00935 熱力圖", "新手教學"])
+    live_tab, bt_tab, heat_00935_tab, heat_0050_tab, guide_tab = st.tabs(
+        ["即時看盤", "回測工作台", "00935 熱力圖", "0050 熱力圖", "新手教學"]
+    )
     with live_tab:
         _render_live_view()
     with bt_tab:
         _render_backtest_view()
-    with heat_tab:
+    with heat_00935_tab:
         _render_00935_heatmap_view()
+    with heat_0050_tab:
+        _render_0050_heatmap_view()
     with guide_tab:
         _render_tutorial_view()
 
