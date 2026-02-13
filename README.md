@@ -11,6 +11,8 @@
 
 ## 相關文件
 
+- 代理規範（給 LLM）：`AGENTS.md`
+- 專案脈絡（給 LLM/新接手）：`PROJECT_CONTEXT.md`
 - GitHub 新手說明：`GIT_GITHUB_GUIDE.md`
 - 更新紀錄：`CHANGELOG.md`
 
