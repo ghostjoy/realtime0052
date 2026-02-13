@@ -69,3 +69,24 @@ class PortfolioWalkForwardResult:
     symbol_results: Dict[str, WalkForwardResult]
     train_portfolio: PortfolioBacktestResult
     test_portfolio: PortfolioBacktestResult
+
+
+@dataclass(frozen=True)
+class RotationRebalanceRecord:
+    signal_date: pd.Timestamp
+    effective_date: pd.Timestamp
+    market_filter_on: bool
+    selected_symbols: List[str]
+    weights: Dict[str, float]
+    scores: Dict[str, float]
+
+
+@dataclass(frozen=True)
+class RotationBacktestResult:
+    equity_curve: pd.DataFrame
+    metrics: BacktestMetrics
+    drawdown_series: pd.Series
+    yearly_returns: Dict[str, float]
+    weights: pd.DataFrame
+    trades: pd.DataFrame
+    rebalance_records: List[RotationRebalanceRecord]

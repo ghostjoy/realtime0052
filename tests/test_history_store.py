@@ -118,6 +118,32 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(latest.universe_id, "TW:00935")
             self.assertEqual(latest.payload.get("generated_at"), "2026-01-02T00:00:00+00:00")
 
+    def test_save_and_load_latest_rotation_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            payload_old = {"generated_at": "2026-01-01T00:00:00+00:00", "top_n": 2}
+            payload_new = {"generated_at": "2026-01-02T00:00:00+00:00", "top_n": 3}
+            store.save_rotation_run(
+                universe_id="TW:ROTATION:CORE6",
+                run_key="run:old",
+                params={"top_n": 2},
+                payload=payload_old,
+            )
+            store.save_rotation_run(
+                universe_id="TW:ROTATION:CORE6",
+                run_key="run:new",
+                params={"top_n": 3},
+                payload=payload_new,
+            )
+            latest = store.load_latest_rotation_run("TW:ROTATION:CORE6")
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.universe_id, "TW:ROTATION:CORE6")
+            self.assertEqual(latest.run_key, "run:new")
+            self.assertEqual(latest.params.get("top_n"), 3)
+            self.assertEqual(latest.payload.get("generated_at"), "2026-01-02T00:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

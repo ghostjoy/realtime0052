@@ -13,10 +13,13 @@ from plotly.subplots import make_subplots
 
 from backtest import (
     CostModel,
+    ROTATION_DEFAULT_UNIVERSE,
+    ROTATION_MIN_BARS,
     apply_start_to_bars_map,
     apply_split_adjustment,
     build_buy_hold_equity,
     interval_return,
+    run_tw_etf_rotation_backtest,
     run_backtest,
     run_portfolio_backtest,
     get_strategy_min_bars,
@@ -2645,6 +2648,405 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     )
 
 
+def _render_tw_etf_rotation_view():
+    store = _history_store()
+    service = _market_service()
+    palette = _ui_palette()
+
+    universe_id = "TW:ROTATION:CORE6"
+    payload_key = "tw_rotation_payload"
+    cached_run = store.load_latest_rotation_run(universe_id)
+    if payload_key not in st.session_state and cached_run and isinstance(cached_run.payload, dict):
+        initial_payload = dict(cached_run.payload)
+        initial_payload.setdefault("generated_at", cached_run.created_at.isoformat())
+        initial_payload.setdefault("run_key", cached_run.run_key)
+        st.session_state[payload_key] = initial_payload
+
+    st.subheader("台股多ETF輪動（日K）")
+    st.caption(
+        "固定標的池：0050、0052、00935、0056、00878、00919。每月第一個交易日評分，"
+        "並於下一交易日開盤調整持股；大盤不在 60MA 上方時全數空手。"
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    start_date = c1.date_input("起始日期", value=date(date.today().year - 5, 1, 1), key="rotation_start")
+    end_date = c2.date_input("結束日期", value=date.today(), key="rotation_end")
+    top_n = c3.slider("每月持有檔數 Top N", min_value=1, max_value=len(ROTATION_DEFAULT_UNIVERSE), value=3, key="rotation_topn")
+    benchmark_choice = c4.selectbox(
+        "Benchmark",
+        options=["twii", "0050", "006208"],
+        index=0,
+        format_func=lambda x: {"twii": "^TWII（Auto fallback）", "0050": "0050", "006208": "006208"}.get(x, x),
+        key="rotation_benchmark",
+    )
+    initial_capital = c5.number_input(
+        "初始資產",
+        min_value=10_000.0,
+        max_value=1_000_000_000.0,
+        value=1_000_000.0,
+        step=50_000.0,
+        key="rotation_initial_capital",
+    )
+
+    with st.expander("成本參數（台股ETF預設）", expanded=False):
+        k1, k2, k3 = st.columns(3)
+        fee_rate = k1.number_input(
+            "Fee Rate",
+            min_value=0.0,
+            max_value=0.02,
+            value=0.001425,
+            step=0.0001,
+            format="%.6f",
+            key="rotation_fee",
+            help="手續費比例，0.001425 = 0.1425%。",
+        )
+        sell_tax = k2.number_input(
+            "Sell Tax",
+            min_value=0.0,
+            max_value=0.02,
+            value=0.0010,
+            step=0.0001,
+            format="%.6f",
+            key="rotation_tax",
+            help="ETF 常見賣出交易稅可用 0.001（0.1%）。",
+        )
+        slippage = k3.number_input(
+            "Slippage",
+            min_value=0.0,
+            max_value=0.02,
+            value=0.0005,
+            step=0.0001,
+            format="%.6f",
+            key="rotation_slippage",
+            help="滑價比例，0.0005 = 0.05%。",
+        )
+
+    st.markdown(
+        "\n".join(
+            [
+                "- 市場濾網：`Benchmark close > SMA60` 才允許持有。",
+                "- 動能分數：`0.2*20日 + 0.5*60日 + 0.3*120日`。",
+                "- 個股濾網：`score > 0` 且 `close > SMA60` 才納入排名。",
+                "- 調倉：每月一次，訊號後的下一交易日開盤成交。",
+            ]
+        )
+    )
+
+    date_is_valid = end_date >= start_date
+    if not date_is_valid:
+        st.warning("結束日期不可早於起始日期。")
+
+    start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
+    end_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc) if date_is_valid else None
+
+    def _benchmark_candidates_tw(choice: str) -> list[str]:
+        mapping = {
+            "twii": ["^TWII", "0050", "006208"],
+            "0050": ["0050"],
+            "006208": ["006208"],
+        }
+        return mapping.get(choice, ["^TWII", "0050", "006208"])
+
+    def _load_benchmark_bars(choice: str) -> tuple[pd.DataFrame, str]:
+        for benchmark_symbol in _benchmark_candidates_tw(choice):
+            store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            bench = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            bench = _normalize_ohlcv_frame(bench)
+            if bench.empty:
+                continue
+            bench, _ = apply_split_adjustment(
+                bars=bench,
+                symbol=benchmark_symbol,
+                market="TW",
+                use_known=True,
+                use_auto_detect=True,
+            )
+            if len(bench) >= 60:
+                return bench, benchmark_symbol
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]), ""
+
+    run_key = (
+        f"tw_rotation:{start_date}:{end_date}:{benchmark_choice}:"
+        f"{top_n}:{fee_rate}:{sell_tax}:{slippage}:{initial_capital}"
+    )
+
+    if st.button("執行ETF輪動回測", type="primary", use_container_width=True):
+        if not date_is_valid:
+            st.error("日期區間無效，請先修正起訖日期。")
+            return
+
+        bars_by_symbol: dict[str, pd.DataFrame] = {}
+        skipped_symbols: list[str] = []
+        progress = st.progress(0.0)
+        for idx, symbol in enumerate(ROTATION_DEFAULT_UNIVERSE):
+            store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars = _normalize_ohlcv_frame(bars)
+            if bars.empty:
+                skipped_symbols.append(symbol)
+                progress.progress((idx + 1) / len(ROTATION_DEFAULT_UNIVERSE))
+                continue
+            bars, _ = apply_split_adjustment(
+                bars=bars,
+                symbol=symbol,
+                market="TW",
+                use_known=True,
+                use_auto_detect=True,
+            )
+            if len(bars) < ROTATION_MIN_BARS:
+                skipped_symbols.append(symbol)
+            else:
+                bars_by_symbol[symbol] = bars
+            progress.progress((idx + 1) / len(ROTATION_DEFAULT_UNIVERSE))
+        progress.empty()
+
+        if not bars_by_symbol:
+            st.error(f"可用資料不足（每檔至少需 {ROTATION_MIN_BARS} 根K），無法執行。")
+            return
+
+        benchmark_bars, benchmark_symbol = _load_benchmark_bars(benchmark_choice)
+        if benchmark_bars.empty:
+            st.error("Benchmark 取得失敗，請改選 0050 或 006208 後重試。")
+            return
+
+        top_n_effective = min(int(top_n), len(bars_by_symbol))
+        cost_model = CostModel(
+            fee_rate=float(fee_rate),
+            sell_tax_rate=float(sell_tax),
+            slippage_rate=float(slippage),
+        )
+
+        try:
+            result = run_tw_etf_rotation_backtest(
+                bars_by_symbol=bars_by_symbol,
+                benchmark_bars=benchmark_bars,
+                top_n=top_n_effective,
+                initial_capital=float(initial_capital),
+                cost_model=cost_model,
+            )
+        except Exception as exc:
+            st.error(f"輪動回測失敗：{exc}")
+            return
+
+        eq_idx = result.equity_curve.index
+        buy_hold_equity = build_buy_hold_equity(
+            bars_by_symbol=bars_by_symbol,
+            target_index=eq_idx,
+            initial_capital=float(initial_capital),
+        )
+        benchmark_close = pd.to_numeric(benchmark_bars["close"], errors="coerce").reindex(eq_idx).ffill()
+        benchmark_non_na = benchmark_close.dropna()
+        if benchmark_non_na.empty or float(benchmark_non_na.iloc[0]) <= 0:
+            benchmark_equity = pd.Series(dtype=float)
+        else:
+            benchmark_equity = float(initial_capital) * (benchmark_close / float(benchmark_non_na.iloc[0]))
+
+        rebalance_rows: list[dict[str, object]] = []
+        for rec in result.rebalance_records:
+            rebalance_rows.append(
+                {
+                    "signal_date": rec.signal_date.isoformat(),
+                    "effective_date": rec.effective_date.isoformat(),
+                    "market_filter_on": bool(rec.market_filter_on),
+                    "selected_symbols": rec.selected_symbols,
+                    "weights": rec.weights,
+                    "scores": rec.scores,
+                }
+            )
+
+        trades_df = result.trades.copy()
+        if not trades_df.empty and "date" in trades_df.columns:
+            trades_df["date"] = pd.to_datetime(trades_df["date"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d")
+
+        payload = {
+            "run_key": run_key,
+            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+            "strategy": "tw_etf_rotation_v1",
+            "benchmark_symbol": benchmark_symbol,
+            "universe_symbols": list(ROTATION_DEFAULT_UNIVERSE),
+            "used_symbols": sorted(list(bars_by_symbol.keys())),
+            "skipped_symbols": sorted(skipped_symbols),
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "top_n": int(top_n_effective),
+            "initial_capital": float(initial_capital),
+            "metrics": result.metrics.__dict__,
+            "equity_curve": [
+                {"date": pd.Timestamp(idx).isoformat(), "equity": float(val)}
+                for idx, val in result.equity_curve["equity"].items()
+            ],
+            "benchmark_curve": [
+                {"date": pd.Timestamp(idx).isoformat(), "equity": float(val)}
+                for idx, val in benchmark_equity.dropna().items()
+            ],
+            "buy_hold_curve": [
+                {"date": pd.Timestamp(idx).isoformat(), "equity": float(val)}
+                for idx, val in buy_hold_equity.dropna().items()
+            ],
+            "rebalance_records": rebalance_rows,
+            "trades": trades_df.to_dict("records"),
+        }
+        st.session_state[payload_key] = payload
+        store.save_rotation_run(
+            universe_id=universe_id,
+            run_key=run_key,
+            params={
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+                "benchmark_choice": benchmark_choice,
+                "top_n": int(top_n_effective),
+                "fee_rate": float(fee_rate),
+                "sell_tax": float(sell_tax),
+                "slippage": float(slippage),
+                "initial_capital": float(initial_capital),
+            },
+            payload=payload,
+        )
+
+    payload = st.session_state.get(payload_key)
+    if not payload:
+        st.info("設定條件後按下「執行ETF輪動回測」，之後會自動顯示最近一次快取結果。")
+        return
+    if payload.get("run_key") != run_key:
+        st.caption("目前顯示的是上一次執行結果；若要套用目前設定，請重新按下執行。")
+
+    strategy_df = pd.DataFrame(payload.get("equity_curve", []))
+    if strategy_df.empty or "date" not in strategy_df.columns or "equity" not in strategy_df.columns:
+        st.warning("快取內容不完整，請重新執行一次輪動回測。")
+        return
+    strategy_df["date"] = pd.to_datetime(strategy_df["date"], utc=True, errors="coerce")
+    strategy_df["equity"] = pd.to_numeric(strategy_df["equity"], errors="coerce")
+    strategy_df = strategy_df.dropna(subset=["date", "equity"]).set_index("date").sort_index()
+    strategy_series = strategy_df["equity"]
+
+    benchmark_df = pd.DataFrame(payload.get("benchmark_curve", []))
+    benchmark_series = pd.Series(dtype=float)
+    if not benchmark_df.empty and {"date", "equity"}.issubset(benchmark_df.columns):
+        benchmark_df["date"] = pd.to_datetime(benchmark_df["date"], utc=True, errors="coerce")
+        benchmark_df["equity"] = pd.to_numeric(benchmark_df["equity"], errors="coerce")
+        benchmark_df = benchmark_df.dropna(subset=["date", "equity"]).set_index("date").sort_index()
+        benchmark_series = benchmark_df["equity"]
+
+    buy_hold_df = pd.DataFrame(payload.get("buy_hold_curve", []))
+    buy_hold_series = pd.Series(dtype=float)
+    if not buy_hold_df.empty and {"date", "equity"}.issubset(buy_hold_df.columns):
+        buy_hold_df["date"] = pd.to_datetime(buy_hold_df["date"], utc=True, errors="coerce")
+        buy_hold_df["equity"] = pd.to_numeric(buy_hold_df["equity"], errors="coerce")
+        buy_hold_df = buy_hold_df.dropna(subset=["date", "equity"]).set_index("date").sort_index()
+        buy_hold_series = buy_hold_df["equity"]
+
+    generated_at_text = str(payload.get("generated_at", "")).strip()
+    if generated_at_text:
+        try:
+            generated_dt = datetime.fromisoformat(generated_at_text)
+            if generated_dt.tzinfo is None:
+                generated_dt = generated_dt.replace(tzinfo=timezone.utc)
+            generated_at_text = generated_dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+    st.caption(
+        f"上次執行：{generated_at_text or 'N/A'} | "
+        f"Benchmark: {payload.get('benchmark_symbol', 'N/A')} | "
+        f"區間：{payload.get('start_date')} ~ {payload.get('end_date')} | "
+        f"持有檔數：Top {payload.get('top_n')} | "
+        f"可用標的：{len(payload.get('used_symbols', []))} / {len(payload.get('universe_symbols', []))}"
+    )
+    if payload.get("skipped_symbols"):
+        st.caption(f"資料不足未納入：{', '.join(payload.get('skipped_symbols', []))}")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=strategy_series.index,
+            y=strategy_series.values,
+            mode="lines",
+            name="Strategy Equity (ETF Rotation)",
+            line=dict(color=str(palette["equity"]), width=2.3),
+        )
+    )
+    if not benchmark_series.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=benchmark_series.index,
+                y=benchmark_series.values,
+                mode="lines",
+                name=f"Benchmark Equity ({payload.get('benchmark_symbol', 'Benchmark')})",
+                line=dict(color=str(palette["benchmark"]), width=2.0),
+            )
+        )
+    if not buy_hold_series.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=buy_hold_series.index,
+                y=buy_hold_series.values,
+                mode="lines",
+                name="Buy-and-Hold Equity (Equal-Weight ETF Pool)",
+                line=dict(color=str(palette["buy_hold"]), width=1.9),
+            )
+        )
+    fig.update_layout(
+        height=500,
+        margin=dict(l=10, r=10, t=30, b=10),
+        template=str(palette["plot_template"]),
+        paper_bgcolor=str(palette["paper_bg"]),
+        plot_bgcolor=str(palette["plot_bg"]),
+        font=dict(color=str(palette["text_color"])),
+    )
+    fig.update_xaxes(gridcolor=str(palette["grid"]))
+    fig.update_yaxes(gridcolor=str(palette["grid"]))
+    st.plotly_chart(fig, use_container_width=True)
+
+    metrics = payload.get("metrics", {})
+    if isinstance(metrics, dict):
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total Return", f"{float(metrics.get('total_return', 0.0)) * 100.0:+.2f}%")
+        m2.metric("CAGR", f"{float(metrics.get('cagr', 0.0)) * 100.0:+.2f}%")
+        m3.metric("Sharpe", f"{float(metrics.get('sharpe', 0.0)):.2f}")
+        m4.metric("MDD", f"{float(metrics.get('max_drawdown', 0.0)) * 100.0:+.2f}%")
+        m5.metric("Trades", f"{int(metrics.get('trades', 0))}")
+
+    if not benchmark_series.empty:
+        comp = pd.concat([strategy_series.rename("strategy"), benchmark_series.rename("benchmark")], axis=1).dropna()
+        if len(comp) >= 2:
+            strat_ret = float(comp["strategy"].iloc[-1] / comp["strategy"].iloc[0] - 1.0)
+            bench_ret = float(comp["benchmark"].iloc[-1] / comp["benchmark"].iloc[0] - 1.0)
+            excess = (strat_ret - bench_ret) * 100.0
+            verdict = "贏過大盤" if excess > 0 else ("輸給大盤" if excess < 0 else "與大盤持平")
+            st.info(f"相對Benchmark：{verdict} {excess:+.2f}%（策略 {strat_ret*100:+.2f}% / Benchmark {bench_ret*100:+.2f}%）")
+
+    rebalance_df = pd.DataFrame(payload.get("rebalance_records", []))
+    if not rebalance_df.empty:
+        name_map = service.get_tw_symbol_names(list(ROTATION_DEFAULT_UNIVERSE))
+
+        def _format_selected(v: object) -> str:
+            if not isinstance(v, list):
+                return "—"
+            if not v:
+                return "空手"
+            return "、".join([f"{sym} {name_map.get(sym, '')}".strip() for sym in v])
+
+        rebalance_df["signal_date"] = pd.to_datetime(rebalance_df["signal_date"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d")
+        rebalance_df["effective_date"] = pd.to_datetime(rebalance_df["effective_date"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d")
+        rebalance_df["selected"] = rebalance_df["selected_symbols"].map(_format_selected)
+        rebalance_df["market_filter"] = rebalance_df["market_filter_on"].map(lambda v: "ON" if bool(v) else "OFF")
+        rebalance_df["scores"] = rebalance_df["scores"].map(
+            lambda obj: "、".join([f"{k}:{float(v):+.3f}" for k, v in obj.items()]) if isinstance(obj, dict) and obj else "—"
+        )
+        st.markdown("#### 每月調倉明細")
+        st.dataframe(
+            rebalance_df[["signal_date", "effective_date", "market_filter", "selected", "scores"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    trades_df = pd.DataFrame(payload.get("trades", []))
+    if not trades_df.empty:
+        st.markdown("#### 成交紀錄（前200筆）")
+        show_cols = [c for c in ["date", "symbol", "side", "qty", "price", "notional", "fee", "tax", "slippage", "pnl", "target_weight"] if c in trades_df.columns]
+        st.dataframe(trades_df[show_cols].head(200), use_container_width=True, hide_index=True)
+
+
 def _render_00935_heatmap_view():
     _render_tw_etf_heatmap_view("00935", page_desc="科技類")
 
@@ -2657,13 +3059,15 @@ def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
     st.title("即時走勢 / 多來源資料 / 回測平台")
-    live_tab, bt_tab, heat_00935_tab, heat_0050_tab, guide_tab = st.tabs(
-        ["即時看盤", "回測工作台", "00935 熱力圖", "0050 熱力圖", "新手教學"]
+    live_tab, bt_tab, rotation_tab, heat_00935_tab, heat_0050_tab, guide_tab = st.tabs(
+        ["即時看盤", "回測工作台", "ETF輪動", "00935 熱力圖", "0050 熱力圖", "新手教學"]
     )
     with live_tab:
         _render_live_view()
     with bt_tab:
         _render_backtest_view()
+    with rotation_tab:
+        _render_tw_etf_rotation_view()
     with heat_00935_tab:
         _render_00935_heatmap_view()
     with heat_0050_tab:

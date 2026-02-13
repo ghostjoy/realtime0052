@@ -41,6 +41,15 @@ class HeatmapRun:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class RotationRun:
+    universe_id: str
+    run_key: str
+    params: Dict[str, object]
+    payload: Dict[str, object]
+    created_at: datetime
+
+
 class HistoryStore:
     def __init__(self, db_path: str = "market_history.sqlite3", service: Optional[MarketDataService] = None):
         self.db_path = Path(db_path)
@@ -118,6 +127,15 @@ class HistoryStore:
                     payload_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS rotation_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    universe_id TEXT NOT NULL,
+                    run_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    params_json TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
@@ -126,6 +144,9 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_heatmap_runs_universe_created_at
                     ON heatmap_runs(universe_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_rotation_runs_universe_created_at
+                    ON rotation_runs(universe_id, created_at DESC);
                 """
             )
 
@@ -481,6 +502,82 @@ class HistoryStore:
 
         return HeatmapRun(
             universe_id=str(row[0]),
+            payload=payload,
+            created_at=created_at,
+        )
+
+    def save_rotation_run(
+        self,
+        universe_id: str,
+        run_key: str,
+        params: Dict[str, object],
+        payload: Dict[str, object],
+    ) -> int:
+        universe_key = str(universe_id or "").strip().upper()
+        if not universe_key:
+            raise ValueError("universe_id is required")
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO rotation_runs(universe_id, run_key, created_at, params_json, payload_json)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    universe_key,
+                    str(run_key or ""),
+                    now,
+                    json.dumps(params, ensure_ascii=False),
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def load_latest_rotation_run(self, universe_id: str) -> Optional[RotationRun]:
+        universe_key = str(universe_id or "").strip().upper()
+        if not universe_key:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT universe_id, run_key, created_at, params_json, payload_json
+                FROM rotation_runs
+                WHERE universe_id=?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (universe_key,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        created_at = datetime.now(tz=timezone.utc)
+        try:
+            created_at = datetime.fromisoformat(str(row[2]))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+        params: Dict[str, object] = {}
+        payload: Dict[str, object] = {}
+        try:
+            obj = json.loads(str(row[3] or "{}"))
+            if isinstance(obj, dict):
+                params = obj
+        except Exception:
+            params = {}
+        try:
+            obj = json.loads(str(row[4] or "{}"))
+            if isinstance(obj, dict):
+                payload = obj
+        except Exception:
+            payload = {}
+
+        return RotationRun(
+            universe_id=str(row[0]),
+            run_key=str(row[1] or ""),
+            params=params,
             payload=payload,
             created_at=created_at,
         )
