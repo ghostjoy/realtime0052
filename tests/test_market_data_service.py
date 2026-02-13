@@ -139,10 +139,23 @@ class MarketDataServiceTests(unittest.TestCase):
     def test_get_tw_etf_constituents_fallback(self, mock_ticker):
         mock_ticker.side_effect = RuntimeError("upstream down")
         service = MarketDataService()
-        symbols, source = service.get_tw_etf_constituents("0050", limit=5)
-        self.assertEqual(source, "fallback_manual")
-        self.assertEqual(len(symbols), 5)
-        self.assertTrue(all(len(s) == 4 and s.isdigit() for s in symbols))
+        with patch.object(service, "_fetch_0050_yuanta_constituents", return_value=[]):
+            symbols, source = service.get_tw_etf_constituents("0050", limit=5)
+            self.assertEqual(source, "fallback_manual")
+            self.assertEqual(len(symbols), 5)
+            self.assertTrue(all(len(s) == 4 and s.isdigit() for s in symbols))
+
+    def test_get_tw_etf_constituents_00935_primary_source(self):
+        service = MarketDataService()
+        with patch.object(service, "_fetch_00935_nomura_constituents", return_value=["2330", "2454", "2317"]):
+            symbols, source = service.get_tw_etf_constituents("00935")
+        self.assertEqual(source, "nomura_etfapi")
+        self.assertEqual(symbols, ["2330", "2454", "2317"])
+
+    def test_get_tw_etf_expected_count(self):
+        self.assertEqual(MarketDataService.get_tw_etf_expected_count("0050"), 50)
+        self.assertEqual(MarketDataService.get_tw_etf_expected_count("00935"), 50)
+        self.assertIsNone(MarketDataService.get_tw_etf_expected_count("9999"))
 
 
 if __name__ == "__main__":

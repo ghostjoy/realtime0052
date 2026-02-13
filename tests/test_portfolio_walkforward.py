@@ -55,6 +55,20 @@ class PortfolioWalkForwardTests(unittest.TestCase):
         self.assertFalse(result.train_result.equity_curve.empty)
         self.assertFalse(result.test_result.equity_curve.empty)
 
+    def test_walk_forward_single_daily_k_strategy(self):
+        bars = _make_bars(seed=12, n=420)
+        result = walk_forward_single(
+            bars=bars,
+            strategy_name="sma_trend_filter",
+            cost_model=CostModel(fee_rate=0.0, sell_tax_rate=0.0, slippage_rate=0.0),
+            train_ratio=0.7,
+            objective="cagr",
+            initial_capital=100_000.0,
+        )
+        self.assertGreater(result.candidates, 0)
+        self.assertIn("trend", result.best_params)
+        self.assertFalse(result.test_result.equity_curve.empty)
+
     def test_walk_forward_portfolio_runs(self):
         bars_map = {"AAA": _make_bars(seed=5), "BBB": _make_bars(seed=6)}
         result = walk_forward_portfolio(

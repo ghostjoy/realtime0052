@@ -19,8 +19,11 @@
   - `load_universe_snapshot(...)`
 - 新增 repo 初始化腳本：`scripts/bootstrap_project_docs.py`，可一鍵建立 LLM 文件骨架。
 - 新增 Prompt 範本文件：`PROMPT_TEMPLATES.md`（由初始化腳本建立）。
+- 新增 `pre-commit` hook（`.githooks/pre-commit`）與 `scripts/auto_changelog.py`，可在 commit 前自動補 `CHANGELOG.md`。
+- 新增 `scripts/setup_git_hooks.sh`，可一鍵設定 `core.hooksPath=.githooks`。
 
 ### Changed
+- Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 - 主介面分頁調整為：`即時看盤 / 回測工作台 / 00935 熱力圖 / 新手教學`。
 - 主介面分頁調整為：`即時看盤 / 回測工作台 / 00935 熱力圖 / 0050 熱力圖 / 新手教學`。
 - 新手教學中補充「成分股快取」資料儲存位置說明。
@@ -29,6 +32,7 @@
 ### Docs
 - `README.md` 補充 00935 熱力圖分頁與功能說明。
 - `README.md` 補充「LLM 初始化自動化」使用說明。
+- `README.md`、`AGENTS.md`、`PROJECT_CONTEXT.md` 補充「自動更新 CHANGELOG」啟用方式與行為。
 
 ## [0.3.0] - 2026-02-13
 

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from backtest.metrics import compute_metrics_from_equity
-from backtest.strategy_library import STRATEGIES
+from backtest.strategy_library import STRATEGIES, get_strategy_min_bars
 from backtest.types import BacktestResult, Trade
 
 
@@ -29,7 +29,7 @@ class BacktestEngine:
     ) -> BacktestResult:
         if strategy_name not in STRATEGIES:
             raise ValueError(f"unsupported strategy: {strategy_name}")
-        min_bars = 2 if strategy_name == "buy_hold" else 40
+        min_bars = get_strategy_min_bars(strategy_name)
         if len(bars) < min_bars:
             raise ValueError(f"not enough bars for backtest ({strategy_name} need >= {min_bars})")
         if not {"open", "high", "low", "close"}.issubset(set(bars.columns)):

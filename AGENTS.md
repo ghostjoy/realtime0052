@@ -65,6 +65,6 @@ uv run python -m compileall app.py
 
 若代理完成修改，請同步：
 
-1. 更新 `CHANGELOG.md`（至少在 `Unreleased` 補一筆）
+1. 更新 `CHANGELOG.md`（本 repo 已有 `pre-commit` 自動補記；若未啟用請先執行 `./scripts/setup_git_hooks.sh`）
 2. 必要時更新 `README.md` 的功能描述
 3. 回報測試結果與主要影響檔案
