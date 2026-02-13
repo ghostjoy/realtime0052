@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,6 +13,34 @@ import pandas as pd
 
 from providers.base import ProviderRequest
 from services.market_data_service import MarketDataService
+
+DB_PATH_ENV_VAR = "REALTIME0052_DB_PATH"
+DEFAULT_DB_FILENAME = "market_history.sqlite3"
+ICLOUD_DOCS_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+DEFAULT_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_DB_FILENAME
+
+
+def resolve_history_db_path(db_path: Optional[str] = None) -> Path:
+    if db_path:
+        return Path(db_path).expanduser()
+
+    env_path = str(os.getenv(DB_PATH_ENV_VAR, "")).strip()
+    if env_path:
+        return Path(env_path).expanduser()
+
+    if ICLOUD_DOCS_ROOT.exists():
+        return DEFAULT_ICLOUD_DB_PATH
+    return Path(DEFAULT_DB_FILENAME)
+
+
+def _copy_legacy_local_db_if_needed(target_path: Path):
+    local_path = Path(DEFAULT_DB_FILENAME)
+    if local_path == target_path:
+        return
+    if target_path.exists() or not local_path.exists():
+        return
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(local_path, target_path)
 
 
 @dataclass(frozen=True)
@@ -51,8 +81,11 @@ class RotationRun:
 
 
 class HistoryStore:
-    def __init__(self, db_path: str = "market_history.sqlite3", service: Optional[MarketDataService] = None):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: Optional[str] = None, service: Optional[MarketDataService] = None):
+        self.db_path = resolve_history_db_path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path is None and not str(os.getenv(DB_PATH_ENV_VAR, "")).strip():
+            _copy_legacy_local_db_if_needed(self.db_path)
         self.service = service or MarketDataService()
         self._init_db()
 

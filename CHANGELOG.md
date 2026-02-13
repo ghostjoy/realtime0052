@@ -31,10 +31,12 @@
 - 新增 `scripts/setup_git_hooks.sh`，可一鍵設定 `core.hooksPath=.githooks`。
 
 ### Changed
+- Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py [id:8cdb1d9956]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py [id:2531f53664]
 - Auto: updated README.md, app.py, services/market_data_service.py, tests/test_market_data_service.py [id:4b701c5149]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, backtest/rotation.py, backtest/types.py, ... (+3) [id:3bd6d76b10]
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
+- SQLite 預設路徑改為「優先 iCloud Drive、否則本地」：iCloud 可用時使用 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`，並支援 `REALTIME0052_DB_PATH` 覆蓋。
 - 主介面分頁調整為：`即時看盤 / 回測工作台 / 00935 熱力圖 / 新手教學`。
 - 主介面分頁調整為：`即時看盤 / 回測工作台 / 00935 熱力圖 / 0050 熱力圖 / 新手教學`。
 - 主介面分頁調整為：`即時看盤 / 回測工作台 / ETF輪動 / 00935 熱力圖 / 0050 熱力圖 / 新手教學`。

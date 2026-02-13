@@ -2227,7 +2227,7 @@ def _render_tutorial_view():
     st.markdown("### 0) 資料會存在哪裡？")
     storage_df = pd.DataFrame(
         [
-            {"項目": "歷史日K（含 Benchmark）", "位置": "SQLite `market_history.sqlite3`", "用途": "同步一次後可重複用於回測與基準比較"},
+            {"項目": "歷史日K（含 Benchmark）", "位置": "SQLite（預設使用 iCloud 路徑，可用環境變數覆蓋）", "用途": "同步一次後可重複用於回測與基準比較"},
             {"項目": "回測紀錄", "位置": "SQLite `backtest_runs` 表", "用途": "保存執行過的回測摘要"},
             {"項目": "成分股快取", "位置": "SQLite `universe_snapshots` 表", "用途": "例如 00935 成分股抓過後可重複使用"},
             {"項目": "即時資料", "位置": "Session 記憶體", "用途": "即時看盤暫存，重開 app 會重抓"},
@@ -3377,7 +3377,7 @@ def _render_db_browser_view():
 
     st.caption(f"資料庫路徑：`{db_path}`")
     if not db_path.exists():
-        st.error("找不到資料庫檔案 `market_history.sqlite3`。")
+        st.error(f"找不到資料庫檔案：`{db_path}`。")
         return
 
     db_size_mb = db_path.stat().st_size / (1024 * 1024)

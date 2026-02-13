@@ -34,7 +34,7 @@ uv run python -m compileall app.py
 
 ## 4) 資料與快取原則
 
-- 歷史 OHLCV：儲存在 `market_history.sqlite3`
+- 歷史 OHLCV：預設儲存在 iCloud `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`（可由 `REALTIME0052_DB_PATH` 覆蓋）
 - 回測摘要：`backtest_runs` 表
 - 成分股快取：`universe_snapshots` 表（例如 00935）
 - 原則：優先重用 SQLite；只做必要增量同步，避免重複打外部來源

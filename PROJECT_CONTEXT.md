@@ -38,6 +38,7 @@
 
 ## 4) 關鍵資料表（SQLite）
 
+- 預設 DB 路徑：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`（若無 iCloud 則回退 `market_history.sqlite3`；可由 `REALTIME0052_DB_PATH` 覆蓋）
 - `instruments`
 - `daily_bars`
 - `sync_state`

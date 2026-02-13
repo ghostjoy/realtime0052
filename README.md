@@ -59,7 +59,9 @@ git config --get core.hooksPath
 
 ### 2) 自建歷史資料庫（SQLite）
 
-- 預設資料庫：`market_history.sqlite3`
+- 預設資料庫：
+  - 若偵測到 iCloud Drive：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`
+  - 否則回退本地：`market_history.sqlite3`
 - 啟用 `WAL`、UPSERT 增量同步
 - 表：
   - `instruments`
@@ -173,6 +175,12 @@ export TWELVE_DATA_API_KEY="your_api_key"
 ```
 
 未設定時，系統會自動從下一個來源（Yahoo）開始。
+
+若要手動指定 SQLite 路徑（會覆蓋預設 iCloud/本地判斷），可設定：
+
+```bash
+export REALTIME0052_DB_PATH="/your/path/market_history.sqlite3"
+```
 
 ## 執行
 
