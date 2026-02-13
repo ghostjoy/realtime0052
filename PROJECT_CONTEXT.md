@@ -21,6 +21,7 @@
 - `services/market_data_service.py`
   - 多來源市場資料邏輯（含 fallback）
   - 台股即時來源：`Fugle WS -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`
+  - 台股日K來源：`Fugle Historical -> TW OpenAPI -> TPEx OpenAPI -> Yahoo`
   - Benchmark / 00935 成分股來源整合
 - `storage/history_store.py`
   - SQLite schema 與歷史資料同步

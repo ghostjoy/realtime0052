@@ -1,4 +1,5 @@
 from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind
+from providers.tw_fugle_rest import TwFugleHistoricalProvider
 from providers.tw_fugle_ws import TwFugleWebSocketProvider
 from providers.tw_mis import TwMisProvider
 from providers.tw_openapi import TwOpenApiProvider
@@ -11,6 +12,7 @@ __all__ = [
     "MarketDataProvider",
     "ProviderError",
     "ProviderErrorKind",
+    "TwFugleHistoricalProvider",
     "TwFugleWebSocketProvider",
     "TwMisProvider",
     "TwOpenApiProvider",

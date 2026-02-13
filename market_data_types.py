@@ -69,3 +69,5 @@ class LiveContext:
     source_chain: list[str]
     used_fallback: bool
     fundamentals: Optional[Dict[str, Any]] = None
+    intraday_source: Optional[str] = None
+    daily_source: Optional[str] = None

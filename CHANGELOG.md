@@ -37,6 +37,7 @@
 - Fugle API key 讀取新增 key file fallback：
   - 預設讀取 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/fuglekey`
   - 可用 `FUGLE_MARKETDATA_API_KEY_FILE` / `FUGLE_API_KEY_FILE` 覆蓋。
+- 新增台股歷史 provider：`tw_fugle_rest`（Fugle Historical Candles 日K），支援長區間分段拉取後合併。
 - 回測工作台新增 `回測前自動補資料缺口（推薦）`：
   - 先檢查本地區間覆蓋度
   - 僅對缺口標的做增量同步，降低「回測天數不夠」機率。
@@ -63,9 +64,20 @@
 - 主介面分頁名稱由 `ETF輪動` 調整為 `ETF 輪動策略`，並同步更新該分頁按鈕/提示文案。
 - `持有最久 ETF` 推薦由前兩名改為前三名（Top3）。
 - `sync_symbol_history(...)` 起始日期邏輯調整：若使用者指定起點早於本地最早資料，會正確回補舊資料；若請求區間已在本地覆蓋範圍內，則維持增量向前同步。
+- 台股歷史同步鏈路調整為：`Fugle Historical(日K) -> TW OpenAPI -> TPEx OpenAPI -> Yahoo`（有 key 時優先 Fugle），適用回測工作台與 00935/0050/ETF 輪動缺口補齊。
 
 ### Fixed
 - 修正 Fugle WebSocket 連線細節：改用官方 `.../stock/streaming` endpoint、`auth.data.apikey` 欄位，並修正微秒時間戳解析，避免 `year out of range` 導致即時報價失敗。
+- 修正台股即時走勢來源覆蓋問題：當 Yahoo 1m 回傳空資料時，不再覆蓋 Fugle/MIS 即時 tick 聚合出的 K 線。
+- 修正即時看盤名稱欄位空白問題：名稱缺值時改為 `name -> full_name -> 台股代號查名 -> symbol` 多層 fallback。
+- 修正台股即時走勢偶發空白：日級報價來源（TW OpenAPI/TPEx）不再使用舊交易日時間戳作為即時 tick，並新增 SQLite 即時快取回補走勢。
+- 改善台股即時走勢可讀性：當 tick 聚合 K 線過少（例如僅 1 根）時，自動改用 Fugle Historical `1m` 補齊圖表。
+- 改善台股即時走勢補齊策略：不只空資料，當 K 數偏少時也會嘗試用本地 SQLite 快取補齊（僅在 K 數變多時套用）。
+- 改善台股即時走勢體感：新增 `last-good 1m` 快取回退（Yahoo/Fugle 1m 暫時失敗時沿用最近成功資料）。
+- 改善台股即時走勢穩定度：當 1m 即時資料仍不足時，自動改用 `日K尾段(260)` 顯示，避免僅剩 1 根 K。
+- 修正台股即時走勢分割斷層：即時圖也套用已知分割調整（例如 `0052`），避免未復權造成價格斷崖。
+- 即時走勢分割邏輯與回測對齊：改為 `known + auto-detect`，不侷限單一個股。
+- 修正即時看盤漲跌/漲跌幅顯示：當來源缺 `prev_close` 時，改由日K/即時K自動回推計算，台股與美股皆適用。
 - 修正台股日K走 Yahoo fallback 時未正規化代碼問題：4~6 碼代號自動改為 `.TW`（如 `0050 -> 0050.TW`），指數代碼（如 `^TWII`）維持原樣。
 - 熱力圖與 ETF 輪動分頁新增同步錯誤可見提示：若部分標的或 Benchmark 同步失敗，UI 會顯示摘要警示且仍盡量使用本地可用資料。
 

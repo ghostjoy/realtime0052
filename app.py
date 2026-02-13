@@ -30,6 +30,7 @@ from backtest import (
     walk_forward_single,
 )
 from indicators import add_indicators
+from providers import TwMisProvider
 from services import LiveOptions, MarketDataService
 from storage import HistoryStore
 
@@ -160,6 +161,32 @@ def _persist_live_tick_buffer(
     st.session_state[buffer_key] = buffer
 
 
+def _load_intraday_bars_from_sqlite(
+    *,
+    store: HistoryStore,
+    symbol: str,
+    market: str,
+    keep_minutes: int,
+) -> pd.DataFrame:
+    end = datetime.now(tz=timezone.utc)
+    start = end - pd.Timedelta(minutes=max(30, int(keep_minutes)))
+    try:
+        raw = store.load_intraday_ticks(symbol=symbol, market=market, start=start, end=end)
+    except Exception:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    ticks = raw.reset_index().rename(columns={"ts_utc": "ts"})
+    ticks["ts"] = pd.to_datetime(ticks.get("ts"), utc=True, errors="coerce")
+    ticks["price"] = pd.to_numeric(ticks.get("price"), errors="coerce")
+    ticks["cum_volume"] = pd.to_numeric(ticks.get("cum_volume"), errors="coerce").fillna(0.0)
+    ticks = ticks.dropna(subset=["ts", "price"]).sort_values("ts")
+    if ticks.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    return TwMisProvider.build_bars_from_ticks(ticks[["ts", "price", "cum_volume"]])
+
+
 DAILY_STRATEGY_OPTIONS = [
     "buy_hold",
     "sma_trend_filter",
@@ -205,6 +232,45 @@ def _format_int(v: Optional[int]) -> str:
     if v is None:
         return "—"
     return f"{v:,}"
+
+
+def _safe_float(value: object) -> Optional[float]:
+    try:
+        fv = float(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    if math.isnan(fv) or math.isinf(fv):
+        return None
+    return fv
+
+
+def _resolve_live_change_metrics(quote, intraday: pd.DataFrame, daily: pd.DataFrame) -> tuple[Optional[float], Optional[float]]:
+    price = _safe_float(getattr(quote, "price", None))
+    prev_close = _safe_float(getattr(quote, "prev_close", None))
+
+    daily_norm = _normalize_ohlcv_frame(daily)
+    if (prev_close is None or abs(prev_close) < 1e-12) and not daily_norm.empty and "close" in daily_norm.columns:
+        closes = pd.to_numeric(daily_norm["close"], errors="coerce").dropna()
+        if len(closes) >= 2:
+            prev_close = _safe_float(closes.iloc[-2])
+        elif len(closes) == 1:
+            prev_close = _safe_float(closes.iloc[-1])
+
+    intraday_norm = _normalize_ohlcv_frame(intraday)
+    if (prev_close is None or abs(prev_close) < 1e-12) and not intraday_norm.empty and "close" in intraday_norm.columns:
+        closes = pd.to_numeric(intraday_norm["close"], errors="coerce").dropna()
+        if len(closes) >= 2:
+            prev_close = _safe_float(closes.iloc[-2])
+
+    change = _safe_float(getattr(quote, "change", None))
+    if change is None and price is not None and prev_close is not None:
+        change = price - prev_close
+
+    change_pct = _safe_float(getattr(quote, "change_pct", None))
+    if change_pct is None and change is not None and prev_close is not None and abs(prev_close) >= 1e-12:
+        change_pct = change / prev_close * 100.0
+
+    return change, change_pct
 
 
 def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -513,6 +579,7 @@ def _inject_ui_styles():
 def _render_quality_bar(ctx, refresh_sec: int):
     provider_labels = {
         "fugle_ws": "Fugle WebSocket",
+        "tw_fugle_rest": "Fugle Historical",
         "tw_mis": "TW MIS",
         "tw_openapi": "TW OpenAPI",
         "tw_tpex": "TPEx OpenAPI",
@@ -527,12 +594,42 @@ def _render_quality_bar(ctx, refresh_sec: int):
             return "unknown"
         return provider_labels.get(key, key)
 
+    def _label_data_source(name: str) -> str:
+        key = str(name or "").strip().lower()
+        if not key:
+            return "unknown"
+        if key.startswith("cache:last_good:"):
+            base = key[len("cache:last_good:") :]
+            return f"快取({_label(base)})"
+        if key.startswith("cache:"):
+            return "快取"
+        if key.endswith("_ticks"):
+            base = key[: -len("_ticks")]
+            return f"{_label(base)}(tick聚合)"
+        if key.endswith("_tail"):
+            base = key[: -len("_tail")]
+            return f"{_label(base)}(日K尾段)"
+        if key.endswith("_resampled"):
+            base = key[: -len("_resampled")]
+            return f"{_label(base)}(重採樣)"
+        if key.endswith("_quote_derived"):
+            base = key[: -len("_quote_derived")]
+            return f"{_label(base)}(報價推導)"
+        return _label(key)
+
     quote = ctx.quote
     quality = ctx.quality
     source_chain = [str(s or "").strip() for s in list(getattr(ctx, "source_chain", [])) if str(s or "").strip()]
     chain_text = " -> ".join([_label(s) for s in source_chain]) if source_chain else "—"
     current_source = _label(str(getattr(quote, "source", "") or "unknown"))
     st.caption(f"即時來源：{current_source} | 鏈路：{chain_text}")
+    intraday_source = _label_data_source(str(getattr(ctx, "intraday_source", "") or "unknown"))
+    intraday_bars = 0
+    try:
+        intraday_bars = int(len(getattr(ctx, "intraday", pd.DataFrame())))
+    except Exception:
+        intraday_bars = 0
+    st.caption(f"即時走勢來源：{intraday_source} | K數={intraday_bars}")
 
     freshness = "—" if quality.freshness_sec is None else f"{quality.freshness_sec}s"
     st.caption(
@@ -706,20 +803,76 @@ def _render_live_view():
 
         st.markdown("#### 即時總覽")
         _render_quality_bar(ctx, refresh_sec=refresh_sec)
+        display_name = str(quote.extra.get("name") or "").strip()
+        if not display_name:
+            display_name = str(quote.extra.get("full_name") or "").strip()
+        if not display_name and market == "台股(TWSE)" and stock_id:
+            try:
+                display_name = str(service.get_tw_symbol_names([stock_id]).get(stock_id, "") or "").strip()
+            except Exception:
+                display_name = ""
+        if not display_name:
+            display_name = str(quote.symbol or "—")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("名稱", quote.extra.get("name", quote.symbol))
+        live_change, live_change_pct = _resolve_live_change_metrics(
+            quote,
+            intraday=getattr(ctx, "intraday", pd.DataFrame()),
+            daily=getattr(ctx, "daily", pd.DataFrame()),
+        )
+        col1.metric("名稱", display_name)
         col2.metric("最新價", _format_price(quote.price))
-        col3.metric("漲跌", "—" if quote.change is None else f"{quote.change:+.2f}")
-        col4.metric("漲跌幅", "—" if quote.change_pct is None else f"{quote.change_pct:+.2f}%")
+        col3.metric("漲跌", "—" if live_change is None else f"{live_change:+.2f}")
+        col4.metric("漲跌幅", "—" if live_change_pct is None else f"{live_change_pct:+.2f}%")
         col5, col6 = st.columns(2)
         col5.metric("成交量", _format_int(quote.volume))
         col6.metric("時間", quote.ts.strftime("%Y-%m-%d %H:%M:%S"))
         st.caption("非投資建議；僅供教育/研究。")
 
         bars_intraday = _normalize_ohlcv_frame(ctx.intraday)
+        if market == "台股(TWSE)":
+            assert stock_id is not None
+            min_k_for_chart = max(8, int(max(30, keep_minutes) // 15))
+            need_sqlite_fill = bars_intraday.empty or len(bars_intraday) < min_k_for_chart
+            if need_sqlite_fill:
+                sqlite_bars = _normalize_ohlcv_frame(
+                    _load_intraday_bars_from_sqlite(
+                        store=store,
+                        symbol=stock_id,
+                        market="TW",
+                        keep_minutes=keep_minutes,
+                    )
+                )
+                if not sqlite_bars.empty and len(sqlite_bars) > len(bars_intraday):
+                    before = int(len(bars_intraday))
+                    bars_intraday = sqlite_bars
+                    if before <= 0:
+                        st.caption("即時走勢：本輪改用本地 SQLite 即時快取。")
+                    else:
+                        st.caption(f"即時走勢：K數偏少，已用本地 SQLite 補齊（{before} -> {len(bars_intraday)}）。")
         if bars_intraday.empty:
             st.warning("目前無法取得走勢資料。")
             return
+
+        intraday_split_events = []
+        if market == "台股(TWSE)":
+            assert stock_id is not None
+            adjust_symbol = stock_id
+            adjust_market = "TW"
+        else:
+            adjust_symbol = (us_symbol or quote.symbol).strip().upper()
+            adjust_market = "US"
+        # Live chart also applies the same split-adjustment policy as backtest:
+        # known events + auto-detection.
+        bars_intraday, intraday_split_events = apply_split_adjustment(
+            bars=bars_intraday,
+            symbol=adjust_symbol,
+            market=adjust_market,
+            use_known=True,
+            use_auto_detect=True,
+        )
+        if intraday_split_events:
+            ev_txt = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in intraday_split_events])
+            st.caption(f"即時走勢已套用分割調整：{ev_txt}")
 
         ind = add_indicators(bars_intraday)
 

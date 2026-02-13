@@ -24,6 +24,7 @@ source ~/.zshrc
 ```
 
 > `scripts/run_fugle_mcp_server.sh` 會自動把 `FUGLE_MARKETDATA_API_KEY` 映射為 Fugle MCP 需要的 `API_KEY`。
+> 同一把 key 也會被 App 內建的 Fugle provider 使用（即時 WS + 歷史日K fallback）。
 
 ## 3) 在 MCP Client 設定 server
 

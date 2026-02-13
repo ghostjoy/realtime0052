@@ -10,6 +10,7 @@ import pandas as pd
 from data_sources import TAIPEI_TZ
 from market_data_types import DataQuality, LiveContext, OhlcvSnapshot, QuoteSnapshot
 from providers import (
+    TwFugleHistoricalProvider,
     TwFugleWebSocketProvider,
     TwMisProvider,
     TwOpenApiProvider,
@@ -57,6 +58,7 @@ class MarketDataService:
         self.yahoo = UsYahooProvider()
         self.us_twelve = UsTwelveDataProvider()
         self.us_stooq = UsStooqProvider()
+        self.tw_fugle_rest = TwFugleHistoricalProvider()
         self.tw_fugle_ws = TwFugleWebSocketProvider()
         self.tw_mis = TwMisProvider()
         self.tw_openapi = TwOpenApiProvider()
@@ -193,27 +195,37 @@ class MarketDataService:
         daily_candidates.append((self.us_stooq, symbol))
 
         daily = pd.DataFrame()
+        daily_source: Optional[str] = None
         try:
-            daily = self._try_ohlcv_chain_with_symbols("US", "1d", daily_candidates).df
+            daily_snap = self._try_ohlcv_chain_with_symbols("US", "1d", daily_candidates)
+            daily = daily_snap.df
+            daily_source = str(daily_snap.source or "") or None
         except Exception:
             last_good = self.cache.get(last_good_key)
             if isinstance(last_good, LiveContext) and isinstance(last_good.daily, pd.DataFrame):
                 daily = last_good.daily.copy()
+                daily_source = str(getattr(last_good, "daily_source", "") or "cache:last_good")
 
         intraday = pd.DataFrame()
+        intraday_source: Optional[str] = None
         if options.use_yahoo:
             try:
                 intraday_req = ProviderRequest(symbol=yahoo_symbol, market="US", interval="1m")
-                intraday = self.yahoo.ohlcv(intraday_req).df
+                intraday_snap = self.yahoo.ohlcv(intraday_req)
+                intraday = intraday_snap.df
+                if not intraday.empty:
+                    intraday_source = str(intraday_snap.source or "") or "yahoo"
             except Exception:
                 intraday = pd.DataFrame()
         if intraday.empty:
             if not daily.empty:
                 intraday = daily.tail(260).copy()
+                intraday_source = f"{daily_source or 'daily'}_tail"
             else:
                 last_good = self.cache.get(last_good_key)
                 if isinstance(last_good, LiveContext) and isinstance(last_good.intraday, pd.DataFrame):
                     intraday = last_good.intraday.copy()
+                    intraday_source = str(getattr(last_good, "intraday_source", "") or "cache:last_good")
 
         if daily.empty and not intraday.empty:
             tmp = intraday.copy()
@@ -223,6 +235,7 @@ class MarketDataService:
                 .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
                 .dropna(subset=["open", "high", "low", "close"], how="any")
             )
+            daily_source = f"{intraday_source or 'intraday'}_resampled"
 
         if daily.empty and quote.price is not None:
             ts = pd.Timestamp(quote.ts)
@@ -242,6 +255,7 @@ class MarketDataService:
                 ],
                 index=pd.DatetimeIndex([ts]),
             )
+            daily_source = f"{quote.source}_quote_derived"
 
         ctx = LiveContext(
             quote=quote,
@@ -251,6 +265,8 @@ class MarketDataService:
             source_chain=chain,
             used_fallback=depth > 0,
             fundamentals=self.yahoo.fundamentals(yahoo_symbol),
+            intraday_source=intraday_source,
+            daily_source=daily_source,
         )
         self.cache.set(cache_key, ctx, ttl_sec=10)
         self.cache.set(last_good_key, ctx, ttl_sec=1800)
@@ -263,6 +279,8 @@ class MarketDataService:
         ticks: pd.DataFrame,
         options: LiveOptions,
     ) -> Tuple[LiveContext, pd.DataFrame]:
+        intraday_cache_key = f"tw-live:intraday1m:last-good:{symbol}:{yahoo_symbol}"
+
         quote_providers: list[object] = []
         if options.use_fugle_ws and getattr(self.tw_fugle_ws, "api_key", None):
             quote_providers.append(self.tw_fugle_ws)
@@ -272,42 +290,123 @@ class MarketDataService:
         quote, chain, reason, depth = self._try_quote_chain(quote_providers, quote_req)
 
         if quote.price is not None:
+            tick_ts = pd.Timestamp(quote.ts)
+            if tick_ts.tzinfo is None:
+                tick_ts = tick_ts.tz_localize("UTC")
+            else:
+                tick_ts = tick_ts.tz_convert("UTC")
+            now_ts = pd.Timestamp(datetime.now(tz=timezone.utc))
+            quote_source = str(getattr(quote, "source", "") or "").strip().lower()
+            # Daily snapshot sources may carry stale trading-date timestamps.
+            # Use "now" as tick ts to keep intraday chart visible.
+            if quote_source in {"tw_openapi", "tw_tpex"}:
+                tick_ts = now_ts
+            elif (now_ts - tick_ts) > pd.Timedelta(days=1):
+                tick_ts = now_ts
+
             new_tick = pd.DataFrame(
-                [{"ts": quote.ts, "price": float(quote.price), "cum_volume": float(quote.volume or 0)}]
+                [{"ts": tick_ts, "price": float(quote.price), "cum_volume": float(quote.volume or 0)}]
             )
             if ticks.empty:
                 ticks = new_tick.copy()
             else:
                 ticks = pd.concat([ticks, new_tick], ignore_index=True)
+            ticks["ts"] = pd.to_datetime(ticks["ts"], utc=True, errors="coerce")
+            ticks = ticks.dropna(subset=["ts"])
             ticks = ticks.drop_duplicates(subset=["ts", "price", "cum_volume"], keep="last")
-            cutoff = TwMisProvider.now() - pd.Timedelta(minutes=options.keep_minutes)
+            cutoff = pd.Timestamp(TwMisProvider.now() - pd.Timedelta(minutes=options.keep_minutes)).tz_convert("UTC")
             ticks = ticks[ticks["ts"] >= cutoff].copy()
 
         bars_rt = TwMisProvider.build_bars_from_ticks(ticks)
         intraday = bars_rt.copy()
+        intraday_source: Optional[str] = f"{quote.source}_ticks" if not bars_rt.empty else None
         daily = pd.DataFrame()
+        daily_source: Optional[str] = None
 
         if options.use_yahoo:
             try:
                 intraday_req = ProviderRequest(symbol=yahoo_symbol, market="TW", interval="1m")
-                intraday = self.yahoo.ohlcv(intraday_req).df
+                intraday_snap = self.yahoo.ohlcv(intraday_req)
+                yahoo_intraday = intraday_snap.df
+                if not yahoo_intraday.empty:
+                    intraday = yahoo_intraday
+                    intraday_source = str(intraday_snap.source or "") or "yahoo"
+                    self.cache.set(
+                        intraday_cache_key,
+                        {"df": intraday.copy(), "source": intraday_source},
+                        ttl_sec=1800,
+                    )
             except Exception:
                 pass
+
+        # If tick aggregation is too sparse, prefer Fugle historical 1m candles for chart readability.
+        # This helps cases where only one latest trade tick is available in the current refresh cycle.
+        min_intraday_bars = max(6, int(max(1, options.keep_minutes) // 30))
+        need_fugle_intraday = (
+            getattr(self.tw_fugle_rest, "api_key", None) is not None
+            and (intraday.empty or len(intraday) < min_intraday_bars)
+        )
+        if need_fugle_intraday:
+            try:
+                now_utc = datetime.now(tz=timezone.utc)
+                tw_midnight = datetime.now(tz=TAIPEI_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+                day_start_utc = tw_midnight.astimezone(timezone.utc)
+                rolling_start = now_utc - pd.Timedelta(minutes=max(30, int(options.keep_minutes)))
+                intraday_start = min(rolling_start, day_start_utc)
+                intraday_req = ProviderRequest(
+                    symbol=symbol,
+                    market="TW",
+                    interval="1m",
+                    start=intraday_start,
+                    end=now_utc,
+                )
+                fugle_intraday_snap = self.tw_fugle_rest.ohlcv(intraday_req)
+                fugle_intraday = fugle_intraday_snap.df
+                if not fugle_intraday.empty:
+                    intraday = fugle_intraday
+                    intraday_source = str(fugle_intraday_snap.source or "") or "tw_fugle_rest"
+                    self.cache.set(
+                        intraday_cache_key,
+                        {"df": intraday.copy(), "source": intraday_source},
+                        ttl_sec=1800,
+                    )
+            except Exception:
+                pass
+
+        if intraday.empty or len(intraday) < min_intraday_bars:
+            cached_intraday = self.cache.get(intraday_cache_key)
+            if isinstance(cached_intraday, dict):
+                cached_df = cached_intraday.get("df")
+                if isinstance(cached_df, pd.DataFrame) and not cached_df.empty and len(cached_df) > len(intraday):
+                    intraday = cached_df.copy()
+                    cached_source = str(cached_intraday.get("source") or "1m")
+                    intraday_source = f"cache:last_good:{cached_source}"
 
         if str(options.exchange or "tse").strip().lower() == "otc":
             daily_providers = [self.tw_tpex, self.tw_openapi]
         else:
             daily_providers = [self.tw_openapi, self.tw_tpex]
+        if getattr(self.tw_fugle_rest, "api_key", None):
+            daily_providers = [self.tw_fugle_rest, *daily_providers]
 
         try:
             daily_req = ProviderRequest(symbol=symbol, market="TW", interval="1d")
-            daily = self._try_ohlcv_chain(daily_providers, daily_req).df
+            daily_snap = self._try_ohlcv_chain(daily_providers, daily_req)
+            daily = daily_snap.df
+            daily_source = str(daily_snap.source or "") or None
         except Exception:
             if options.use_yahoo:
                 try:
-                    daily = self.yahoo.ohlcv(ProviderRequest(symbol=yahoo_symbol, market="TW", interval="1d")).df
+                    daily_snap = self.yahoo.ohlcv(ProviderRequest(symbol=yahoo_symbol, market="TW", interval="1d"))
+                    daily = daily_snap.df
+                    daily_source = str(daily_snap.source or "") or "yahoo"
                 except Exception:
                     daily = pd.DataFrame()
+
+        # Stable fallback: if real intraday remains sparse, use daily tail bars for chart continuity.
+        if (intraday.empty or len(intraday) < min_intraday_bars) and not daily.empty:
+            intraday = daily.tail(260).copy()
+            intraday_source = f"{daily_source or 'daily'}_tail"
 
         ctx = LiveContext(
             quote=quote,
@@ -317,6 +416,8 @@ class MarketDataService:
             source_chain=chain,
             used_fallback=depth > 0,
             fundamentals=None,
+            intraday_source=intraday_source,
+            daily_source=daily_source,
         )
         return ctx, ticks
 

@@ -11,15 +11,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 from providers.base import ProviderError, ProviderRequest
+from providers.tw_fugle_rest import TwFugleHistoricalProvider
 from providers.tw_fugle_ws import TwFugleWebSocketProvider
 from providers.tw_tpex import TwTpexOpenApiProvider
 
 
 class _MockResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code: int = 200):
         self._payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"http {self.status_code}")
         return None
 
     def json(self):
@@ -163,6 +167,139 @@ class TwProvidersTests(unittest.TestCase):
         ts_us = 1685338200000000
         parsed = TwFugleWebSocketProvider._parse_ts(ts_us)
         self.assertEqual(parsed.year, 2023)
+
+    @patch("requests.get")
+    def test_fugle_historical_ohlcv_success(self, mock_get):
+        mock_get.return_value = _MockResponse(
+            {
+                "symbol": "0050",
+                "data": [
+                    {
+                        "date": "2026-02-10T00:00:00.000Z",
+                        "open": 150.0,
+                        "high": 152.0,
+                        "low": 149.0,
+                        "close": 151.0,
+                        "volume": 1234567,
+                    },
+                    {
+                        "date": "2026-02-11T00:00:00.000Z",
+                        "open": 151.0,
+                        "high": 153.0,
+                        "low": 150.0,
+                        "close": 152.0,
+                        "volume": 2234567,
+                    },
+                ],
+            }
+        )
+        provider = TwFugleHistoricalProvider(api_key="fake-key")
+        snap = provider.ohlcv(
+            ProviderRequest(
+                symbol="0050",
+                market="TW",
+                interval="1d",
+                start=datetime(2026, 2, 10, tzinfo=timezone.utc),
+                end=datetime(2026, 2, 11, tzinfo=timezone.utc),
+            )
+        )
+        self.assertEqual(snap.source, "tw_fugle_rest")
+        self.assertEqual(len(snap.df), 2)
+        self.assertAlmostEqual(float(snap.df["close"].iloc[-1]), 152.0)
+        self.assertTrue(mock_get.called)
+        kwargs = mock_get.call_args.kwargs
+        self.assertEqual(kwargs.get("headers", {}).get("X-API-KEY"), "fake-key")
+        self.assertEqual(kwargs.get("params", {}).get("timeframe"), "D")
+
+    @patch("requests.get")
+    def test_fugle_historical_ohlcv_chunks_long_range(self, mock_get):
+        def _handler(*_args, **kwargs):
+            params = kwargs.get("params", {})
+            from_date = str(params.get("from"))
+            return _MockResponse(
+                {
+                    "symbol": "0050",
+                    "data": [
+                        {
+                            "date": f"{from_date}T00:00:00.000Z",
+                            "open": 100.0,
+                            "high": 101.0,
+                            "low": 99.0,
+                            "close": 100.5,
+                            "volume": 1000,
+                        }
+                    ],
+                }
+            )
+
+        mock_get.side_effect = _handler
+        provider = TwFugleHistoricalProvider(api_key="fake-key")
+        snap = provider.ohlcv(
+            ProviderRequest(
+                symbol="0050",
+                market="TW",
+                interval="1d",
+                start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                end=datetime(2025, 2, 1, tzinfo=timezone.utc),
+            )
+        )
+        self.assertGreaterEqual(mock_get.call_count, 2)
+        self.assertFalse(snap.df.empty)
+
+    @patch("requests.get")
+    def test_fugle_historical_ohlcv_intraday_1m_success(self, mock_get):
+        mock_get.return_value = _MockResponse(
+            {
+                "symbol": "2330",
+                "data": [
+                    {
+                        "date": "2026-02-13T01:00:00.000Z",
+                        "open": 600.0,
+                        "high": 601.0,
+                        "low": 599.0,
+                        "close": 600.5,
+                        "volume": 1200,
+                    },
+                    {
+                        "date": "2026-02-13T01:01:00.000Z",
+                        "open": 600.5,
+                        "high": 602.0,
+                        "low": 600.0,
+                        "close": 601.5,
+                        "volume": 1500,
+                    },
+                ],
+            }
+        )
+        provider = TwFugleHistoricalProvider(api_key="fake-key")
+        snap = provider.ohlcv(
+            ProviderRequest(
+                symbol="2330",
+                market="TW",
+                interval="1m",
+                start=datetime(2026, 2, 13, 1, 0, tzinfo=timezone.utc),
+                end=datetime(2026, 2, 13, 1, 2, tzinfo=timezone.utc),
+            )
+        )
+        self.assertEqual(snap.interval, "1m")
+        self.assertEqual(len(snap.df), 2)
+        self.assertAlmostEqual(float(snap.df["close"].iloc[-1]), 601.5)
+        kwargs = mock_get.call_args.kwargs
+        self.assertEqual(kwargs.get("params", {}).get("timeframe"), "1")
+
+    def test_fugle_historical_requires_api_key(self):
+        provider = TwFugleHistoricalProvider(api_key=None)
+        provider.api_key = None
+        with self.assertRaises(ProviderError):
+            provider.ohlcv(
+                ProviderRequest(
+                    symbol="0050",
+                    market="TW",
+                    interval="1d",
+                    start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    end=datetime(2026, 2, 1, tzinfo=timezone.utc),
+                )
+            )
 
 
 if __name__ == "__main__":

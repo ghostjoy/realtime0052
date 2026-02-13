@@ -265,6 +265,313 @@ class MarketDataServiceTests(unittest.TestCase):
         service.tw_openapi.quote.assert_not_called()
         service.tw_tpex.quote.assert_not_called()
 
+    def test_get_tw_live_context_falls_back_to_daily_tail_when_intraday_empty(self):
+        service = MarketDataService()
+        service.tw_fugle_ws.api_key = "fake-key"
+        service.tw_fugle_rest.api_key = None
+
+        quote = QuoteSnapshot(
+            symbol="2330",
+            market="TW",
+            ts=datetime.now(tz=timezone.utc),
+            price=612.0,
+            prev_close=605.0,
+            open=607.0,
+            high=613.0,
+            low=604.0,
+            volume=12345,
+            source="fugle_ws",
+            is_delayed=False,
+            extra={},
+        )
+        idx = pd.date_range("2024-01-01", periods=3, freq="B", tz="UTC")
+        daily_snap = OhlcvSnapshot(
+            symbol="2330",
+            market="TW",
+            interval="1d",
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [1.0, 1.0, 1.0],
+                    "high": [1.0, 1.0, 1.0],
+                    "low": [1.0, 1.0, 1.0],
+                    "close": [1.0, 1.0, 1.0],
+                    "volume": [1.0, 1.0, 1.0],
+                },
+                index=idx,
+            ),
+            source="tw_openapi",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+        intraday_empty_snap = OhlcvSnapshot(
+            symbol="2330.TW",
+            market="TW",
+            interval="1m",
+            tz="UTC",
+            df=pd.DataFrame(columns=["open", "high", "low", "close", "volume"]),
+            source="yahoo",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+
+        with patch.object(service.tw_fugle_ws, "quote", return_value=quote):
+            with patch.object(service, "_try_ohlcv_chain", return_value=daily_snap):
+                with patch.object(service.yahoo, "ohlcv", return_value=intraday_empty_snap):
+                    ctx, _ = service.get_tw_live_context(
+                        symbol="2330",
+                        yahoo_symbol="2330.TW",
+                        ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
+                        options=LiveOptions(use_yahoo=True, keep_minutes=60, exchange="tse", use_fugle_ws=True),
+                    )
+
+        self.assertFalse(ctx.intraday.empty)
+        self.assertEqual(ctx.intraday_source, "tw_openapi_tail")
+
+    def test_get_tw_live_context_prefers_fugle_rest_for_daily_when_key_exists(self):
+        service = MarketDataService()
+        service.tw_fugle_rest.api_key = "fake-key"
+        service.tw_fugle_ws.api_key = None
+
+        quote = QuoteSnapshot(
+            symbol="0050",
+            market="TW",
+            ts=datetime.now(tz=timezone.utc),
+            price=100.0,
+            prev_close=99.0,
+            open=99.0,
+            high=101.0,
+            low=98.0,
+            volume=100,
+            source="tw_mis",
+            is_delayed=False,
+            extra={},
+        )
+        idx = pd.date_range("2024-01-01", periods=3, freq="B", tz="UTC")
+        daily_snap = OhlcvSnapshot(
+            symbol="0050",
+            market="TW",
+            interval="1d",
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [1.0, 1.0, 1.0],
+                    "high": [1.0, 1.0, 1.0],
+                    "low": [1.0, 1.0, 1.0],
+                    "close": [1.0, 1.0, 1.0],
+                    "volume": [1.0, 1.0, 1.0],
+                },
+                index=idx,
+            ),
+            source="tw_fugle_rest",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+
+        with patch.object(service, "_try_quote_chain", return_value=(quote, ["tw_mis"], None, 0)):
+            with patch.object(service, "_try_ohlcv_chain", return_value=daily_snap) as mock_daily_chain:
+                with patch.object(service.yahoo, "ohlcv", side_effect=RuntimeError("skip intraday yahoo")):
+                    service.get_tw_live_context(
+                        symbol="0050",
+                        yahoo_symbol="0050.TW",
+                        ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
+                        options=LiveOptions(use_yahoo=True, keep_minutes=60, exchange="tse", use_fugle_ws=False),
+                    )
+        providers = mock_daily_chain.call_args.args[0]
+        provider_names = [str(getattr(p, "name", "")) for p in providers]
+        self.assertGreaterEqual(len(provider_names), 1)
+        self.assertEqual(provider_names[0], "tw_fugle_rest")
+
+    def test_get_tw_live_context_prefers_fugle_rest_intraday_when_tick_sparse(self):
+        service = MarketDataService()
+        service.tw_fugle_ws.api_key = "fake-key"
+        service.tw_fugle_rest.api_key = "fake-key"
+
+        quote = QuoteSnapshot(
+            symbol="2330",
+            market="TW",
+            ts=datetime.now(tz=timezone.utc),
+            price=600.0,
+            prev_close=590.0,
+            open=595.0,
+            high=610.0,
+            low=585.0,
+            volume=1000,
+            source="fugle_ws",
+            is_delayed=False,
+            extra={},
+        )
+        daily_idx = pd.date_range("2024-01-01", periods=2, freq="B", tz="UTC")
+        daily_snap = OhlcvSnapshot(
+            symbol="2330",
+            market="TW",
+            interval="1d",
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [1.0, 1.0],
+                    "high": [1.0, 1.0],
+                    "low": [1.0, 1.0],
+                    "close": [1.0, 1.0],
+                    "volume": [1.0, 1.0],
+                },
+                index=daily_idx,
+            ),
+            source="tw_openapi",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+        intraday_idx = pd.date_range(datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=10), periods=20, freq="1min")
+        intraday_snap = OhlcvSnapshot(
+            symbol="2330",
+            market="TW",
+            interval="1m",
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [600.0] * len(intraday_idx),
+                    "high": [601.0] * len(intraday_idx),
+                    "low": [599.0] * len(intraday_idx),
+                    "close": [600.5] * len(intraday_idx),
+                    "volume": [100.0] * len(intraday_idx),
+                },
+                index=intraday_idx,
+            ),
+            source="tw_fugle_rest",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+
+        with patch.object(service.tw_fugle_ws, "quote", return_value=quote):
+            with patch.object(service, "_try_ohlcv_chain", return_value=daily_snap):
+                with patch.object(service.yahoo, "ohlcv", side_effect=RuntimeError("empty yahoo")):
+                    with patch.object(service.tw_fugle_rest, "ohlcv", return_value=intraday_snap):
+                        ctx, _ = service.get_tw_live_context(
+                            symbol="2330",
+                            yahoo_symbol="2330.TW",
+                            ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
+                            options=LiveOptions(use_yahoo=True, keep_minutes=180, exchange="tse", use_fugle_ws=True),
+                        )
+
+        self.assertEqual(ctx.intraday_source, "tw_fugle_rest")
+        self.assertGreaterEqual(len(ctx.intraday), 10)
+
+    def test_get_tw_live_context_uses_now_tick_for_stale_daily_quote(self):
+        service = MarketDataService()
+        stale_quote = QuoteSnapshot(
+            symbol="2330",
+            market="TW",
+            ts=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            price=600.0,
+            prev_close=590.0,
+            open=595.0,
+            high=610.0,
+            low=585.0,
+            volume=1000,
+            source="tw_openapi",
+            is_delayed=True,
+            extra={},
+        )
+        idx = pd.date_range("2024-01-01", periods=2, freq="B", tz="UTC")
+        daily_snap = OhlcvSnapshot(
+            symbol="2330",
+            market="TW",
+            interval="1d",
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [1.0, 1.0],
+                    "high": [1.0, 1.0],
+                    "low": [1.0, 1.0],
+                    "close": [1.0, 1.0],
+                    "volume": [1.0, 1.0],
+                },
+                index=idx,
+            ),
+            source="tw_openapi",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+        with patch.object(service, "_try_quote_chain", return_value=(stale_quote, ["tw_openapi"], None, 0)):
+            with patch.object(service, "_try_ohlcv_chain", return_value=daily_snap):
+                ctx, ticks = service.get_tw_live_context(
+                    symbol="2330",
+                    yahoo_symbol="2330.TW",
+                    ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
+                    options=LiveOptions(use_yahoo=False, keep_minutes=60, exchange="tse", use_fugle_ws=False),
+                )
+        self.assertFalse(ctx.intraday.empty)
+        self.assertFalse(ticks.empty)
+        latest = pd.to_datetime(ticks["ts"], utc=True, errors="coerce").max()
+        self.assertFalse(pd.isna(latest))
+        self.assertGreaterEqual(latest, pd.Timestamp(datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=5)))
+
+    def test_get_tw_live_context_uses_cached_last_good_intraday_when_sparse(self):
+        service = MarketDataService()
+        service.tw_fugle_ws.api_key = "fake-key"
+        service.tw_fugle_rest.api_key = None
+        cache_key = "tw-live:intraday1m:last-good:2330:2330.TW"
+        idx = pd.date_range(datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=30), periods=30, freq="1min")
+        cached_df = pd.DataFrame(
+            {
+                "open": [600.0] * len(idx),
+                "high": [601.0] * len(idx),
+                "low": [599.0] * len(idx),
+                "close": [600.5] * len(idx),
+                "volume": [100.0] * len(idx),
+            },
+            index=idx,
+        )
+        service.cache.set(cache_key, {"df": cached_df, "source": "yahoo"}, ttl_sec=1800)
+
+        quote = QuoteSnapshot(
+            symbol="2330",
+            market="TW",
+            ts=datetime.now(tz=timezone.utc),
+            price=600.0,
+            prev_close=590.0,
+            open=595.0,
+            high=610.0,
+            low=585.0,
+            volume=1000,
+            source="fugle_ws",
+            is_delayed=False,
+            extra={},
+        )
+        daily_idx = pd.date_range("2024-01-01", periods=2, freq="B", tz="UTC")
+        daily_snap = OhlcvSnapshot(
+            symbol="2330",
+            market="TW",
+            interval="1d",
+            tz="UTC",
+            df=pd.DataFrame(
+                {
+                    "open": [1.0, 1.0],
+                    "high": [1.0, 1.0],
+                    "low": [1.0, 1.0],
+                    "close": [1.0, 1.0],
+                    "volume": [1.0, 1.0],
+                },
+                index=daily_idx,
+            ),
+            source="tw_openapi",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+
+        with patch.object(service.tw_fugle_ws, "quote", return_value=quote):
+            with patch.object(service, "_try_ohlcv_chain", return_value=daily_snap):
+                with patch.object(service.yahoo, "ohlcv", side_effect=RuntimeError("rate limit")):
+                    ctx, _ = service.get_tw_live_context(
+                        symbol="2330",
+                        yahoo_symbol="2330.TW",
+                        ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
+                        options=LiveOptions(use_yahoo=True, keep_minutes=180, exchange="tse", use_fugle_ws=True),
+                    )
+
+        self.assertEqual(ctx.intraday_source, "cache:last_good:yahoo")
+        self.assertGreaterEqual(len(ctx.intraday), 20)
+
 
 if __name__ == "__main__":
     unittest.main()

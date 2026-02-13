@@ -53,7 +53,7 @@ git config --get core.hooksPath
 
 - 美股：`Twelve Data -> Yahoo -> Stooq`（自動降級）
 - 台股即時：`Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`（自動降級）
-- 台股日K：`TW OpenAPI(TWSE) / TPEx OpenAPI(上櫃最新日資料)`，必要時可用 Yahoo 補
+- 台股日K：`Fugle Historical（日K） -> TW OpenAPI(TWSE) -> TPEx OpenAPI(上櫃最新日資料) -> Yahoo`（自動降級；需 Fugle API key 才會啟用第一段）
 - 每次顯示來源與資料品質（是否延遲、fallback depth、freshness）
 - 即時模式 UI：改為「即時總覽 / 即時走勢 / 側邊分析卡」版面，資訊密度更清楚
 - 台股即時資料可批次落地到 SQLite（`intraday_ticks`），供後續查詢與回放擴充
@@ -180,7 +180,7 @@ export TWELVE_DATA_API_KEY="your_api_key"
 
 未設定時，系統會自動從下一個來源（Yahoo）開始。
 
-若要啟用台股即時主來源 Fugle WebSocket，請設定：
+若要啟用 Fugle（台股即時 + 台股歷史日K優先），請設定：
 
 ```bash
 export FUGLE_MARKETDATA_API_KEY="your_fugle_key"

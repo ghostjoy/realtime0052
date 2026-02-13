@@ -21,6 +21,7 @@ class _FakeService:
         self.us_twelve = _Provider("twelvedata")
         self.yahoo = _Provider("yahoo")
         self.us_stooq = _Provider("stooq")
+        self.tw_fugle_rest = _Provider("tw_fugle_rest")
         self.tw_openapi = _Provider("tw_openapi")
         self.tw_tpex = _Provider("tw_tpex")
         self.source = source
@@ -59,12 +60,16 @@ class _CaptureService:
         self.us_twelve = _Provider("twelvedata")
         self.yahoo = _Provider("yahoo")
         self.us_stooq = _Provider("stooq")
+        self.tw_fugle_rest = _Provider("tw_fugle_rest")
+        self.tw_fugle_rest.api_key = None
         self.tw_openapi = _Provider("tw_openapi")
         self.tw_tpex = _Provider("tw_tpex")
         self.last_request: ProviderRequest | None = None
+        self.last_provider_name: str | None = None
 
     def _try_ohlcv_chain(self, providers, request: ProviderRequest):
         self.last_request = request
+        self.last_provider_name = str(getattr(providers[0], "name", "") or "")
         start = request.start or datetime(2024, 1, 1, tzinfo=timezone.utc)
         dates = pd.date_range(start=start, periods=5, freq="B", tz="UTC")
         provider = providers[0]
@@ -197,6 +202,19 @@ class HistoryStoreTests(unittest.TestCase):
             store.sync_symbol_history(symbol="2330", market="TW", start=backfill_start, end=end)
             assert service.last_request is not None
             self.assertEqual(service.last_request.start.date().isoformat(), "2024-01-01")
+
+    def test_sync_history_prefers_fugle_for_tw_when_key_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            service = _CaptureService()
+            service.tw_fugle_rest.api_key = "fake-key"
+            store = HistoryStore(db_path=db_path, service=service)
+            start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            end = datetime(2024, 1, 31, tzinfo=timezone.utc)
+
+            report = store.sync_symbol_history(symbol="0050", market="TW", start=start, end=end)
+            self.assertEqual(report.source, "tw_fugle_rest")
+            self.assertEqual(service.last_provider_name, "tw_fugle_rest")
 
     def test_save_and_load_intraday_ticks_with_retention(self):
         with tempfile.TemporaryDirectory() as tmp:

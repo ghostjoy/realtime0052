@@ -316,11 +316,14 @@ class HistoryStore:
 
         request = ProviderRequest(symbol=symbol, market=market, interval="1d", start=fetch_start, end=end)
 
-        providers = (
-            [self.service.us_twelve, self.service.yahoo, self.service.us_stooq]
-            if market == "US"
-            else [self.service.tw_openapi, self.service.tw_tpex, self.service.yahoo]
-        )
+        if market == "US":
+            providers = [self.service.us_twelve, self.service.yahoo, self.service.us_stooq]
+        else:
+            providers = []
+            fugle_rest = getattr(self.service, "tw_fugle_rest", None)
+            if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
+                providers.append(fugle_rest)
+            providers.extend([self.service.tw_openapi, self.service.tw_tpex, self.service.yahoo])
         source = "unknown"
         fallback_depth = 0
         stale = False
