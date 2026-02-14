@@ -449,6 +449,7 @@ def _render_tw_constituent_intro_table(
     symbols: list[str],
     service: MarketDataService,
 ):
+    etf_code_upper = str(etf_code or "").strip().upper()
     ordered_symbols: list[str] = []
     for symbol in symbols:
         code = str(symbol or "").strip().upper()
@@ -478,14 +479,26 @@ def _render_tw_constituent_intro_table(
         if math.isfinite(weight):
             weight_map[code] = round(weight, 2)
 
-    name_map = service.get_tw_symbol_names(ordered_symbols)
-    industry_map = service.get_tw_symbol_industries(ordered_symbols)
+    ordered_for_intro = list(ordered_symbols)
+    if etf_code_upper == "0050":
+        original_pos = {code: idx for idx, code in enumerate(ordered_symbols)}
+        ordered_for_intro = sorted(
+            ordered_symbols,
+            key=lambda code: (
+                1 if code not in weight_map else 0,
+                -float(weight_map.get(code, 0.0)),
+                original_pos.get(code, 0),
+            ),
+        )
+
+    name_map = service.get_tw_symbol_names(ordered_for_intro)
+    industry_map = service.get_tw_symbol_industries(ordered_for_intro)
     rows: list[dict[str, object]] = []
-    for idx, code in enumerate(ordered_symbols, start=1):
+    for idx, code in enumerate(ordered_for_intro, start=1):
         name = str(name_map.get(code, code)).strip() or code
         industry_code = str(industry_map.get(code, "")).strip()
         industry_name = TW_INDUSTRY_INFO.get(industry_code, ("", ""))[0]
-        fallback = _company_brief_for_tw(code, name, etf_code, industry_code)
+        fallback = _company_brief_for_tw(code, name, etf_code_upper, industry_code)
         core, product = _split_brief_to_points(fallback)
         rows.append(
             {
@@ -3794,7 +3807,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     strategy = c4.selectbox(
         "回測策略",
         options=heatmap_strategy_options,
-        index=1,
+        index=0,
         key=f"{page_key}_strategy",
         format_func=_strategy_label,
     )

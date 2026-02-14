@@ -51,6 +51,7 @@
   - 新增 `00910 / 00935 / 0050` 頁首「官方指數編製標準摘要」與來源連結
 
 ### Changed
+- Auto: updated app.py [id:13cce7fd07]
 - 台股資料鏈路升級：即時改為 `Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`，日K同步新增 `TPEx OpenAPI`（短區間/最新日資料）後再回退 Yahoo。
 - UI 導覽改為卡片式（取代原先分頁列），並新增 `即時看盤/回測工作台` 卡片化區段（即時行情卡、即時趨勢卡、績效卡、回放控制卡、回放圖卡）。
 - 新增設計協作工具：可下載 `design-tokens.json`，方便與 Figma / Pencil 對齊色票與視覺 token。
