@@ -503,27 +503,51 @@ class MarketDataService:
             return {str(k): str(v) for k, v in cached.items()}
 
         out = {symbol: symbol for symbol in normalized}
-        url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+        wanted = set(normalized)
+
+        twse_ok = False
+        twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
         try:
-            resp = requests.get(url, timeout=12)
+            resp = requests.get(twse_url, timeout=12)
             resp.raise_for_status()
             rows = resp.json()
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(row.get("Code", "")).strip().upper()
+                    if code not in wanted:
+                        continue
+                    name = str(row.get("Name", "")).strip()
+                    if name:
+                        out[code] = name
+                twse_ok = True
         except Exception:
-            self.cache.set(cache_key, out, ttl_sec=900)
-            return out
+            twse_ok = False
 
-        if isinstance(rows, list):
-            wanted = set(normalized)
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                code = str(row.get("Code", "")).strip().upper()
-                if code not in wanted:
-                    continue
-                name = str(row.get("Name", "")).strip()
-                if name:
-                    out[code] = name
-        self.cache.set(cache_key, out, ttl_sec=21600)
+        # TPEx 上櫃名稱補齊（例如 6510 精測）
+        tpex_ok = False
+        tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+        try:
+            resp = requests.get(tpex_url, timeout=12)
+            resp.raise_for_status()
+            rows = resp.json()
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(row.get("SecuritiesCompanyCode", "")).strip().upper()
+                    if code not in wanted:
+                        continue
+                    name = str(row.get("CompanyName", "")).strip()
+                    if name:
+                        out[code] = name
+                tpex_ok = True
+        except Exception:
+            tpex_ok = False
+
+        ttl = 21600 if (twse_ok or tpex_ok) else 900
+        self.cache.set(cache_key, out, ttl_sec=ttl)
         return out
 
     def get_benchmark_series(

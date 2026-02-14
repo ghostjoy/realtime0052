@@ -6,6 +6,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -217,6 +218,18 @@ STRATEGY_DESC = {
     "macd_trend": "MACD 快慢線方向判斷趨勢。",
 }
 
+PAGE_CARDS = [
+    {"key": "即時看盤", "desc": "台股/美股即時報價、即時走勢與技術快照。"},
+    {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
+    {"key": "2025 前十大 ETF", "desc": "2025 年全年台股 ETF 報酬率前十名。"},
+    {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
+    {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
+    {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
+    {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
+    {"key": "資料庫檢視", "desc": "直接查看 SQLite 各表筆數、欄位與內容。"},
+    {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
+]
+
 
 def _strategy_label(name: str) -> str:
     return STRATEGY_LABELS.get(str(name), str(name))
@@ -244,23 +257,68 @@ def _safe_float(value: object) -> Optional[float]:
     return fv
 
 
-def _resolve_live_change_metrics(quote, intraday: pd.DataFrame, daily: pd.DataFrame) -> tuple[Optional[float], Optional[float]]:
+def _resolve_live_change_metrics(
+    quote,
+    intraday: pd.DataFrame,
+    daily: pd.DataFrame,
+) -> tuple[Optional[float], Optional[float], str]:
+    def _market_tz(market: str):
+        text = str(market or "").strip().upper()
+        if text == "TW":
+            return ZoneInfo("Asia/Taipei")
+        if text == "US":
+            return ZoneInfo("America/New_York")
+        return timezone.utc
+
     price = _safe_float(getattr(quote, "price", None))
     prev_close = _safe_float(getattr(quote, "prev_close", None))
+    prev_close_basis = "provider"
+    quote_interval = str(getattr(quote, "interval", "") or "").strip().lower()
+    quote_ts = pd.Timestamp(getattr(quote, "ts", datetime.now(tz=timezone.utc)))
+    if quote_ts.tzinfo is None:
+        quote_ts = quote_ts.tz_localize("UTC")
+    else:
+        quote_ts = quote_ts.tz_convert("UTC")
+    market_tz = _market_tz(str(getattr(quote, "market", "")))
+    quote_local_date = quote_ts.tz_convert(market_tz).date()
 
     daily_norm = _normalize_ohlcv_frame(daily)
     if (prev_close is None or abs(prev_close) < 1e-12) and not daily_norm.empty and "close" in daily_norm.columns:
-        closes = pd.to_numeric(daily_norm["close"], errors="coerce").dropna()
-        if len(closes) >= 2:
-            prev_close = _safe_float(closes.iloc[-2])
-        elif len(closes) == 1:
-            prev_close = _safe_float(closes.iloc[-1])
+        closes = pd.to_numeric(daily_norm["close"], errors="coerce").dropna().sort_index()
+        # For daily snapshot quotes (e.g. Stooq / delayed daily feeds), price often equals
+        # the latest daily close. In that case prev close should be the prior bar.
+        if quote_interval == "1d" and price is not None and len(closes) >= 2:
+            latest_close = _safe_float(closes.iloc[-1])
+            if latest_close is not None:
+                tol = max(1e-6, abs(latest_close) * 1e-6)
+                if abs(latest_close - price) <= tol:
+                    prev_close = _safe_float(closes.iloc[-2])
+                    prev_close_basis = "daily_prev_bar_for_1d_quote"
+
+        local_dates = closes.index.tz_convert(market_tz).date
+        if prev_close is None or abs(prev_close) < 1e-12:
+            prior_mask = local_dates < quote_local_date
+            prior = closes[prior_mask]
+            if not prior.empty:
+                prev_close = _safe_float(prior.iloc[-1])
+                prev_close_basis = "daily_prev_close"
+            elif not closes.empty:
+                prev_close = _safe_float(closes.iloc[-1])
+                prev_close_basis = "daily_latest"
 
     intraday_norm = _normalize_ohlcv_frame(intraday)
     if (prev_close is None or abs(prev_close) < 1e-12) and not intraday_norm.empty and "close" in intraday_norm.columns:
-        closes = pd.to_numeric(intraday_norm["close"], errors="coerce").dropna()
-        if len(closes) >= 2:
+        closes = pd.to_numeric(intraday_norm["close"], errors="coerce").dropna().sort_index()
+        prior = closes[closes.index < quote_ts]
+        if not prior.empty:
+            prev_close = _safe_float(prior.iloc[-1])
+            prev_close_basis = "intraday_prev_bar"
+        elif len(closes) >= 2:
             prev_close = _safe_float(closes.iloc[-2])
+            prev_close_basis = "intraday_prev_bar"
+        elif len(closes) == 1:
+            prev_close = _safe_float(closes.iloc[-1])
+            prev_close_basis = "intraday_latest"
 
     change = _safe_float(getattr(quote, "change", None))
     if change is None and price is not None and prev_close is not None:
@@ -270,7 +328,9 @@ def _resolve_live_change_metrics(quote, intraday: pd.DataFrame, daily: pd.DataFr
     if change_pct is None and change is not None and prev_close is not None and abs(prev_close) >= 1e-12:
         change_pct = change / prev_close * 100.0
 
-    return change, change_pct
+    source_name = str(getattr(quote, "source", "unknown") or "unknown")
+    basis_text = f"source={source_name}, prev_close={prev_close_basis}"
+    return change, change_pct, basis_text
 
 
 def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -553,6 +613,39 @@ def _inject_ui_styles():
             border-radius: 10px;
             padding: 8px 12px;
         }}
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
+            background: {card_bg};
+            border: 1px solid {card_border};
+            border-radius: 14px;
+            box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+        }}
+        .page-card-title {{
+            font-size: 1.0rem;
+            font-weight: 700;
+            margin-bottom: 0.2rem;
+        }}
+        .page-card-desc {{
+            font-size: 0.86rem;
+            line-height: 1.35;
+            color: {text_muted};
+            min-height: 2.4rem;
+            margin-bottom: 0.35rem;
+        }}
+        .page-card-tag {{
+            font-size: 0.78rem;
+            color: {text_muted};
+            margin-bottom: 0.35rem;
+        }}
+        .card-section-title {{
+            font-size: 1.04rem;
+            font-weight: 700;
+            margin-bottom: 0.12rem;
+        }}
+        .card-section-sub {{
+            font-size: 0.82rem;
+            color: {text_muted};
+            margin-bottom: 0.5rem;
+        }}
         div[data-baseweb="tab-list"] {{
             gap: 8px;
         }}
@@ -573,6 +666,320 @@ def _inject_ui_styles():
         </style>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def _render_card_section_header(title: str, subtitle: str = ""):
+    st.markdown(f"<div class='card-section-title'>{title}</div>", unsafe_allow_html=True)
+    if subtitle:
+        st.markdown(f"<div class='card-section-sub'>{subtitle}</div>", unsafe_allow_html=True)
+
+
+def _design_tokens_payload() -> str:
+    palette = _ui_palette()
+    tokens = {
+        "theme_name": _current_theme_name(),
+        "surface": {
+            "background": palette["background"],
+            "paper": palette["paper_bg"],
+            "card": palette["card_bg"],
+            "border": palette["card_border"],
+        },
+        "text": {"primary": palette["text_color"], "secondary": palette["text_muted"]},
+        "accent": {"primary": palette["accent"]},
+        "chart": {
+            "price_up": palette["price_up"],
+            "price_down": palette["price_down"],
+            "equity": palette["equity"],
+            "benchmark": palette["benchmark"],
+        },
+    }
+    return json.dumps(tokens, ensure_ascii=False, indent=2)
+
+
+def _render_design_toolbox():
+    with st.expander("設計協作（Figma / Pencil）", expanded=False):
+        st.caption("可下載 design tokens JSON，拿去對齊 Figma Variables 或 Pencil 色票。")
+        st.download_button(
+            "下載 design-tokens.json",
+            data=_design_tokens_payload(),
+            file_name="realtime0052-design-tokens.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        c1, c2 = st.columns(2)
+        c1.link_button("Figma", "https://www.figma.com", use_container_width=True)
+        c2.link_button("Pencil", "https://pencil.evolus.vn", use_container_width=True)
+
+
+def _render_page_cards_nav() -> str:
+    page_options = [item["key"] for item in PAGE_CARDS]
+    active_page = str(st.session_state.get("active_page", page_options[0]))
+    if active_page not in page_options:
+        active_page = page_options[0]
+        st.session_state["active_page"] = active_page
+
+    st.markdown("#### 功能卡片")
+    cols = st.columns(3, gap="medium")
+    for idx, item in enumerate(PAGE_CARDS):
+        key = item["key"]
+        desc = item["desc"]
+        is_active = key == active_page
+        with cols[idx % 3]:
+            with st.container(border=True):
+                st.markdown(f"<div class='page-card-title'>{key}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='page-card-desc'>{desc}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div class='page-card-tag'>{'目前頁面' if is_active else '點擊下方按鈕切換'}</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    "已開啟" if is_active else "開啟",
+                    key=f"page-card:{key}",
+                    use_container_width=True,
+                    disabled=is_active,
+                ):
+                    st.session_state["active_page"] = key
+                    st.rerun()
+
+    return str(st.session_state.get("active_page", active_page))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_twse_snapshot_with_fallback(target_yyyymmdd: str, lookback_days: int = 14) -> tuple[str, pd.DataFrame]:
+    import requests
+
+    target_dt = datetime.strptime(target_yyyymmdd, "%Y%m%d").date()
+    errors: list[str] = []
+    for offset in range(max(1, int(lookback_days))):
+        query_dt = target_dt - pd.Timedelta(days=offset)
+        date_token = query_dt.strftime("%Y%m%d")
+        try:
+            resp = requests.get(
+                "https://www.twse.com.tw/exchangeReport/MI_INDEX",
+                params={"response": "json", "date": date_token, "type": "ALLBUT0999"},
+                timeout=18,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            errors.append(f"{date_token}:{exc}")
+            continue
+
+        if str(payload.get("stat", "")).strip().upper() != "OK":
+            errors.append(f"{date_token}:{payload.get('stat', 'not ok')}")
+            continue
+
+        tables = payload.get("tables", [])
+        if not isinstance(tables, list):
+            errors.append(f"{date_token}:tables missing")
+            continue
+        target_fields = {"證券代號", "證券名稱", "收盤價"}
+        selected: Optional[dict] = None
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            fields = table.get("fields", [])
+            if not isinstance(fields, list):
+                continue
+            if target_fields.issubset(set(fields)):
+                selected = table
+                break
+        if selected is None:
+            errors.append(f"{date_token}:price table missing")
+            continue
+
+        fields = [str(x) for x in selected.get("fields", [])]
+        rows = selected.get("data", [])
+        if not isinstance(rows, list) or not rows:
+            errors.append(f"{date_token}:empty rows")
+            continue
+
+        idx_code = fields.index("證券代號")
+        idx_name = fields.index("證券名稱")
+        idx_close = fields.index("收盤價")
+        out_rows: list[dict[str, object]] = []
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            if max(idx_code, idx_name, idx_close) >= len(row):
+                continue
+            code = str(row[idx_code] or "").strip().upper()
+            name = str(row[idx_name] or "").strip()
+            close_raw = str(row[idx_close] or "").strip().replace(",", "")
+            if not code or close_raw in {"", "--", "-"}:
+                continue
+            try:
+                close = float(close_raw)
+            except Exception:
+                continue
+            out_rows.append({"code": code, "name": name, "close": close})
+        if out_rows:
+            return date_token, pd.DataFrame(out_rows)
+        errors.append(f"{date_token}:no parsable rows")
+
+    raise RuntimeError("TWSE snapshot fetch failed: " + " | ".join(errors[-5:]))
+
+
+def _classify_tw_etf(name: str) -> str:
+    text = str(name or "").strip()
+    if not text:
+        return "其他"
+    dividend_keywords = ("高股息", "股利", "股息", "收益", "月配", "季配", "年配")
+    market_cap_keywords = ("台灣50", "臺灣50", "台灣中型100", "臺灣中型100", "市值", "台灣領袖")
+    if any(key in text for key in dividend_keywords):
+        return "股利型"
+    if any(key in text for key in market_cap_keywords):
+        return "市值型"
+    return "其他"
+
+
+def _is_tw_equity_etf(code: str, name: str) -> bool:
+    code_text = str(code or "").strip().upper()
+    name_text = str(name or "").strip()
+    if not code_text.startswith("00"):
+        return False
+    if code_text.endswith(("L", "R")):
+        return False
+    if not name_text:
+        return False
+
+    exclude_keywords = (
+        "原油",
+        "黃金",
+        "白銀",
+        "布蘭特",
+        "日圓",
+        "美元",
+        "美債",
+        "公司債",
+        "投等債",
+        "非投等債",
+        "中國",
+        "日本",
+        "日經",
+        "越南",
+        "印度",
+        "美國",
+        "全球",
+        "道瓊",
+        "NASDAQ",
+        "S&P",
+        "反1",
+        "正2",
+    )
+    if any(token in name_text for token in exclude_keywords):
+        return False
+
+    include_keywords = (
+        "台灣",
+        "臺灣",
+        "台股",
+        "臺股",
+        "加權",
+        "櫃買",
+        "台灣50",
+        "臺灣50",
+        "中型100",
+        "高股息",
+        "股利",
+        "收益",
+    )
+    return any(token in name_text for token in include_keywords)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple[pd.DataFrame, str, str]:
+    start_used, start_df = _fetch_twse_snapshot_with_fallback(start_yyyymmdd)
+    end_used, end_df = _fetch_twse_snapshot_with_fallback(end_yyyymmdd)
+
+    # 台股股票型 ETF（排除槓反/期貨/海外與債券商品）。
+    start_df = start_df[start_df.apply(lambda r: _is_tw_equity_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1)].copy()
+    end_df = end_df[end_df.apply(lambda r: _is_tw_equity_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1)].copy()
+    if start_df.empty or end_df.empty:
+        return pd.DataFrame(), start_used, end_used
+
+    merged = end_df.merge(
+        start_df[["code", "close"]].rename(columns={"close": "start_close"}),
+        on="code",
+        how="inner",
+    )
+    if merged.empty:
+        return pd.DataFrame(), start_used, end_used
+    merged = merged.rename(columns={"name": "name", "close": "end_close"})
+    merged["return_pct"] = (pd.to_numeric(merged["end_close"], errors="coerce") / pd.to_numeric(merged["start_close"], errors="coerce") - 1.0) * 100.0
+    merged = merged.replace([np.inf, -np.inf], np.nan).dropna(subset=["return_pct", "start_close", "end_close"])
+    if merged.empty:
+        return pd.DataFrame(), start_used, end_used
+
+    merged["type"] = merged["name"].map(_classify_tw_etf)
+    merged = merged.sort_values("return_pct", ascending=False).head(10).copy()
+    merged["rank"] = range(1, len(merged) + 1)
+    out = merged[["rank", "code", "name", "type", "start_close", "end_close", "return_pct"]].copy()
+    out = out.rename(
+        columns={
+            "rank": "排名",
+            "code": "代碼",
+            "name": "ETF",
+            "type": "類型",
+            "start_close": "期初收盤",
+            "end_close": "期末收盤",
+            "return_pct": "區間報酬(%)",
+        }
+    )
+    out["區間報酬(%)"] = pd.to_numeric(out["區間報酬(%)"], errors="coerce").round(2)
+    out["期初收盤"] = pd.to_numeric(out["期初收盤"], errors="coerce").round(2)
+    out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
+    return out, start_used, end_used
+
+
+def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str):
+    st.subheader(title)
+    with st.container(border=True):
+        _render_card_section_header("排行卡", "依 TWSE 全市場日收盤快照計算區間報酬率。")
+        try:
+            top10, start_used, end_used = _build_tw_etf_top10_between(start_yyyymmdd=start_yyyymmdd, end_yyyymmdd=end_yyyymmdd)
+        except Exception as exc:
+            st.error(f"無法建立 ETF 排行：{exc}")
+            return
+        if top10.empty:
+            st.warning("目前沒有可顯示的 ETF 排行資料。")
+            return
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("樣本數", str(len(top10)))
+        m2.metric("市值型", str(int((top10["類型"] == "市值型").sum())))
+        m3.metric("股利型", str(int((top10["類型"] == "股利型").sum())))
+        m4.metric("其他", str(int((top10["類型"] == "其他").sum())))
+        st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
+        st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
+        st.dataframe(top10, use_container_width=True, hide_index=True)
+
+        with st.expander("分類說明", expanded=False):
+            st.markdown(
+                "\n".join(
+                    [
+                        "- `市值型`：名稱含台灣50/中型100/市值等關鍵字。",
+                        "- `股利型`：名稱含高股息/股利/收益/月配/季配等關鍵字。",
+                        "- `其他`：其餘主題型、產業型、槓反型、主動式等。",
+                    ]
+                )
+            )
+
+
+def _render_top10_etf_2025_view():
+    _render_tw_etf_top10_page(
+        title="2025 年前十大 ETF（台股）",
+        start_yyyymmdd="20241231",
+        end_yyyymmdd="20251231",
+    )
+
+
+def _render_top10_etf_2026_ytd_view():
+    _render_tw_etf_top10_page(
+        title="2026 年截至今日前十大 ETF（台股）",
+        start_yyyymmdd="20251231",
+        end_yyyymmdd=datetime.now().strftime("%Y%m%d"),
     )
 
 
@@ -801,32 +1208,34 @@ def _render_live_view():
                 return
             quote = ctx.quote
 
-        st.markdown("#### 即時總覽")
-        _render_quality_bar(ctx, refresh_sec=refresh_sec)
-        display_name = str(quote.extra.get("name") or "").strip()
-        if not display_name:
-            display_name = str(quote.extra.get("full_name") or "").strip()
-        if not display_name and market == "台股(TWSE)" and stock_id:
-            try:
-                display_name = str(service.get_tw_symbol_names([stock_id]).get(stock_id, "") or "").strip()
-            except Exception:
-                display_name = ""
-        if not display_name:
-            display_name = str(quote.symbol or "—")
-        col1, col2, col3, col4 = st.columns(4)
-        live_change, live_change_pct = _resolve_live_change_metrics(
-            quote,
-            intraday=getattr(ctx, "intraday", pd.DataFrame()),
-            daily=getattr(ctx, "daily", pd.DataFrame()),
-        )
-        col1.metric("名稱", display_name)
-        col2.metric("最新價", _format_price(quote.price))
-        col3.metric("漲跌", "—" if live_change is None else f"{live_change:+.2f}")
-        col4.metric("漲跌幅", "—" if live_change_pct is None else f"{live_change_pct:+.2f}%")
-        col5, col6 = st.columns(2)
-        col5.metric("成交量", _format_int(quote.volume))
-        col6.metric("時間", quote.ts.strftime("%Y-%m-%d %H:%M:%S"))
-        st.caption("非投資建議；僅供教育/研究。")
+        with st.container(border=True):
+            _render_card_section_header("即時行情卡", "來源鏈路、最新報價與漲跌資訊。")
+            _render_quality_bar(ctx, refresh_sec=refresh_sec)
+            display_name = str(quote.extra.get("name") or "").strip()
+            if not display_name:
+                display_name = str(quote.extra.get("full_name") or "").strip()
+            if not display_name and market == "台股(TWSE)" and stock_id:
+                try:
+                    display_name = str(service.get_tw_symbol_names([stock_id]).get(stock_id, "") or "").strip()
+                except Exception:
+                    display_name = ""
+            if not display_name:
+                display_name = str(quote.symbol or "—")
+            col1, col2, col3, col4 = st.columns(4)
+            live_change, live_change_pct, live_change_basis = _resolve_live_change_metrics(
+                quote,
+                intraday=getattr(ctx, "intraday", pd.DataFrame()),
+                daily=getattr(ctx, "daily", pd.DataFrame()),
+            )
+            col1.metric("名稱", display_name)
+            col2.metric("最新價", _format_price(quote.price))
+            col3.metric("漲跌", "—" if live_change is None else f"{live_change:+.2f}")
+            col4.metric("漲跌幅", "—" if live_change_pct is None else f"{live_change_pct:+.2f}%")
+            st.caption(f"漲跌計算依據：{live_change_basis}")
+            col5, col6 = st.columns(2)
+            col5.metric("成交量", _format_int(quote.volume))
+            col6.metric("時間", quote.ts.strftime("%Y-%m-%d %H:%M:%S"))
+            st.caption("非投資建議；僅供教育/研究。")
 
         bars_intraday = _normalize_ohlcv_frame(ctx.intraday)
         if market == "台股(TWSE)":
@@ -896,15 +1305,16 @@ def _render_live_view():
 
         main_col, side_col = st.columns([0.66, 0.34], gap="large")
         with main_col:
-            st.markdown("#### 即時走勢")
-            _render_live_chart(ind)
-            if not daily_long.empty:
-                st.markdown("#### 長期視角（Daily）")
-                if daily_split_events:
-                    ev_txt = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in daily_split_events])
-                    st.caption(f"已套用分割調整（復權）：{ev_txt}")
-                daily = add_indicators(daily_long)
-                st.line_chart(daily[["close", "sma_20", "sma_60"]].dropna(how="all"))
+            with st.container(border=True):
+                _render_card_section_header("即時趨勢卡", "主圖使用分K；下方補上日K長期視角。")
+                _render_live_chart(ind)
+                if not daily_long.empty:
+                    st.markdown("#### 長期視角（Daily）")
+                    if daily_split_events:
+                        ev_txt = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in daily_split_events])
+                        st.caption(f"已套用分割調整（復權）：{ev_txt}")
+                    daily = add_indicators(daily_long)
+                    st.line_chart(daily[["close", "sma_20", "sma_60"]].dropna(how="all"))
 
         with side_col:
             with st.container(border=True):
@@ -1097,8 +1507,7 @@ def _render_backtest_view():
     store = _history_store()
     service = _market_service()
 
-    st.subheader("回測工作台（日K）")
-    st.caption("先設定基本條件，再調整策略與成本參數；進階設定可用於 Walk-Forward 與分割調整。")
+    _render_card_section_header("回測設定卡", "先設定基本條件，再調整策略/成本與進階回放選項。")
     st.markdown("#### 基本設定")
     c1, c2, c3, c4 = st.columns(4)
     market = c1.selectbox("市場", ["TW", "US"], index=0, key="bt_market")
@@ -1749,58 +2158,60 @@ def _render_backtest_view():
             benchmark_equity = (bench / bench.iloc[0]) * run_initial_capital
             benchmark_equity = benchmark_equity.reindex(strategy_equity.index).ffill()
 
-    st.subheader("績效儀表板")
-    metric_rows = _metrics_to_rows(result.metrics)
-    metric_cols = st.columns(4)
-    for idx, (label, val) in enumerate(metric_rows):
-        metric_cols[idx % 4].metric(label, val)
-    if benchmark_choice != "off" and not benchmark_equity.empty:
-        rel = pd.concat(
-            [
-                strategy_equity.rename("strategy"),
-                benchmark_equity.rename("benchmark"),
-            ],
-            axis=1,
-        ).dropna()
-        if len(rel) >= 2:
-            strategy_ret = float(rel["strategy"].iloc[-1] / rel["strategy"].iloc[0] - 1.0)
-            benchmark_ret = float(rel["benchmark"].iloc[-1] / rel["benchmark"].iloc[0] - 1.0)
-            diff_pct = (strategy_ret - benchmark_ret) * 100.0
-            verdict = "贏過大盤" if diff_pct > 0 else ("輸給大盤" if diff_pct < 0 else "與大盤持平")
-            r1, r2 = st.columns(2)
-            r1.metric("相對大盤結果", verdict)
-            r2.metric("贏/輸大盤（百分比）", f"{diff_pct:+.2f}%")
-            st.caption(
-                "計算基準：同一重疊區間的 Total Return；"
-                f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%"
-            )
-        else:
-            st.caption("Benchmark 可用資料不足，暫時無法判斷是否贏過大盤。")
-    elif benchmark_choice != "off":
-        st.caption("目前沒有可用的 Benchmark 資料，無法計算是否贏過大盤。")
+    with st.container(border=True):
+        _render_card_section_header("績效卡", "總報酬、CAGR、MDD 與相對大盤結果。")
+        metric_rows = _metrics_to_rows(result.metrics)
+        metric_cols = st.columns(4)
+        for idx, (label, val) in enumerate(metric_rows):
+            metric_cols[idx % 4].metric(label, val)
+        if benchmark_choice != "off" and not benchmark_equity.empty:
+            rel = pd.concat(
+                [
+                    strategy_equity.rename("strategy"),
+                    benchmark_equity.rename("benchmark"),
+                ],
+                axis=1,
+            ).dropna()
+            if len(rel) >= 2:
+                strategy_ret = float(rel["strategy"].iloc[-1] / rel["strategy"].iloc[0] - 1.0)
+                benchmark_ret = float(rel["benchmark"].iloc[-1] / rel["benchmark"].iloc[0] - 1.0)
+                diff_pct = (strategy_ret - benchmark_ret) * 100.0
+                verdict = "贏過大盤" if diff_pct > 0 else ("輸給大盤" if diff_pct < 0 else "與大盤持平")
+                r1, r2 = st.columns(2)
+                r1.metric("相對大盤結果", verdict)
+                r2.metric("贏/輸大盤（百分比）", f"{diff_pct:+.2f}%")
+                st.caption(
+                    "計算基準：同一重疊區間的 Total Return；"
+                    f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%"
+                )
+            else:
+                st.caption("Benchmark 可用資料不足，暫時無法判斷是否贏過大盤。")
+        elif benchmark_choice != "off":
+            st.caption("目前沒有可用的 Benchmark 資料，無法計算是否贏過大盤。")
 
     if payload.get("walk_forward"):
-        st.subheader("Walk-Forward")
-        split_date = payload["split_date"]
-        st.caption(f"切分點：{pd.Timestamp(split_date).strftime('%Y-%m-%d')} | 目標：{objective}")
-        train = payload["train_result"]
-        w1, w2 = st.columns(2)
-        with w1:
-            st.markdown("**Train(In-Sample)**")
-            for label, val in _metrics_to_rows(train.metrics)[:4]:
-                st.metric(label, val)
-        with w2:
-            st.markdown("**Test(Out-of-Sample)**")
-            for label, val in _metrics_to_rows(result.metrics)[:4]:
-                st.metric(label, val)
-        best_params = payload.get("best_params")
-        if best_params:
-            st.markdown("**最佳參數**")
-            if isinstance(best_params, dict) and all(isinstance(v, dict) for v in best_params.values()):
-                rows = [{"symbol": s, "params": str(p)} for s, p in best_params.items()]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            else:
-                st.code(str(best_params))
+        with st.container(border=True):
+            _render_card_section_header("Walk-Forward 卡", "Train/Test 分段結果與最佳參數。")
+            split_date = payload["split_date"]
+            st.caption(f"切分點：{pd.Timestamp(split_date).strftime('%Y-%m-%d')} | 目標：{objective}")
+            train = payload["train_result"]
+            w1, w2 = st.columns(2)
+            with w1:
+                st.markdown("**Train(In-Sample)**")
+                for label, val in _metrics_to_rows(train.metrics)[:4]:
+                    st.metric(label, val)
+            with w2:
+                st.markdown("**Test(Out-of-Sample)**")
+                for label, val in _metrics_to_rows(result.metrics)[:4]:
+                    st.metric(label, val)
+            best_params = payload.get("best_params")
+            if best_params:
+                st.markdown("**最佳參數**")
+                if isinstance(best_params, dict) and all(isinstance(v, dict) for v in best_params.values()):
+                    rows = [{"symbol": s, "params": str(p)} for s, p in best_params.items()]
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else:
+                    st.code(str(best_params))
 
     speed_key = f"play_speed:{run_key}"
     play_key = f"play_state:{run_key}"
@@ -1852,48 +2263,49 @@ def _render_backtest_view():
     date_options = [pd.Timestamp(ts).strftime("%Y-%m-%d") for ts in focus_bars.index]
     date_to_idx = {d: i for i, d in enumerate(date_options)}
 
-    st.subheader("回放")
-    c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 2, 2, 3])
-    if c1.button("Play", use_container_width=True):
-        st.session_state[play_key] = True
-    if c2.button("Pause", use_container_width=True):
-        st.session_state[play_key] = False
-    if c3.button("Reset", use_container_width=True):
-        st.session_state[play_key] = False
-        st.session_state[idx_key] = default_play_idx
-    c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
-    c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
-    c6.selectbox(
-        "買賣點顯示",
-        options=["不顯示", "訊號點（價格圖）", "實際成交點（資產圖）", "同時顯示（訊號+成交）"],
-        key=marker_mode_key,
-    )
-    q1, q2, q3 = st.columns([2, 2, 2])
-    q1.selectbox("回放視窗", options=["固定視窗", "完整區間"], key=viewport_mode_key)
-    q2.slider(
-        "視窗K數",
-        min_value=window_min,
-        max_value=window_max,
-        step=5,
-        key=viewport_window_key,
-        disabled=st.session_state[viewport_mode_key] != "固定視窗",
-    )
-    q3.slider(
-        "生長位置（靠右%）",
-        min_value=50,
-        max_value=90,
-        step=5,
-        key=viewport_anchor_key,
-        disabled=st.session_state[viewport_mode_key] != "固定視窗",
-        help="數值越大，最新K越靠右；例如 70 代表最新K大約落在畫面 70% 的位置。",
-    )
-    st.checkbox(
-        "顯示成交連線（價格圖↔資產圖）",
-        key=fill_link_key,
-        help="在 Buy/Sell Fill 的時間點畫垂直細線，幫助對照價格與資產變化。",
-    )
-    st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
-    st.caption(f"回放預設起點：第 {default_play_idx} 根K（建議先有基本形態再播放）。")
+    with st.container(border=True):
+        _render_card_section_header("回放控制卡", "播放速度、標記模式與視窗控制。")
+        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 2, 2, 3])
+        if c1.button("Play", use_container_width=True):
+            st.session_state[play_key] = True
+        if c2.button("Pause", use_container_width=True):
+            st.session_state[play_key] = False
+        if c3.button("Reset", use_container_width=True):
+            st.session_state[play_key] = False
+            st.session_state[idx_key] = default_play_idx
+        c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
+        c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
+        c6.selectbox(
+            "買賣點顯示",
+            options=["不顯示", "訊號點（價格圖）", "實際成交點（資產圖）", "同時顯示（訊號+成交）"],
+            key=marker_mode_key,
+        )
+        q1, q2, q3 = st.columns([2, 2, 2])
+        q1.selectbox("回放視窗", options=["固定視窗", "完整區間"], key=viewport_mode_key)
+        q2.slider(
+            "視窗K數",
+            min_value=window_min,
+            max_value=window_max,
+            step=5,
+            key=viewport_window_key,
+            disabled=st.session_state[viewport_mode_key] != "固定視窗",
+        )
+        q3.slider(
+            "生長位置（靠右%）",
+            min_value=50,
+            max_value=90,
+            step=5,
+            key=viewport_anchor_key,
+            disabled=st.session_state[viewport_mode_key] != "固定視窗",
+            help="數值越大，最新K越靠右；例如 70 代表最新K大約落在畫面 70% 的位置。",
+        )
+        st.checkbox(
+            "顯示成交連線（價格圖↔資產圖）",
+            key=fill_link_key,
+            help="在 Buy/Sell Fill 的時間點畫垂直細線，幫助對照價格與資產變化。",
+        )
+        st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
+        st.caption(f"回放預設起點：第 {default_play_idx} 根K（建議先有基本形態再播放）。")
 
     speed_steps = {"0.5x": 1, "1x": 2, "2x": 4, "5x": 8, "10x": 16}
 
@@ -2137,7 +2549,9 @@ def _render_backtest_view():
         st.plotly_chart(fig, use_container_width=True, key=f"playback_chart:{run_key}")
         st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
 
-    playback()
+    with st.container(border=True):
+        _render_card_section_header("回放圖卡", "K線 + Equity + Benchmark 動態回放。")
+        playback()
 
     model_params = payload.get("best_params") if payload.get("walk_forward") else strategy_params
     if isinstance(model_params, dict):
@@ -2152,7 +2566,7 @@ def _render_backtest_view():
     if payload.get("walk_forward"):
         strategy_model_desc = f"{strategy_model_desc} [walk-forward]"
 
-    st.subheader("Benchmark Comparison")
+    _render_card_section_header("Benchmark 對照卡", "策略曲線、基準曲線與買進持有同圖比較。")
     benchmark = benchmark_raw
     benchmark_symbol = str(benchmark.attrs.get("symbol", "")).strip() if hasattr(benchmark, "attrs") else ""
     benchmark_source = str(benchmark.attrs.get("source", "")).strip() if hasattr(benchmark, "attrs") else ""
@@ -2370,7 +2784,7 @@ def _render_backtest_view():
                     }
                 st.dataframe(cmp_rows, use_container_width=True, hide_index=True)
 
-    st.subheader("策略 vs 買進持有")
+    _render_card_section_header("策略 vs 買進持有卡", "看整段與指定區間的報酬率差異。")
     hold_label = "買進持有（等權投組）" if is_portfolio else f"買進持有（{selected_symbols[0]}）"
     st.caption("買進持有以回測標的收盤價計算；若為投組則採等權配置。")
 
@@ -2455,7 +2869,7 @@ def _render_backtest_view():
         else:
             st.caption("指定區間內無可計算資料。")
 
-    st.subheader("逐年報酬")
+    _render_card_section_header("逐年報酬卡")
     if result.yearly_returns:
         yr = pd.DataFrame([{"年度": y, "報酬率%": round(v * 100.0, 2)} for y, v in result.yearly_returns.items()])
         st.dataframe(yr.sort_values("年度"), use_container_width=True, hide_index=True)
@@ -2463,7 +2877,7 @@ def _render_backtest_view():
         st.caption("樣本不足，無逐年報酬。")
 
     if is_portfolio:
-        st.subheader("投組分項績效")
+        _render_card_section_header("投組分項績效卡")
         rows = []
         for symbol, comp in result.component_results.items():
             rows.append(
@@ -2478,7 +2892,7 @@ def _render_backtest_view():
             )
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    st.subheader("交易明細")
+    _render_card_section_header("交易明細卡")
     if is_portfolio:
         if result.trades is not None and not result.trades.empty:
             trades_df = result.trades.copy()
@@ -3766,16 +4180,13 @@ def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
     st.title("即時走勢 / 多來源資料 / 回測平台")
-    page_options = ["即時看盤", "回測工作台", "ETF 輪動策略", "00935 熱力圖", "0050 熱力圖", "資料庫檢視", "新手教學"]
-    active_page = st.radio(
-        "分頁",
-        options=page_options,
-        horizontal=True,
-        key="active_page",
-    )
+    _render_design_toolbox()
+    active_page = _render_page_cards_nav()
     page_renderers = {
         "即時看盤": _render_live_view,
         "回測工作台": _render_backtest_view,
+        "2025 前十大 ETF": _render_top10_etf_2025_view,
+        "2026 YTD 前十大 ETF": _render_top10_etf_2026_ytd_view,
         "ETF 輪動策略": _render_tw_etf_rotation_view,
         "00935 熱力圖": _render_00935_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,

@@ -172,20 +172,34 @@ class MarketDataServiceTests(unittest.TestCase):
 
     @patch("requests.get")
     def test_get_tw_symbol_names(self, mock_get):
-        mock_resp = unittest.mock.MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = [
+        twse_resp = unittest.mock.MagicMock()
+        twse_resp.raise_for_status.return_value = None
+        twse_resp.json.return_value = [
             {"Code": "2330", "Name": "台積電"},
             {"Code": "3017", "Name": "奇鋐"},
         ]
-        mock_get.return_value = mock_resp
+        tpex_resp = unittest.mock.MagicMock()
+        tpex_resp.raise_for_status.return_value = None
+        tpex_resp.json.return_value = [
+            {"SecuritiesCompanyCode": "6510", "CompanyName": "精測"},
+        ]
+
+        def _fake_get(url, timeout=12):
+            if "openapi.twse.com.tw" in str(url):
+                return twse_resp
+            if "www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes" in str(url):
+                return tpex_resp
+            raise RuntimeError(f"unexpected url: {url}")
+
+        mock_get.side_effect = _fake_get
 
         service = MarketDataService()
-        out = service.get_tw_symbol_names(["2330", "3017", "9999"])
+        out = service.get_tw_symbol_names(["2330", "3017", "6510", "9999"])
         self.assertEqual(out["2330"], "台積電")
         self.assertEqual(out["3017"], "奇鋐")
+        self.assertEqual(out["6510"], "精測")
         self.assertEqual(out["9999"], "9999")
-        out2 = service.get_tw_symbol_names(["2330", "3017", "9999"])
+        out2 = service.get_tw_symbol_names(["2330", "3017", "6510", "9999"])
         self.assertEqual(out2["2330"], "台積電")
         self.assertTrue(mock_get.called)
 

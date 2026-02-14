@@ -41,9 +41,15 @@
 - 回測工作台新增 `回測前自動補資料缺口（推薦）`：
   - 先檢查本地區間覆蓋度
   - 僅對缺口標的做增量同步，降低「回測天數不夠」機率。
+- 新增 `2025 前十大 ETF` 與 `2026 YTD 前十大 ETF` 兩個獨立卡片頁：
+  - 以 TWSE `MI_INDEX` 全市場快照計算區間報酬率前十名
+  - 顯示市值型/股利型/其他分類統計與期初期末收盤價
 
 ### Changed
 - 台股資料鏈路升級：即時改為 `Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`，日K同步新增 `TPEx OpenAPI`（短區間/最新日資料）後再回退 Yahoo。
+- UI 導覽改為卡片式（取代原先分頁列），並新增 `即時看盤/回測工作台` 卡片化區段（即時行情卡、即時趨勢卡、績效卡、回放控制卡、回放圖卡）。
+- 新增設計協作工具：可下載 `design-tokens.json`，方便與 Figma / Pencil 對齊色票與視覺 token。
+- 前十大 ETF 排行頁補充資訊密度：加入樣本統計、分類說明、實際交易日區間與來源註記。
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py [id:8cdb1d9956]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py [id:2531f53664]
 - Auto: updated README.md, app.py, services/market_data_service.py, tests/test_market_data_service.py [id:4b701c5149]
@@ -70,6 +76,7 @@
 - 修正 Fugle WebSocket 連線細節：改用官方 `.../stock/streaming` endpoint、`auth.data.apikey` 欄位，並修正微秒時間戳解析，避免 `year out of range` 導致即時報價失敗。
 - 修正台股即時走勢來源覆蓋問題：當 Yahoo 1m 回傳空資料時，不再覆蓋 Fugle/MIS 即時 tick 聚合出的 K 線。
 - 修正即時看盤名稱欄位空白問題：名稱缺值時改為 `name -> full_name -> 台股代號查名 -> symbol` 多層 fallback。
+- 修正台股名稱對照缺漏：`get_tw_symbol_names` 新增 TPEx 上櫃名稱來源補齊（例如 `6510 -> 精測`）。
 - 修正台股即時走勢偶發空白：日級報價來源（TW OpenAPI/TPEx）不再使用舊交易日時間戳作為即時 tick，並新增 SQLite 即時快取回補走勢。
 - 改善台股即時走勢可讀性：當 tick 聚合 K 線過少（例如僅 1 根）時，自動改用 Fugle Historical `1m` 補齊圖表。
 - 改善台股即時走勢補齊策略：不只空資料，當 K 數偏少時也會嘗試用本地 SQLite 快取補齊（僅在 K 數變多時套用）。
@@ -78,6 +85,9 @@
 - 修正台股即時走勢分割斷層：即時圖也套用已知分割調整（例如 `0052`），避免未復權造成價格斷崖。
 - 即時走勢分割邏輯與回測對齊：改為 `known + auto-detect`，不侷限單一個股。
 - 修正即時看盤漲跌/漲跌幅顯示：當來源缺 `prev_close` 時，改由日K/即時K自動回推計算，台股與美股皆適用。
+- 修正即時看盤漲跌 fallback 的前收基準：改為依 quote 時間挑選正確前收（日K/分K），避免固定取 `[-2]` 造成偏移。
+- 即時總覽新增 `漲跌計算依據` 顯示，便於判讀目前採用的來源與前收來源。
+- 調整 `股癌風格(心法/檢核)` 建議輸出：新增「倉位建議區間」與中性市況小倉試單節奏，降低幾乎全程空手的體感。
 - 修正台股日K走 Yahoo fallback 時未正規化代碼問題：4~6 碼代號自動改為 `.TW`（如 `0050 -> 0050.TW`），指數代碼（如 `^TWII`）維持原樣。
 - 熱力圖與 ETF 輪動分頁新增同步錯誤可見提示：若部分標的或 Benchmark 同步失敗，UI 會顯示摘要警示且仍盡量使用本地可用資料。
 

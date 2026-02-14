@@ -196,6 +196,29 @@ def _fmt_big(v: Any) -> str:
         return str(v)
 
 
+def _position_range(points: int, risk: str) -> tuple[int, int]:
+    # Base allocation suggestion by technical score (non-leveraged, indicative only).
+    if points <= -3:
+        lo, hi = 0, 10
+    elif points == -2:
+        lo, hi = 5, 20
+    elif points == -1:
+        lo, hi = 15, 35
+    elif points == 0:
+        lo, hi = 25, 45
+    elif points == 1:
+        lo, hi = 40, 60
+    elif points == 2:
+        lo, hi = 55, 75
+    else:
+        lo, hi = 70, 90
+
+    risk_adj = {"保守": -10, "一般": 0, "積極": 10}.get(str(risk), 0)
+    lo = max(0, min(100, lo + risk_adj))
+    hi = max(lo, min(100, hi + risk_adj))
+    return lo, hi
+
+
 def render_advice_scai_style(
     df: pd.DataFrame,
     profile: Profile,
@@ -263,13 +286,16 @@ def render_advice_scai_style(
     else:
         risk_line = "風控：一般 → 分批進出，先定義『錯了』的條件（停損/時間停損/趨勢破壞）。"
 
+    pos_lo, pos_hi = _position_range(points, profile.risk)
+    position_line = f"倉位建議：{pos_lo}%~{pos_hi}%（現金/短債 = {100-pos_hi}%~{100-pos_lo}%）"
+
     # 行動：用評分決定「做/不做/怎麼做」
     if points >= 2:
         action = "行動：偏多 → 不追價，等回檔靠近關鍵均線分批；若拉開太遠就用小部位試單。"
     elif points <= -2:
-        action = "行動：偏空 → 先減碼/觀望；要接刀只用極小部位，並設定明確停損。"
+        action = "行動：偏空 → 先減碼、留現金；若要逆勢，只允許極小部位試單並設定明確停損。"
     else:
-        action = "行動：中性 → 等『站上/跌破』關鍵位再決策，避免在盤整中來回挨打。"
+        action = "行動：中性 → 可小倉位試單，等『站上/跌破』關鍵位再加減碼，避免在盤整中重倉來回挨打。"
 
     lines = [
         f"{symbol}｜綜合評分 {points:+d} → {bias}",
@@ -284,6 +310,7 @@ def render_advice_scai_style(
         *[f"- {k}：{v}" for k, v in notes.items()],
         "",
         risk_line,
+        position_line,
         action,
         "",
         "提醒：以上為框架化整理，非任何特定人士的原話，亦非投資建議；請自行評估風險。",
