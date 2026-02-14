@@ -30,6 +30,7 @@ from backtest import (
     walk_forward_portfolio,
     walk_forward_single,
 )
+from backtest.adjustments import known_split_events
 from indicators import add_indicators
 from providers import TwMisProvider
 from services import LiveOptions, MarketDataService
@@ -224,6 +225,7 @@ PAGE_CARDS = [
     {"key": "2025 前十大 ETF", "desc": "2025 年全年台股 ETF 報酬率前十名。"},
     {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
+    {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
     {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "資料庫檢視", "desc": "直接查看 SQLite 各表筆數、欄位與內容。"},
@@ -870,22 +872,7 @@ def _is_tw_equity_etf(code: str, name: str) -> bool:
     )
     if any(token in name_text for token in exclude_keywords):
         return False
-
-    include_keywords = (
-        "台灣",
-        "臺灣",
-        "台股",
-        "臺股",
-        "加權",
-        "櫃買",
-        "台灣50",
-        "臺灣50",
-        "中型100",
-        "高股息",
-        "股利",
-        "收益",
-    )
-    return any(token in name_text for token in include_keywords)
+    return True
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -907,15 +894,38 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
     if merged.empty:
         return pd.DataFrame(), start_used, end_used
     merged = merged.rename(columns={"name": "name", "close": "end_close"})
-    merged["return_pct"] = (pd.to_numeric(merged["end_close"], errors="coerce") / pd.to_numeric(merged["start_close"], errors="coerce") - 1.0) * 100.0
-    merged = merged.replace([np.inf, -np.inf], np.nan).dropna(subset=["return_pct", "start_close", "end_close"])
+    start_used_ts = pd.Timestamp(start_used, tz="UTC")
+    end_used_ts = pd.Timestamp(end_used, tz="UTC")
+
+    def _split_factor_and_events(symbol: str) -> tuple[float, str]:
+        factor = 1.0
+        tags: list[str] = []
+        for ev in known_split_events(symbol=str(symbol), market="TW"):
+            ev_ts = pd.Timestamp(ev.date)
+            if ev_ts.tzinfo is None:
+                ev_ts = ev_ts.tz_localize("UTC")
+            else:
+                ev_ts = ev_ts.tz_convert("UTC")
+            if start_used_ts < ev_ts <= end_used_ts:
+                ratio = float(ev.ratio)
+                if ratio > 0:
+                    factor *= ratio
+                    tags.append(f"{ev_ts.date()} x{ratio:.6f}")
+        return float(factor), ", ".join(tags)
+
+    factor_info = merged["code"].map(lambda c: _split_factor_and_events(str(c)))
+    merged["split_factor"] = factor_info.map(lambda x: float(x[0]))
+    merged["split_events"] = factor_info.map(lambda x: str(x[1]))
+    merged["adj_start_close"] = pd.to_numeric(merged["start_close"], errors="coerce") * pd.to_numeric(merged["split_factor"], errors="coerce")
+    merged["return_pct"] = (pd.to_numeric(merged["end_close"], errors="coerce") / pd.to_numeric(merged["adj_start_close"], errors="coerce") - 1.0) * 100.0
+    merged = merged.replace([np.inf, -np.inf], np.nan).dropna(subset=["return_pct", "start_close", "end_close", "adj_start_close"])
     if merged.empty:
         return pd.DataFrame(), start_used, end_used
 
     merged["type"] = merged["name"].map(_classify_tw_etf)
     merged = merged.sort_values("return_pct", ascending=False).head(10).copy()
     merged["rank"] = range(1, len(merged) + 1)
-    out = merged[["rank", "code", "name", "type", "start_close", "end_close", "return_pct"]].copy()
+    out = merged[["rank", "code", "name", "type", "start_close", "adj_start_close", "end_close", "split_events", "return_pct"]].copy()
     out = out.rename(
         columns={
             "rank": "排名",
@@ -923,13 +933,17 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
             "name": "ETF",
             "type": "類型",
             "start_close": "期初收盤",
+            "adj_start_close": "復權期初",
             "end_close": "期末收盤",
+            "split_events": "復權事件",
             "return_pct": "區間報酬(%)",
         }
     )
     out["區間報酬(%)"] = pd.to_numeric(out["區間報酬(%)"], errors="coerce").round(2)
     out["期初收盤"] = pd.to_numeric(out["期初收盤"], errors="coerce").round(2)
+    out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
     out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
+    out["復權事件"] = out["復權事件"].replace("", "—")
     return out, start_used, end_used
 
 
@@ -950,9 +964,10 @@ def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str
         m1.metric("樣本數", str(len(top10)))
         m2.metric("市值型", str(int((top10["類型"] == "市值型").sum())))
         m3.metric("股利型", str(int((top10["類型"] == "股利型").sum())))
-        m4.metric("其他", str(int((top10["類型"] == "其他").sum())))
+        m4.metric("有復權事件", str(int((top10["復權事件"] != "—").sum())))
         st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
+        st.caption("報酬計算：以復權期初（套用已知 split 事件）對比期末收盤。")
         st.dataframe(top10, use_container_width=True, hide_index=True)
 
         with st.expander("分類說明", expanded=False):
@@ -3142,6 +3157,10 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             f"已載入成分股：{count_text}（{completeness}） | 來源：{snapshot.source} | "
             f"快取時間：{snapshot.fetched_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
         )
+        with st.expander(f"查看全部成分股（{len(snapshot.symbols)}）", expanded=False):
+            name_map_all = service.get_tw_symbol_names(snapshot.symbols)
+            const_rows = [{"symbol": sym, "name": name_map_all.get(sym, sym)} for sym in snapshot.symbols]
+            st.dataframe(pd.DataFrame(const_rows), use_container_width=True, hide_index=True)
     else:
         st.warning(f"目前無法取得 {etf_text} 成分股，請稍後再試。")
         return
@@ -4072,6 +4091,10 @@ def _render_00935_heatmap_view():
     _render_tw_etf_heatmap_view("00935", page_desc="科技類")
 
 
+def _render_00910_heatmap_view():
+    _render_tw_etf_heatmap_view("00910", page_desc="第一金太空衛星")
+
+
 def _render_0050_heatmap_view():
     _render_tw_etf_heatmap_view("0050", page_desc="台灣50")
 
@@ -4188,6 +4211,7 @@ def main():
         "2025 前十大 ETF": _render_top10_etf_2025_view,
         "2026 YTD 前十大 ETF": _render_top10_etf_2026_ytd_view,
         "ETF 輪動策略": _render_tw_etf_rotation_view,
+        "00910 熱力圖": _render_00910_heatmap_view,
         "00935 熱力圖": _render_00935_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
         "資料庫檢視": _render_db_browser_view,

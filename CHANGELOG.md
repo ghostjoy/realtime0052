@@ -44,12 +44,16 @@
 - 新增 `2025 前十大 ETF` 與 `2026 YTD 前十大 ETF` 兩個獨立卡片頁：
   - 以 TWSE `MI_INDEX` 全市場快照計算區間報酬率前十名
   - 顯示市值型/股利型/其他分類統計與期初期末收盤價
+- 新增 `00910 熱力圖` 獨立卡片頁：
+  - 可列出全部成分股清單
+  - 可執行與 `00935` 同級的成分股熱力圖回測
 
 ### Changed
 - 台股資料鏈路升級：即時改為 `Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`，日K同步新增 `TPEx OpenAPI`（短區間/最新日資料）後再回退 Yahoo。
 - UI 導覽改為卡片式（取代原先分頁列），並新增 `即時看盤/回測工作台` 卡片化區段（即時行情卡、即時趨勢卡、績效卡、回放控制卡、回放圖卡）。
 - 新增設計協作工具：可下載 `design-tokens.json`，方便與 Figma / Pencil 對齊色票與視覺 token。
 - 前十大 ETF 排行頁補充資訊密度：加入樣本統計、分類說明、實際交易日區間與來源註記。
+- 前十大 ETF 排行改為「復權後報酬」計算：區間報酬改用 `復權期初`（套用已知 split 事件）對比期末收盤。
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py [id:8cdb1d9956]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py [id:2531f53664]
 - Auto: updated README.md, app.py, services/market_data_service.py, tests/test_market_data_service.py [id:4b701c5149]
@@ -77,6 +81,8 @@
 - 修正台股即時走勢來源覆蓋問題：當 Yahoo 1m 回傳空資料時，不再覆蓋 Fugle/MIS 即時 tick 聚合出的 K 線。
 - 修正即時看盤名稱欄位空白問題：名稱缺值時改為 `name -> full_name -> 台股代號查名 -> symbol` 多層 fallback。
 - 修正台股名稱對照缺漏：`get_tw_symbol_names` 新增 TPEx 上櫃名稱來源補齊（例如 `6510 -> 精測`）。
+- 修正前十大 ETF 頁面篩選過嚴導致 `0052` 未納入問題：排除條件改為槓反/期貨/海外與債券商品，保留台股股票型 ETF。
+- 修正 ETF 成分股 fallback 邏輯：未知代碼不再誤用 `00935` 成分股作為預設。
 - 修正台股即時走勢偶發空白：日級報價來源（TW OpenAPI/TPEx）不再使用舊交易日時間戳作為即時 tick，並新增 SQLite 即時快取回補走勢。
 - 改善台股即時走勢可讀性：當 tick 聚合 K 線過少（例如僅 1 根）時，自動改用 Fugle Historical `1m` 補齊圖表。
 - 改善台股即時走勢補齊策略：不只空資料，當 K 數偏少時也會嘗試用本地 SQLite 快取補齊（僅在 K 數變多時套用）。

@@ -743,6 +743,30 @@ class MarketDataService:
                 return deduped[:50]
         return []
 
+    def _fetch_moneydj_tw_constituents(self, etf_code: str) -> list[str]:
+        import requests
+
+        code = str(etf_code or "").strip().upper()
+        if not re.fullmatch(r"\d{4,6}", code):
+            return []
+
+        url = f"https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid={code}.TW"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        html = resp.text or ""
+
+        tokens = re.findall(r"etfid=(\d{4})\.TW", html, flags=re.IGNORECASE)
+        tokens += re.findall(r"\((\d{4})\.TW\)", html, flags=re.IGNORECASE)
+        codes = self._dedupe_4digit_codes(tokens)
+        return [c for c in codes if c != code]
+
     @staticmethod
     def get_tw_etf_expected_count(etf_code: str) -> Optional[int]:
         mapping = {
@@ -871,8 +895,13 @@ class MarketDataService:
                 "6669",
                 "6919",
             ],
+            "00910": [
+                "2455",
+                "6271",
+                "6285",
+            ],
         }
-        fallback_symbols = self._dedupe_4digit_codes(fallback_map.get(code, fallback_map["00935"]))
+        fallback_symbols = self._dedupe_4digit_codes(fallback_map.get(code, []))
 
         symbols: list[str] = []
         source = "fallback_manual"
@@ -886,6 +915,10 @@ class MarketDataService:
                 symbols = self._fetch_0050_yuanta_constituents()
                 if symbols:
                     source = "yuanta_pcf_html"
+            else:
+                symbols = self._fetch_moneydj_tw_constituents(code)
+                if symbols:
+                    source = "moneydj_basic0007b"
         except Exception:
             symbols = []
 
@@ -925,7 +958,7 @@ class MarketDataService:
             except Exception:
                 symbols = []
 
-        if not symbols:
+        if not symbols and fallback_symbols:
             symbols = fallback_symbols
             source = "fallback_manual"
 

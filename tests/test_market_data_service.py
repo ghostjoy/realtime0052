@@ -220,6 +220,25 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertEqual(source, "nomura_etfapi")
         self.assertEqual(symbols, ["2330", "2454", "2317"])
 
+    @patch("requests.get")
+    def test_get_tw_etf_constituents_00910_moneydj_source(self, mock_get):
+        html = """
+        <html><body>
+        <a href='/etf/ea/ETZCW.djhtm?c=1&etfid=2455.TW&back=00910.TW'>全新(2455.TW)</a>
+        <a href='/etf/ea/ETZCW.djhtm?c=1&etfid=6271.TW&back=00910.TW'>同欣電(6271.TW)</a>
+        <a href='/etf/ea/ETZCW.djhtm?c=1&etfid=2455.TW&back=00910.TW'>全新(2455.TW)</a>
+        </body></html>
+        """
+        resp = unittest.mock.MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = html
+        mock_get.return_value = resp
+
+        service = MarketDataService()
+        symbols, source = service.get_tw_etf_constituents("00910")
+        self.assertEqual(source, "moneydj_basic0007b")
+        self.assertEqual(symbols, ["2455", "6271"])
+
     def test_get_tw_etf_expected_count(self):
         self.assertEqual(MarketDataService.get_tw_etf_expected_count("0050"), 50)
         self.assertEqual(MarketDataService.get_tw_etf_expected_count("00935"), 50)
