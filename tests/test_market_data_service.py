@@ -203,6 +203,38 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertEqual(out2["2330"], "台積電")
         self.assertTrue(mock_get.called)
 
+    @patch("requests.get")
+    def test_get_tw_symbol_industries(self, mock_get):
+        twse_resp = unittest.mock.MagicMock()
+        twse_resp.raise_for_status.return_value = None
+        twse_resp.json.return_value = [
+            {"公司代號": "2330", "產業別": "24"},
+            {"公司代號": "3017", "產業別": "28"},
+        ]
+        tpex_resp = unittest.mock.MagicMock()
+        tpex_resp.raise_for_status.return_value = None
+        tpex_resp.json.return_value = [
+            {"SecuritiesCompanyCode": "6510", "SecuritiesIndustryCode": "24"},
+        ]
+
+        def _fake_get(url, timeout=12):
+            if "openapi.twse.com.tw/v1/opendata/t187ap03_L" in str(url):
+                return twse_resp
+            if "www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O" in str(url):
+                return tpex_resp
+            raise RuntimeError(f"unexpected url: {url}")
+
+        mock_get.side_effect = _fake_get
+
+        service = MarketDataService()
+        out = service.get_tw_symbol_industries(["2330", "3017", "6510", "9999"])
+        self.assertEqual(out["2330"], "24")
+        self.assertEqual(out["3017"], "28")
+        self.assertEqual(out["6510"], "24")
+        self.assertEqual(out["9999"], "")
+        out2 = service.get_tw_symbol_industries(["2330", "3017", "6510", "9999"])
+        self.assertEqual(out2["2330"], "24")
+
     @patch("yfinance.Ticker")
     def test_get_tw_etf_constituents_fallback(self, mock_ticker):
         mock_ticker.side_effect = RuntimeError("upstream down")
@@ -238,6 +270,34 @@ class MarketDataServiceTests(unittest.TestCase):
         symbols, source = service.get_tw_etf_constituents("00910")
         self.assertEqual(source, "moneydj_basic0007b")
         self.assertEqual(symbols, ["2455", "6271"])
+
+    @patch("requests.get")
+    def test_get_etf_constituents_full_00910_includes_overseas(self, mock_get):
+        html = """
+        <html><body>
+        <td class="col05"><a href='/etf/ea/ETZCW.djhtm?c=1&etfid=PL.US&back=00910.TW'>Planet(PL.US)</a></td><td class="col06">7.34</td><td class="col07">520,848</td>
+        <td class="col05"><a href='/etf/ea/ETZCW.djhtm?c=1&etfid=2455.TW&back=00910.TW'>全新(2455.TW)</a></td><td class="col06">2.62</td><td class="col07">220,000</td>
+        <td class="col05"><a href='/etf/ea/ETZCW.djhtm?c=1&etfid=9412.JP&back=00910.TW'>SKY Perfect JSAT(9412.JP)</a></td><td class="col06">4.41</td><td class="col07">391,281</td>
+        <td class="col05"><a href='/etf/ea/ETZCW.djhtm?c=1&etfid=PL.US&back=00910.TW'>Planet(PL.US)</a></td><td class="col06">7.34</td><td class="col07">520,848</td>
+        </body></html>
+        """
+        resp = unittest.mock.MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = html
+        resp.apparent_encoding = "utf-8"
+        resp.encoding = "utf-8"
+        mock_get.return_value = resp
+
+        service = MarketDataService()
+        rows, source = service.get_etf_constituents_full("00910")
+        self.assertEqual(source, "moneydj_basic0007b_full")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["symbol"], "PL.US")
+        self.assertEqual(rows[0]["market"], "US")
+        self.assertEqual(rows[0]["name"], "Planet")
+        self.assertEqual(rows[1]["symbol"], "2455.TW")
+        self.assertEqual(rows[1]["tw_code"], "2455")
+        self.assertEqual(rows[2]["market"], "JP")
 
     def test_get_tw_etf_expected_count(self):
         self.assertEqual(MarketDataService.get_tw_etf_expected_count("0050"), 50)

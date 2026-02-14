@@ -215,6 +215,68 @@ class HistoryStore:
                 """
             )
 
+    @staticmethod
+    def _normalize_daily_bars_frame(df: pd.DataFrame) -> pd.DataFrame:
+        base_cols = ["open", "high", "low", "close", "volume"]
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.DataFrame(columns=base_cols)
+
+        out = df.copy()
+        if isinstance(out.columns, pd.MultiIndex):
+            renamed: list[str] = []
+            for col in out.columns:
+                parts = [str(part).strip().lower() for part in col if str(part).strip()]
+                candidate = ""
+                for item in reversed(parts):
+                    if item in {"open", "high", "low", "close", "adj close", "adj_close", "volume", "price"}:
+                        candidate = item
+                        break
+                renamed.append(candidate or (parts[-1] if parts else ""))
+            out.columns = renamed
+        else:
+            out.columns = [str(col).strip().lower() for col in out.columns]
+
+        if "adj close" in out.columns and "adj_close" not in out.columns:
+            out = out.rename(columns={"adj close": "adj_close"})
+
+        if "price" in out.columns and "close" not in out.columns:
+            out["close"] = out["price"]
+
+        def _extract_numeric_col(name: str) -> pd.Series:
+            if name not in out.columns:
+                return pd.Series(index=out.index, dtype=float)
+            selected = out.loc[:, out.columns == name]
+            if isinstance(selected, pd.Series):
+                return pd.to_numeric(selected, errors="coerce")
+            if selected.shape[1] == 1:
+                return pd.to_numeric(selected.iloc[:, 0], errors="coerce")
+            # Some upstream sources may produce duplicate columns for same field.
+            return pd.to_numeric(selected.bfill(axis=1).iloc[:, 0], errors="coerce")
+
+        close = _extract_numeric_col("close")
+        if close.empty:
+            return pd.DataFrame(columns=base_cols)
+
+        norm = pd.DataFrame(index=out.index)
+        norm["close"] = close
+        for col in ["open", "high", "low"]:
+            series = _extract_numeric_col(col)
+            norm[col] = series.fillna(close)
+        volume = _extract_numeric_col("volume")
+        norm["volume"] = volume.fillna(0.0)
+        if "adj_close" in out.columns:
+            norm["adj_close"] = _extract_numeric_col("adj_close")
+
+        idx = pd.to_datetime(norm.index, utc=True, errors="coerce")
+        norm.index = idx
+        norm = norm[~norm.index.isna()]
+        keep_cols = [c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in norm.columns]
+        norm = norm[keep_cols]
+        norm = norm.dropna(subset=["open", "high", "low", "close"], how="any").sort_index()
+        if "volume" in norm.columns:
+            norm["volume"] = pd.to_numeric(norm["volume"], errors="coerce").fillna(0.0)
+        return norm
+
     def _load_first_bar_date(self, instrument_id: int) -> Optional[datetime]:
         with self._connect() as conn:
             row = conn.execute("SELECT MIN(date) FROM daily_bars WHERE instrument_id=?", (instrument_id,)).fetchone()
@@ -332,7 +394,7 @@ class HistoryStore:
             snap = self.service._try_ohlcv_chain(providers, request)  # noqa: SLF001
             source = snap.source
             fallback_depth = max(0, providers.index(next(p for p in providers if p.name == source)))
-            df = snap.df.copy()
+            df = self._normalize_daily_bars_frame(snap.df)
             df = df[(df.index >= fetch_start) & (df.index <= end)]
             if df.empty:
                 self._save_sync_state(instrument_id, last_success, source, None)

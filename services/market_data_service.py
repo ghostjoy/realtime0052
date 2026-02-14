@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import html as html_lib
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -550,6 +551,73 @@ class MarketDataService:
         self.cache.set(cache_key, out, ttl_sec=ttl)
         return out
 
+    def get_tw_symbol_industries(self, symbols: list[str]) -> dict[str, str]:
+        import requests
+
+        normalized: list[str] = []
+        for symbol in symbols:
+            text = str(symbol or "").strip().upper()
+            if not text:
+                continue
+            if text not in normalized:
+                normalized.append(text)
+        if not normalized:
+            return {}
+
+        cache_key = f"tw_industries:{','.join(sorted(normalized))}"
+        cached = self.cache.get(cache_key)
+        if isinstance(cached, dict):
+            return {str(k): str(v) for k, v in cached.items()}
+
+        wanted = set(normalized)
+        out = {symbol: "" for symbol in normalized}
+        twse_ok = False
+        tpex_ok = False
+
+        # TWSE listed company profile (contains industry code)
+        twse_url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+        try:
+            resp = requests.get(twse_url, timeout=12)
+            resp.raise_for_status()
+            rows = resp.json()
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(row.get("公司代號", "")).strip().upper()
+                    if code not in wanted:
+                        continue
+                    industry = str(row.get("產業別", "")).strip()
+                    if industry:
+                        out[code] = industry
+                twse_ok = True
+        except Exception:
+            twse_ok = False
+
+        # TPEx OTC company profile (contains industry code)
+        tpex_url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
+        try:
+            resp = requests.get(tpex_url, timeout=12)
+            resp.raise_for_status()
+            rows = resp.json()
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(row.get("SecuritiesCompanyCode", "")).strip().upper()
+                    if code not in wanted:
+                        continue
+                    industry = str(row.get("SecuritiesIndustryCode", "")).strip()
+                    if industry:
+                        out[code] = industry
+                tpex_ok = True
+        except Exception:
+            tpex_ok = False
+
+        ttl = 21600 if (twse_ok or tpex_ok) else 900
+        self.cache.set(cache_key, out, ttl_sec=ttl)
+        return out
+
     def get_benchmark_series(
         self,
         market: str,
@@ -743,12 +811,12 @@ class MarketDataService:
                 return deduped[:50]
         return []
 
-    def _fetch_moneydj_tw_constituents(self, etf_code: str) -> list[str]:
+    def _fetch_moneydj_basic0007b_html(self, etf_code: str) -> str:
         import requests
 
         code = str(etf_code or "").strip().upper()
         if not re.fullmatch(r"\d{4,6}", code):
-            return []
+            return ""
 
         url = f"https://www.moneydj.com/ETF/X/Basic/Basic0007B.xdjhtm?etfid={code}.TW"
         headers = {
@@ -760,12 +828,110 @@ class MarketDataService:
         }
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
-        html = resp.text or ""
+        # MoneyDJ occasionally sends UTF-8 content with legacy headers.
+        apparent = (resp.apparent_encoding or "").strip()
+        if apparent and (resp.encoding or "").lower() in {"", "iso-8859-1", "big5", "cp950"}:
+            resp.encoding = apparent
+        return resp.text or ""
+
+    def _fetch_moneydj_tw_constituents(self, etf_code: str) -> list[str]:
+        code = str(etf_code or "").strip().upper()
+        html = self._fetch_moneydj_basic0007b_html(code)
+        if not html:
+            return []
 
         tokens = re.findall(r"etfid=(\d{4})\.TW", html, flags=re.IGNORECASE)
         tokens += re.findall(r"\((\d{4})\.TW\)", html, flags=re.IGNORECASE)
         codes = self._dedupe_4digit_codes(tokens)
         return [c for c in codes if c != code]
+
+    @staticmethod
+    def _parse_etf_token_market(symbol: str) -> str:
+        token = str(symbol or "").strip().upper()
+        if "." in token:
+            return token.split(".")[-1]
+        return ""
+
+    def _fetch_moneydj_full_constituents(self, etf_code: str) -> list[dict[str, object]]:
+        code = str(etf_code or "").strip().upper()
+        html = self._fetch_moneydj_basic0007b_html(code)
+        if not html:
+            return []
+
+        pattern = re.compile(
+            rf"<td class=['\"]col05['\"]>\s*<a [^>]*?etfid=([^&\"']+)&back={re.escape(code)}\.TW['\"][^>]*>([^<]+)</a>\s*</td>\s*"
+            r"<td class=['\"]col06['\"]>([^<]*)</td>\s*"
+            r"<td class=['\"]col07['\"]>([^<]*)</td>",
+            flags=re.IGNORECASE,
+        )
+        rows: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for idx, m in enumerate(pattern.finditer(html), start=1):
+            raw_symbol = html_lib.unescape((m.group(1) or "").strip())
+            if not raw_symbol or raw_symbol in seen:
+                continue
+            seen.add(raw_symbol)
+
+            label = html_lib.unescape((m.group(2) or "").strip())
+            name = label
+            if label.endswith(f"({raw_symbol})"):
+                name = label[: -(len(raw_symbol) + 2)].strip() or raw_symbol
+            weight_raw = html_lib.unescape((m.group(3) or "").strip())
+            shares_raw = html_lib.unescape((m.group(4) or "").strip())
+            try:
+                weight_pct = float(weight_raw.replace(",", ""))
+            except Exception:
+                weight_pct = None
+            try:
+                shares = int(float(shares_raw.replace(",", "")))
+            except Exception:
+                shares = None
+            market = self._parse_etf_token_market(raw_symbol)
+            tw_code = ""
+            tw_match = re.fullmatch(r"(\d{4})\.TW", raw_symbol, flags=re.IGNORECASE)
+            if tw_match:
+                tw_code = tw_match.group(1)
+            rows.append(
+                {
+                    "rank": idx,
+                    "symbol": raw_symbol,
+                    "name": name,
+                    "market": market,
+                    "weight_pct": weight_pct,
+                    "shares": shares,
+                    "tw_code": tw_code,
+                }
+            )
+        return rows
+
+    def get_etf_constituents_full(
+        self, etf_code: str, limit: Optional[int] = None, force_refresh: bool = False
+    ) -> tuple[list[dict[str, object]], str]:
+        code = str(etf_code or "").strip().upper()
+        if not code:
+            return [], "invalid_symbol"
+        limit_token = "all" if limit is None else str(max(1, int(limit)))
+        cache_key = f"universe-full:{code}:{limit_token}"
+        if not force_refresh:
+            cached = self.cache.get(cache_key)
+            if isinstance(cached, tuple) and len(cached) == 2:
+                rows, source = cached
+                if isinstance(rows, list) and isinstance(source, str):
+                    return rows, source
+
+        rows: list[dict[str, object]] = []
+        source = "unavailable"
+        try:
+            rows = self._fetch_moneydj_full_constituents(code)
+            if rows:
+                source = "moneydj_basic0007b_full"
+        except Exception:
+            rows = []
+
+        if limit is not None:
+            rows = rows[: max(1, int(limit))]
+        self.cache.set(cache_key, (rows, source), ttl_sec=3600)
+        return rows, source
 
     @staticmethod
     def get_tw_etf_expected_count(etf_code: str) -> Optional[int]:

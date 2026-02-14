@@ -95,6 +95,39 @@ class _CaptureService:
         )
 
 
+class _DupColumnService:
+    def __init__(self):
+        self.us_twelve = _Provider("twelvedata")
+        self.yahoo = _Provider("yahoo")
+        self.us_stooq = _Provider("stooq")
+        self.tw_fugle_rest = _Provider("tw_fugle_rest")
+        self.tw_fugle_rest.api_key = None
+        self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex = _Provider("tw_tpex")
+
+    def _try_ohlcv_chain(self, providers, request: ProviderRequest):
+        dates = pd.date_range("2024-01-01", periods=10, freq="B", tz="UTC")
+        # Simulate malformed upstream shape: duplicated "open" column.
+        df = pd.DataFrame(
+            data=[
+                [100.0, 100.0, 101.0, 99.0, 100.5, 1000.0]
+                for _ in range(len(dates))
+            ],
+            columns=["open", "open", "high", "low", "close", "volume"],
+            index=dates,
+        )
+        return OhlcvSnapshot(
+            symbol=request.symbol,
+            market=request.market,
+            interval="1d",
+            tz="UTC",
+            df=df,
+            source="yahoo",
+            is_delayed=True,
+            fetched_at=datetime.now(tz=timezone.utc),
+        )
+
+
 class HistoryStoreTests(unittest.TestCase):
     def test_sync_and_load_daily_bars(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -215,6 +248,17 @@ class HistoryStoreTests(unittest.TestCase):
             report = store.sync_symbol_history(symbol="0050", market="TW", start=start, end=end)
             self.assertEqual(report.source, "tw_fugle_rest")
             self.assertEqual(service.last_provider_name, "tw_fugle_rest")
+
+    def test_sync_history_normalizes_duplicate_ohlcv_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_DupColumnService())
+            report = store.sync_symbol_history(symbol="^N225", market="US")
+            self.assertIsNone(report.error)
+            self.assertGreater(report.rows_upserted, 0)
+            bars = store.load_daily_bars("^N225", "US")
+            self.assertFalse(bars.empty)
+            self.assertTrue({"open", "high", "low", "close", "volume"}.issubset(bars.columns))
 
     def test_save_and_load_intraday_ticks_with_retention(self):
         with tempfile.TemporaryDirectory() as tmp:

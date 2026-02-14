@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
@@ -218,6 +219,341 @@ STRATEGY_DESC = {
     "rsi_reversion": "RSI 低檔買、高檔賣，偏均值回歸。",
     "macd_trend": "MACD 快慢線方向判斷趨勢。",
 }
+
+ETF_00910_COMPANY_BRIEFS: dict[str, str] = {
+    "099320.KS": "韓國衛星製造商，主要做地球觀測衛星系統與整合服務。",
+    "PL.US": "Planet 提供地球觀測影像資料，核心是高頻率衛星遙測與數據平台服務。",
+    "ASTS.US": "AST SpaceMobile 目標用低軌衛星直接連手機，提供太空行動通訊網路。",
+    "GSAT.US": "Globalstar 經營衛星通訊網路，提供語音/數據連線與物聯網服務。",
+    "9412.JP": "SKY Perfect JSAT 經營衛星通訊與付費影視，具日本大型衛星營運規模。",
+    "SATS.US": "EchoStar 聚焦衛星通訊與相關電信基礎設施，服務企業與消費市場。",
+    "047810.KS": "Korea Aerospace 為韓國航太與國防製造商，涵蓋軍機與航太系統。",
+    "RKLB.US": "Rocket Lab 提供小型衛星發射與太空系統製造，屬商業航太成長公司。",
+    "VSAT.US": "Viasat 提供衛星寬頻與機上網路服務，面向民航、企業與政府客戶。",
+    "ESE.US": "ESCO Technologies 主要做航太/工業測試與工程設備，偏關鍵零組件供應。",
+    "6271.TW": "同欣電以感測與車用電子封裝模組為主，供應高階影像與通訊應用。",
+    "6271": "同欣電以感測與車用電子封裝模組為主，供應高階影像與通訊應用。",
+    "PKE.US": "Park Aerospace 提供航太用複合材料與結構材料，客戶多在航空與國防。",
+    "6285.TW": "啟碁科技專注網通與無線通訊設備，產品涵蓋基地台與衛星通訊終端。",
+    "6285": "啟碁科技專注網通與無線通訊設備，產品涵蓋基地台與衛星通訊終端。",
+    "6486.JP": "Eagle Industry 為精密密封與機械零件廠，應用於汽車與航太工業。",
+    "7011.JP": "三菱重工涵蓋能源、航太與國防，是日本大型重工與航太體系公司。",
+    "2455.TW": "全新為砷化鎵射頻元件供應商，產品常見於通訊與高頻應用。",
+    "2455": "全新為砷化鎵射頻元件供應商，產品常見於通訊與高頻應用。",
+    "RDW.US": "Redwire 提供太空基礎設施與在軌技術，服務商業與政府太空任務。",
+    "IRDM.US": "Iridium 經營全球低軌衛星通訊網路，主打語音/數據與物聯網連線。",
+    "GOGO.US": "Gogo 主要提供航空機上網路與連線服務，客戶以商務航空為主。",
+}
+
+
+def _company_brief_for_00910(symbol: str, name: str, market_tag: str) -> str:
+    key = str(symbol or "").strip().upper()
+    if key in ETF_00910_COMPANY_BRIEFS:
+        return ETF_00910_COMPANY_BRIEFS[key]
+    if "." in key:
+        base = key.split(".")[0]
+        if base in ETF_00910_COMPANY_BRIEFS:
+            return ETF_00910_COMPANY_BRIEFS[base]
+    market = str(market_tag or "").strip().upper()
+    if market == "TW":
+        return "台灣供應鏈公司，主要布局通訊、半導體或航太相關電子零組件。"
+    if market == "US":
+        return "美國航太/衛星相關公司，重點在衛星通訊、太空系統或資料服務。"
+    if market == "JP":
+        return "日本航太或工業技術公司，主要參與衛星/航太與高階製造供應鏈。"
+    if market == "KS":
+        return "韓國航太/衛星供應鏈公司，涵蓋衛星製造與相關系統整合能力。"
+    return f"{name} 為 00910 成分股，主要屬於航太衛星主題供應鏈。"
+
+
+ETF_INDEX_METHOD_SUMMARY: dict[str, dict[str, object]] = {
+    "0050": {
+        "title": "0050 指數編製標準（官方摘要）",
+        "index_name": "臺灣50指數（FTSE TWSE Taiwan 50 Index）",
+        "provider": "臺灣證券交易所與 FTSE 合作編製",
+        "rules": [
+            "標的指數由臺灣證交所上市股票中，挑選總市值最大的 50 家公司作為成分股。",
+            "成分股審核與調整生效時點：3、6、9、12 月第 3 個星期五後的下一個交易日。",
+        ],
+        "sources": [
+            ("元大投信 0050 基本資訊（Index Profile / Index Methodology）", "https://www.yuantaetfs.com/product/detail/0050/Basic_information"),
+        ],
+    },
+    "00935": {
+        "title": "00935 指數編製標準（官方摘要）",
+        "index_name": "臺灣指數公司特選臺灣上市上櫃 FactSet 創新科技 50 指數",
+        "provider": "臺灣指數公司（TWSE e添富新上市資訊揭露）",
+        "rules": [
+            "成分股條件包含市值須達新台幣 50 億元以上。",
+            "需符合 FactSet RBICS Level 6 創新科技次產業，且相關營收占比須大於 50%。",
+            "要求研發費用投入門檻，並排除研發投入比例排名最差 25% 企業。",
+            "定審頻率為半年，成分股檔數 50 檔。",
+        ],
+        "sources": [
+            ("TWSE ETF e添富：00935 新上市資訊", "https://www.twse.com.tw/zh/ETFortune/newsDetail/ff8080818b7e232e018b83ab7de9002b"),
+        ],
+    },
+    "00910": {
+        "title": "00910 指數編製標準（官方摘要）",
+        "index_name": "Solactive 太空衛星指數（Solactive Aerospace and Satellite Index）",
+        "provider": "Solactive（由第一金投信官網揭露編製方法）",
+        "rules": [
+            "依 Solactive 國家分類，先鎖定已開發國家加上台灣、韓國，再篩選市值與流動性佳標的。",
+            "透過 NLP 系統 ARTIS 評分與排序，篩選與太空及衛星產業高度投入的企業。",
+            "精選全球 30 檔企業，涵蓋太空旅遊、太空技術、衛星通訊、衛星零組件。",
+            "每年 2 月、8 月調整（官網註記指數調整日為 2 月與 8 月最後一個營業日）。",
+        ],
+        "sources": [
+            ("第一金投信 00910 專頁（標的指數編製方法）", "https://www.fsitc.com.tw/act/202206_asetf/"),
+        ],
+    },
+}
+
+
+def _render_etf_index_method_summary(etf_code: str):
+    info = ETF_INDEX_METHOD_SUMMARY.get(str(etf_code or "").strip().upper())
+    if not info:
+        return
+    st.markdown(f"#### {str(info.get('title', '指數編製標準（官方摘要）'))}")
+
+    lines: list[str] = []
+    index_name = str(info.get("index_name", "")).strip()
+    provider = str(info.get("provider", "")).strip()
+    if index_name:
+        lines.append(f"- 標的指數：{index_name}")
+    if provider:
+        lines.append(f"- 編製機構：{provider}")
+    rules = info.get("rules", [])
+    if isinstance(rules, list):
+        lines.extend([f"- {str(item)}" for item in rules if str(item).strip()])
+    if lines:
+        st.markdown("\n".join(lines))
+
+    sources = info.get("sources", [])
+    if isinstance(sources, list) and sources:
+        source_lines = [f"- [{str(label)}]({str(url)})" for label, url in sources if str(label).strip() and str(url).strip()]
+        if source_lines:
+            st.caption("官方來源：")
+            st.markdown("\n".join(source_lines))
+    st.caption("以上為官方公開資訊摘要，實際請以最新公開說明書與指數編製機構公告為準。")
+
+
+TW_COMPANY_BRIEF_OVERRIDES: dict[str, str] = {
+    "2330": "台積電是晶圓代工龍頭，主要為全球 IC 設計公司提供先進製程製造服務。",
+    "2454": "聯發科是 IC 設計公司，核心在手機與通訊晶片、AIoT 與車用平台。",
+    "2317": "鴻海是電子代工與製造服務大廠，業務涵蓋消費電子、伺服器與電動車。",
+    "2308": "台達電聚焦電源管理與節能解決方案，布局工控、自動化與資料中心。",
+    "2382": "廣達是筆電與伺服器代工大廠，近年在 AI 伺服器供應鏈角色提升。",
+    "2881": "富邦金為金控公司，主要業務包含銀行、保險、證券與資產管理。",
+    "2882": "國泰金為金控公司，核心涵蓋壽險、銀行、證券與整合金融服務。",
+    "2891": "中信金為金控公司，重點在銀行、信用卡與跨境金融服務。",
+    "2886": "兆豐金為金控公司，銀行與外匯業務比重高，具企業金融優勢。",
+    "2412": "中華電為台灣電信商，提供行動通訊、寬頻網路與企業數位服務。",
+    "3034": "聯詠是顯示與影像相關 IC 設計公司，產品聚焦驅動 IC 與 SoC。",
+    "2303": "聯電是晶圓代工廠，主要服務成熟製程與多元應用晶片生產。",
+    "3017": "奇鋐主力為散熱模組與熱管理方案，受惠伺服器與 AI 基礎建設需求。",
+    "3653": "健策提供散熱與精密金屬零組件，產品應用於伺服器與高階運算平台。",
+    "6669": "緯穎聚焦雲端伺服器與資料中心解決方案，是大型雲端客戶供應商。",
+    "1216": "統一以食品、通路與民生消費品牌為主，屬內需型大型企業。",
+    "1301": "台塑為石化與材料公司，業務涵蓋塑化產品與相關工業原料。",
+    "1303": "南亞主力在化工材料、電子材料與塑膠加工，應用範圍廣。",
+    "2002": "中鋼是台灣主要鋼鐵公司，提供基礎工業與製造業所需鋼材。",
+    "2603": "長榮是貨櫃航運公司，主要收入來自全球海運運輸業務。",
+    "6505": "台塑化以煉油與石化產品為核心，提供燃料與石化中下游原料。",
+    "6510": "精測主要做晶圓測試介面板與探針卡等測試方案，服務高階晶片測試需求。",
+}
+
+
+TW_INDUSTRY_INFO: dict[str, tuple[str, str]] = {
+    "01": ("水泥工業", "主要生產水泥與建材，營運與基礎建設及景氣循環相關。"),
+    "02": ("食品工業", "主要經營食品與民生消費品，需求相對穩定。"),
+    "03": ("塑膠工業", "主要提供塑化材料與製品，受原料價格與景氣影響。"),
+    "04": ("紡織纖維", "主要生產紡織纖維與布料，應用在成衣與工業材料。"),
+    "05": ("電機機械", "主要提供機械設備與自動化產品，受資本支出循環影響。"),
+    "06": ("電器電纜", "主要經營電線電纜與電力相關零組件。"),
+    "08": ("玻璃陶瓷", "主要生產玻璃與陶瓷材料，應用於建材與工業。"),
+    "09": ("造紙工業", "主要生產紙漿與紙類產品，受原料與需求循環影響。"),
+    "10": ("鋼鐵工業", "主要提供鋼材與金屬材料，與製造業與建設需求連動。"),
+    "11": ("橡膠工業", "主要生產橡膠材料與輪胎等產品。"),
+    "12": ("汽車工業", "主要經營汽車整車或零組件供應鏈。"),
+    "14": ("建材營造", "主要從事建設、營造與不動產相關業務。"),
+    "15": ("航運業", "主要提供海運、空運或物流服務，受運價與景氣波動影響。"),
+    "16": ("觀光餐旅", "主要經營旅遊、飯店與餐飲服務。"),
+    "17": ("金融保險", "主要提供銀行、保險、證券與資產管理等金融服務。"),
+    "18": ("貿易百貨", "主要經營通路零售、百貨與貿易業務。"),
+    "20": ("其他", "主要業務多元，涵蓋不同產業與應用場景。"),
+    "21": ("化學工業", "主要生產化學品與材料，應用在工業與消費市場。"),
+    "22": ("生技醫療", "主要從事製藥、醫材或醫療相關服務。"),
+    "23": ("油電燃氣", "主要提供能源、燃料或公用事業服務。"),
+    "24": ("半導體業", "主要從事 IC 設計、晶圓製造、封測或測試相關業務。"),
+    "25": ("電腦及週邊設備業", "主要提供伺服器、電腦與相關硬體設備。"),
+    "26": ("光電業", "主要從事面板、光學元件與光電模組相關產品。"),
+    "27": ("通信網路業", "主要提供通訊設備、網通產品與連網解決方案。"),
+    "28": ("電子零組件業", "主要供應電子零件、模組與關鍵材料。"),
+    "29": ("電子通路業", "主要經營電子零組件代理與通路服務。"),
+    "30": ("資訊服務業", "主要提供軟體、資訊系統與數位服務。"),
+    "31": ("其他電子業", "主要為電子產業其他細分領域與應用。"),
+    "32": ("文化創意業", "主要從事內容、設計與文化創意相關業務。"),
+    "33": ("農業科技", "主要經營農業、食品原料與相關科技應用。"),
+}
+
+
+def _company_brief_for_tw(symbol: str, name: str, etf_code: str, industry_code: str = "") -> str:
+    code = str(symbol or "").strip().upper()
+    title = str(name or code).strip() or code
+    if code in TW_COMPANY_BRIEF_OVERRIDES:
+        return TW_COMPANY_BRIEF_OVERRIDES[code]
+
+    ind = str(industry_code or "").strip()
+    if ind in TW_INDUSTRY_INFO:
+        industry_name, industry_desc = TW_INDUSTRY_INFO[ind]
+        return f"{title} 屬{industry_name}，{industry_desc}"
+
+    name_text = title
+    if any(token in name_text for token in ("金控", "銀行", "證券", "保險")):
+        return f"{title} 主要屬金融產業，核心在銀行、保險、證券或資產管理等金融服務。"
+    if any(token in name_text for token in ("電信",)):
+        return f"{title} 主要提供通訊與網路服務，屬電信與數位基礎建設相關公司。"
+    if any(token in name_text for token in ("航運", "海運", "航空")):
+        return f"{title} 主要從事運輸與物流業務，營運與景氣循環及運價變動高度相關。"
+    if any(token in name_text for token in ("塑", "鋼", "化", "水泥")):
+        return f"{title} 屬傳產材料或基礎工業公司，營運與原物料及景氣循環關聯較高。"
+    if any(token in name_text for token in ("電", "科", "晶", "半導體", "光", "網")):
+        return f"{title} 屬電子科技供應鏈公司，主要提供晶片、零組件或系統產品。"
+    return f"{title} 為 {etf_code} 成分股，主要為台股大型或中大型企業。"
+
+
+def _split_brief_to_points(text: str) -> tuple[str, str]:
+    raw = " ".join(str(text or "").replace("\n", " ").split()).strip()
+    if not raw:
+        return "", ""
+    parts = [p.strip() for p in re.split(r"[，。；;]", raw) if p.strip()]
+    if not parts:
+        return raw, ""
+    if len(parts) == 1:
+        return parts[0], ""
+    core = parts[0]
+    product = "；".join(parts[1:3])
+    return core, product
+
+
+def _full_table_height(df: pd.DataFrame, *, min_height: int = 220, max_height: int = 3200) -> int:
+    row_count = int(len(df.index)) if isinstance(df, pd.DataFrame) else 0
+    estimated = 40 + row_count * 36
+    return max(min_height, min(max_height, estimated))
+
+
+def _render_tw_constituent_intro_table(
+    *,
+    etf_code: str,
+    symbols: list[str],
+    service: MarketDataService,
+):
+    ordered_symbols: list[str] = []
+    for symbol in symbols:
+        code = str(symbol or "").strip().upper()
+        if not code or code in ordered_symbols:
+            continue
+        ordered_symbols.append(code)
+    if not ordered_symbols:
+        return
+
+    full_rows, _ = service.get_etf_constituents_full(etf_code, limit=None, force_refresh=False)
+    weight_map: dict[str, float] = {}
+    for row in full_rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("tw_code", "")).strip().upper()
+        if not code:
+            raw_symbol = str(row.get("symbol", "")).strip().upper()
+            m = re.search(r"(\d{4})", raw_symbol)
+            if m:
+                code = m.group(1)
+        if not code or code in weight_map:
+            continue
+        try:
+            weight = float(row.get("weight_pct"))  # type: ignore[arg-type]
+        except Exception:
+            continue
+        if math.isfinite(weight):
+            weight_map[code] = round(weight, 2)
+
+    name_map = service.get_tw_symbol_names(ordered_symbols)
+    industry_map = service.get_tw_symbol_industries(ordered_symbols)
+    rows: list[dict[str, object]] = []
+    for idx, code in enumerate(ordered_symbols, start=1):
+        name = str(name_map.get(code, code)).strip() or code
+        industry_code = str(industry_map.get(code, "")).strip()
+        industry_name = TW_INDUSTRY_INFO.get(industry_code, ("", ""))[0]
+        fallback = _company_brief_for_tw(code, name, etf_code, industry_code)
+        core, product = _split_brief_to_points(fallback)
+        rows.append(
+            {
+                "排名": idx,
+                "代號": code,
+                "名稱": name,
+                "權重(%)": weight_map.get(code, "—"),
+                "產業": industry_name or ("其他" if industry_code else ""),
+                "市場": "TW",
+                "核心業務": core,
+                "產品面向": product,
+                "來源": "規則摘要（產業/內建）",
+            }
+        )
+    out_df = pd.DataFrame(rows)
+    st.dataframe(
+        out_df,
+        use_container_width=True,
+        hide_index=True,
+        height=_full_table_height(out_df),
+    )
+
+
+def _render_00910_constituent_intro_table(
+    *,
+    service: MarketDataService,
+    full_rows: list[dict[str, object]],
+):
+    rows_full_for_intro = list(full_rows)
+    if not rows_full_for_intro:
+        rows_full_for_intro, _ = service.get_etf_constituents_full("00910", limit=None, force_refresh=False)
+    if not rows_full_for_intro:
+        return
+
+    intro_df = pd.DataFrame(rows_full_for_intro)
+    if "rank" in intro_df.columns:
+        intro_df["rank"] = pd.to_numeric(intro_df["rank"], errors="coerce")
+        intro_df = intro_df.sort_values("rank", ascending=True, na_position="last")
+    intro_df["symbol"] = intro_df.get("symbol", pd.Series(dtype=str)).astype(str)
+    intro_df["name"] = intro_df.get("name", pd.Series(dtype=str)).astype(str)
+    intro_df["market"] = intro_df.get("market", pd.Series(dtype=str)).astype(str).str.upper()
+    intro_df["weight_pct"] = pd.to_numeric(intro_df.get("weight_pct"), errors="coerce").round(2)
+    briefs: list[str] = []
+    for _, row in intro_df.iterrows():
+        symbol = str(row.get("symbol", "")).strip()
+        name = str(row.get("name", "")).strip()
+        market = str(row.get("market", "")).strip().upper()
+        brief = _company_brief_for_00910(symbol=symbol, name=name, market_tag=market)
+        briefs.append(brief)
+    intro_df["brief"] = briefs
+    show_cols = [c for c in ["rank", "symbol", "name", "market", "weight_pct", "brief"] if c in intro_df.columns]
+    out_intro = intro_df[show_cols].rename(
+        columns={
+            "rank": "排名",
+            "symbol": "代號",
+            "name": "名稱",
+            "market": "市場",
+            "weight_pct": "權重(%)",
+            "brief": "公司簡介",
+        }
+    )
+    st.dataframe(
+        out_intro,
+        use_container_width=True,
+        hide_index=True,
+        height=_full_table_height(out_intro),
+    )
+
 
 PAGE_CARDS = [
     {"key": "即時看盤", "desc": "台股/美股即時報價、即時走勢與技術快照。"},
@@ -3044,6 +3380,396 @@ def _render_tutorial_view():
     )
 
 
+def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_title: str = "超額報酬 %"):
+    if rows_df is None or rows_df.empty:
+        st.info(f"{title}：目前無可用資料。")
+        return
+
+    frame = rows_df.copy()
+    frame["symbol"] = frame["symbol"].astype(str)
+    frame["name"] = frame["name"].astype(str)
+    frame["excess_pct"] = pd.to_numeric(frame["excess_pct"], errors="coerce")
+    frame["asset_return_pct"] = pd.to_numeric(frame["asset_return_pct"], errors="coerce")
+    frame["benchmark_return_pct"] = pd.to_numeric(frame["benchmark_return_pct"], errors="coerce")
+    frame["bars"] = pd.to_numeric(frame["bars"], errors="coerce").fillna(0).astype(int)
+    frame = frame.dropna(subset=["excess_pct", "asset_return_pct", "benchmark_return_pct"])
+    if frame.empty:
+        st.info(f"{title}：目前無可用資料。")
+        return
+    frame = frame.sort_values("excess_pct", ascending=False).reset_index(drop=True)
+
+    st.markdown(f"#### {title}")
+    winners = int((frame["excess_pct"] > 0).sum())
+    losers = int((frame["excess_pct"] < 0).sum())
+    ties = int((frame["excess_pct"] == 0).sum())
+    avg_excess = float(frame["excess_pct"].mean())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("勝過基準檔數", str(winners))
+    m2.metric("輸給基準檔數", str(losers))
+    m3.metric("持平檔數", str(ties))
+    m4.metric("平均超額報酬", f"{avg_excess:+.2f}%")
+
+    palette = _ui_palette()
+    win_color = _to_rgba(str(palette["fill_buy"]), 0.95)
+    lose_color = _to_rgba(str(palette["fill_sell"]), 0.95)
+    neutral_color = "#E5E7EB"
+    tiles_per_row = 6
+    tile_rows = int(math.ceil(len(frame) / tiles_per_row))
+    z = np.full((tile_rows, tiles_per_row), np.nan)
+    txt = np.full((tile_rows, tiles_per_row), "", dtype=object)
+    custom = np.empty((tile_rows, tiles_per_row, 6), dtype=object)
+    custom[:, :, :] = None
+
+    for i, row in frame.iterrows():
+        r = i // tiles_per_row
+        c = i % tiles_per_row
+        z[r, c] = float(row["excess_pct"])
+        label = f"{row['symbol']} {row['name']}" if row["name"] != row["symbol"] else row["symbol"]
+        txt[r, c] = f"{label}<br>{row['excess_pct']:+.2f}%"
+        custom[r, c, 0] = float(row["asset_return_pct"])
+        custom[r, c, 1] = float(row["benchmark_return_pct"])
+        custom[r, c, 2] = str(row.get("benchmark_symbol", ""))
+        custom[r, c, 3] = int(row.get("bars", 0))
+        custom[r, c, 4] = str(row.get("market_tag", ""))
+        custom[r, c, 5] = str(row.get("weight_pct", ""))
+
+    max_abs = float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0
+    max_abs = max(max_abs, 0.01)
+    fig_heat = go.Figure(
+        data=[
+            go.Heatmap(
+                z=z,
+                text=txt,
+                texttemplate="%{text}",
+                textfont=dict(size=12),
+                customdata=custom,
+                zmin=-max_abs,
+                zmax=max_abs,
+                colorscale=[[0.0, lose_color], [0.5, neutral_color], [1.0, win_color]],
+                colorbar=dict(title=colorbar_title),
+                hovertemplate=(
+                    "標的報酬：%{customdata[0]:+.2f}%<br>"
+                    "基準報酬：%{customdata[1]:+.2f}%<br>"
+                    "超額：%{z:+.2f}%<br>"
+                    "基準：%{customdata[2]}<br>"
+                    "市場：%{customdata[4]}<br>"
+                    "對齊Bars：%{customdata[3]}<br>"
+                    "權重：%{customdata[5]}"
+                    "<extra></extra>"
+                ),
+            )
+        ]
+    )
+    fig_heat.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig_heat.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, autorange="reversed")
+    fig_heat.update_layout(
+        height=max(250, 90 * tile_rows),
+        margin=dict(l=10, r=10, t=10, b=10),
+        template=str(palette["plot_template"]),
+        paper_bgcolor=str(palette["paper_bg"]),
+        plot_bgcolor=str(palette["plot_bg"]),
+        font=dict(color=str(palette["text_color"])),
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    out_df = frame.copy()
+    for col in ["weight_pct", "asset_return_pct", "benchmark_return_pct", "excess_pct"]:
+        if col in out_df.columns:
+            out_df[col] = pd.to_numeric(out_df[col], errors="coerce").round(2)
+    rename_map = {
+        "symbol": "symbol",
+        "name": "name",
+        "market_tag": "market",
+        "benchmark_symbol": "benchmark",
+        "weight_pct": "weight_pct",
+        "asset_return_pct": "asset_return_pct",
+        "benchmark_return_pct": "benchmark_return_pct",
+        "excess_pct": "excess_pct",
+        "bars": "bars",
+        "start_actual": "start_actual",
+        "end_actual": "end_actual",
+    }
+    keep_cols = [c for c in rename_map.keys() if c in out_df.columns]
+    out_df = out_df[keep_cols].rename(columns={k: v for k, v in rename_map.items() if k in keep_cols})
+    st.dataframe(out_df, use_container_width=True, hide_index=True)
+
+
+def _render_00910_global_ytd_block(
+    *,
+    store: HistoryStore,
+    service: MarketDataService,
+    page_key: str,
+    full_rows: list[dict[str, object]],
+):
+    st.markdown("### 00910 全球成分股 YTD 熱力圖（Buy & Hold）")
+    today = date.today()
+    ytd_start_date = date(today.year, 1, 1)
+    ytd_end_date = today
+    start_dt = datetime.combine(ytd_start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+    end_dt = datetime.combine(ytd_end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+
+    c1, c2, c3, c4 = st.columns(4)
+    tw_benchmark = c1.selectbox("台股基準", options=["^TWII", "0050"], index=0, key=f"{page_key}_00910_bench_tw")
+    us_benchmark = c2.selectbox("美股基準", options=["QQQ", "^IXIC"], index=0, key=f"{page_key}_00910_bench_us")
+    jp_benchmark = c3.selectbox("日股基準", options=["^N225"], index=0, key=f"{page_key}_00910_bench_jp")
+    ks_benchmark = c4.selectbox("韓股基準", options=["^KS11"], index=0, key=f"{page_key}_00910_bench_ks")
+    s1, s2 = st.columns(2)
+    sync_before_run = s1.checkbox(
+        "執行前同步最新日K（推薦）",
+        value=True,
+        key=f"{page_key}_00910_sync_ytd",
+    )
+    parallel_sync = s2.checkbox(
+        "平行同步",
+        value=True,
+        key=f"{page_key}_00910_parallel_ytd",
+    )
+    st.caption(
+        f"YTD 區間：{ytd_start_date.isoformat()} ~ {ytd_end_date.isoformat()}。"
+        "台股成分對台股基準；海外成分依市場對應基準（US/JP/KS）。"
+    )
+
+    universe_id = "TW:00910:GLOBAL_YTD"
+    payload_key = f"{page_key}_global_ytd_payload"
+    run_key = (
+        f"00910_global_ytd:{ytd_start_date}:{ytd_end_date}:{tw_benchmark}:"
+        f"{us_benchmark}:{jp_benchmark}:{ks_benchmark}"
+    )
+    cached_run = store.load_latest_heatmap_run(universe_id)
+    if payload_key not in st.session_state and cached_run and isinstance(cached_run.payload, dict):
+        initial_payload = dict(cached_run.payload)
+        initial_payload.setdefault("generated_at", cached_run.created_at.isoformat())
+        st.session_state[payload_key] = initial_payload
+
+    def _dedupe_keep_order(values: list[str]) -> list[str]:
+        out: list[str] = []
+        for value in values:
+            text = str(value or "").strip().upper()
+            if text and text not in out:
+                out.append(text)
+        return out
+
+    run_now = st.button("執行 00910 YTD 全球熱力圖", type="primary", use_container_width=True, key=f"{page_key}_00910_run_ytd")
+    if run_now:
+        rows_full = list(full_rows)
+        if not rows_full:
+            rows_full, _ = service.get_etf_constituents_full("00910", limit=None, force_refresh=True)
+        if not rows_full:
+            st.error("目前抓不到 00910 完整成分股（含海外），請稍後重試。")
+            return
+
+        market_benchmark_map = {
+            "US": us_benchmark,
+            "JP": jp_benchmark,
+            "KS": ks_benchmark,
+        }
+        universe_items: list[dict[str, object]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for row in rows_full:
+            raw_symbol = str(row.get("symbol", "")).strip().upper()
+            name = str(row.get("name", raw_symbol)).strip() or raw_symbol
+            market_tag = str(row.get("market", "")).strip().upper()
+            tw_code = str(row.get("tw_code", "")).strip().upper()
+            weight_pct = _safe_float(row.get("weight_pct"))
+
+            if tw_code and re.fullmatch(r"\d{4}", tw_code):
+                asset_symbol = tw_code
+                asset_market = "TW"
+                group = "TW"
+                benchmark_symbol = tw_benchmark
+                benchmark_market = "TW"
+                market_tag = "TW"
+            else:
+                if not raw_symbol:
+                    continue
+                if not market_tag:
+                    market_tag = raw_symbol.split(".")[-1] if "." in raw_symbol else "US"
+                asset_symbol = raw_symbol
+                asset_market = "US"
+                group = "OVERSEAS"
+                benchmark_symbol = market_benchmark_map.get(market_tag, us_benchmark)
+                benchmark_market = "US"
+
+            dedupe_key = (asset_market, asset_symbol)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            universe_items.append(
+                {
+                    "symbol": asset_symbol,
+                    "name": name,
+                    "group": group,
+                    "market_tag": market_tag,
+                    "market": asset_market,
+                    "benchmark_symbol": benchmark_symbol,
+                    "benchmark_market": benchmark_market,
+                    "weight_pct": weight_pct,
+                }
+            )
+
+        if not universe_items:
+            st.error("00910 成分股清單為空，無法執行。")
+            return
+
+        sync_issues: list[str] = []
+        if sync_before_run:
+            tw_symbols = _dedupe_keep_order(
+                [
+                    *[str(it["symbol"]) for it in universe_items if str(it["market"]) == "TW"],
+                    *[str(it["benchmark_symbol"]) for it in universe_items if str(it["benchmark_market"]) == "TW"],
+                ]
+            )
+            us_symbols = _dedupe_keep_order(
+                [
+                    *[str(it["symbol"]) for it in universe_items if str(it["market"]) == "US"],
+                    *[str(it["benchmark_symbol"]) for it in universe_items if str(it["benchmark_market"]) == "US"],
+                ]
+            )
+            with st.spinner("同步 00910 YTD 所需資料中..."):
+                if tw_symbols:
+                    _, issues_tw = _sync_symbols_history(
+                        store,
+                        market="TW",
+                        symbols=tw_symbols,
+                        start=start_dt,
+                        end=end_dt,
+                        parallel=parallel_sync,
+                    )
+                    sync_issues.extend(issues_tw)
+                if us_symbols:
+                    _, issues_us = _sync_symbols_history(
+                        store,
+                        market="US",
+                        symbols=us_symbols,
+                        start=start_dt,
+                        end=end_dt,
+                        parallel=parallel_sync,
+                    )
+                    sync_issues.extend(issues_us)
+
+        close_cache: dict[tuple[str, str], pd.Series] = {}
+
+        def _load_close_series(symbol: str, market: str) -> pd.Series:
+            key = (str(market).upper(), str(symbol).upper())
+            if key in close_cache:
+                return close_cache[key]
+            bars = store.load_daily_bars(symbol=symbol, market=market, start=start_dt, end=end_dt)
+            bars = _normalize_ohlcv_frame(bars)
+            if bars.empty and not sync_before_run:
+                report = store.sync_symbol_history(symbol=symbol, market=market, start=start_dt, end=end_dt)
+                if report.error:
+                    sync_issues.append(f"{symbol}: {report.error}")
+                bars = store.load_daily_bars(symbol=symbol, market=market, start=start_dt, end=end_dt)
+                bars = _normalize_ohlcv_frame(bars)
+            if bars.empty:
+                close_cache[key] = pd.Series(dtype=float)
+                return close_cache[key]
+
+            bars, _ = apply_split_adjustment(
+                bars=bars,
+                symbol=symbol,
+                market=market,
+                use_known=True,
+                use_auto_detect=True,
+            )
+            close = pd.to_numeric(bars["close"], errors="coerce").dropna()
+            close.index = pd.to_datetime(close.index, utc=True, errors="coerce")
+            close = close.dropna()
+            close = close[(close.index >= start_dt) & (close.index <= end_dt)]
+            close_cache[key] = close
+            return close
+
+        result_rows: list[dict[str, object]] = []
+        for item in universe_items:
+            symbol = str(item["symbol"])
+            market = str(item["market"])
+            benchmark_symbol = str(item["benchmark_symbol"])
+            benchmark_market = str(item["benchmark_market"])
+            asset_close = _load_close_series(symbol=symbol, market=market)
+            benchmark_close = _load_close_series(symbol=benchmark_symbol, market=benchmark_market)
+            if asset_close.empty or benchmark_close.empty:
+                continue
+            comp = pd.concat([asset_close.rename("asset"), benchmark_close.rename("benchmark")], axis=1, join="inner").dropna()
+            if len(comp) < 2:
+                continue
+
+            asset_return_pct = float(comp["asset"].iloc[-1] / comp["asset"].iloc[0] - 1.0) * 100.0
+            benchmark_return_pct = float(comp["benchmark"].iloc[-1] / comp["benchmark"].iloc[0] - 1.0) * 100.0
+            excess_pct = asset_return_pct - benchmark_return_pct
+            result_rows.append(
+                {
+                    "symbol": symbol,
+                    "name": str(item["name"]),
+                    "group": str(item["group"]),
+                    "market_tag": str(item["market_tag"]),
+                    "benchmark_symbol": benchmark_symbol,
+                    "weight_pct": item.get("weight_pct"),
+                    "asset_return_pct": asset_return_pct,
+                    "benchmark_return_pct": benchmark_return_pct,
+                    "excess_pct": excess_pct,
+                    "bars": int(len(comp)),
+                    "start_actual": pd.Timestamp(comp.index[0]).date().isoformat(),
+                    "end_actual": pd.Timestamp(comp.index[-1]).date().isoformat(),
+                }
+            )
+
+        payload = {
+            "run_key": run_key,
+            "rows": result_rows,
+            "start_date": ytd_start_date.isoformat(),
+            "end_date": ytd_end_date.isoformat(),
+            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+            "sync_issues": sync_issues,
+            "benchmarks": {
+                "TW": tw_benchmark,
+                "US": us_benchmark,
+                "JP": jp_benchmark,
+                "KS": ks_benchmark,
+            },
+        }
+        st.session_state[payload_key] = payload
+        store.save_heatmap_run(universe_id=universe_id, payload=payload)
+
+    payload = st.session_state.get(payload_key)
+    if not payload:
+        st.info("按下「執行 00910 YTD 全球熱力圖」後，會顯示國內/海外分組結果。")
+        return
+    if payload.get("run_key") != run_key:
+        st.caption("目前顯示的是上一次執行結果；若要套用目前基準設定，請重新執行。")
+
+    sync_issues = payload.get("sync_issues")
+    if isinstance(sync_issues, list) and sync_issues:
+        preview = [" ".join(str(item).split()) for item in sync_issues[:3]]
+        preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+        remain = len(sync_issues) - len(preview)
+        remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
+        st.warning(f"部分標的同步失敗，已盡量使用可用資料：{preview_text}{remain_text}")
+
+    generated_at_text = str(payload.get("generated_at", "")).strip()
+    if generated_at_text:
+        try:
+            generated_at = datetime.fromisoformat(generated_at_text)
+            if generated_at.tzinfo is None:
+                generated_at = generated_at.replace(tzinfo=timezone.utc)
+            generated_at_text = generated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    st.caption(
+        f"上次執行：{generated_at_text or 'N/A'} | "
+        f"YTD：{payload.get('start_date')} ~ {payload.get('end_date')} | "
+        "策略：buy_hold"
+    )
+
+    rows_df = pd.DataFrame(payload.get("rows", []))
+    if rows_df.empty:
+        st.warning("沒有可用結果（可能部分海外標的資料尚未覆蓋 YTD）。")
+        return
+
+    tw_df = rows_df[rows_df["group"] == "TW"].copy()
+    overseas_df = rows_df[rows_df["group"] == "OVERSEAS"].copy()
+    _render_excess_heatmap_panel(tw_df, title="國內成分股（TW vs 台股基準）")
+    _render_excess_heatmap_panel(overseas_df, title="海外成分股（Overseas vs 對應海外基準）")
+
 def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     store = _history_store()
     service = _market_service()
@@ -3052,6 +3778,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
 
     st.subheader(f"{etf_text} 成分股熱力圖回測（相對大盤）")
     st.caption(f"以 {etf_text}{page_desc}成分股逐檔回測，與大盤同區間比較；綠色代表贏過、紅色代表輸給。")
+    _render_etf_index_method_summary(etf_text)
 
     c1, c2, c3, c4 = st.columns(4)
     start_date = c1.date_input("起始日期", value=date(date.today().year - 3, 1, 1), key=f"{page_key}_start")
@@ -3136,6 +3863,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         initial_payload.setdefault("generated_at", cached_run.created_at.isoformat())
         st.session_state[payload_key] = initial_payload
 
+    full_rows_00910: list[dict[str, object]] = []
     snapshot = store.load_universe_snapshot(universe_id)
     u1, u2 = st.columns([1, 4])
     refresh_constituents = u1.button(f"更新 {etf_text} 成分股", use_container_width=True)
@@ -3161,9 +3889,50 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             name_map_all = service.get_tw_symbol_names(snapshot.symbols)
             const_rows = [{"symbol": sym, "name": name_map_all.get(sym, sym)} for sym in snapshot.symbols]
             st.dataframe(pd.DataFrame(const_rows), use_container_width=True, hide_index=True)
+
+        if etf_text == "00910":
+            full_rows, full_source = service.get_etf_constituents_full(
+                etf_text, limit=None, force_refresh=bool(refresh_constituents)
+            )
+            full_rows_00910 = list(full_rows)
+            if full_rows:
+                full_df = pd.DataFrame(full_rows)
+                tw_subset_count = int((full_df["tw_code"].astype(str) != "").sum()) if "tw_code" in full_df.columns else 0
+                st.caption(
+                    f"00910 完整成分股（含海外）共 {len(full_rows)} 檔 | 來源：{full_source} | "
+                    f"其中台股可回測 {tw_subset_count} 檔。"
+                )
+                with st.expander(f"查看完整成分股（含海外，共 {len(full_rows)} 檔）", expanded=False):
+                    out_df = full_df.rename(
+                        columns={
+                            "rank": "排名",
+                            "symbol": "代號",
+                            "name": "名稱",
+                            "market": "市場",
+                            "weight_pct": "權重(%)",
+                            "shares": "持有股數",
+                            "tw_code": "台股代碼(可回測)",
+                        }
+                    )
+                    if "權重(%)" in out_df.columns:
+                        out_df["權重(%)"] = pd.to_numeric(out_df["權重(%)"], errors="coerce").round(2)
+                    st.dataframe(out_df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("00910 完整成分股（含海外）目前抓取失敗，請稍後按「更新 00910 成分股」重試。")
     else:
         st.warning(f"目前無法取得 {etf_text} 成分股，請稍後再試。")
         return
+
+    if etf_text == "00910":
+        _render_00910_global_ytd_block(
+            store=store,
+            service=service,
+            page_key=page_key,
+            full_rows=full_rows_00910,
+        )
+        st.markdown("---")
+        st.markdown("#### 台股子集合進階熱力圖（自訂區間/策略）")
+        st.caption("下方為 00910 台股子集合回測，僅比較可回測的台股成分。")
 
     symbol_options = snapshot.symbols
     symbol_key = f"{page_key}_symbol_pick"
@@ -3535,6 +4304,20 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         use_container_width=True,
         hide_index=True,
     )
+
+    if etf_text in {"00935", "0050"} and snapshot and snapshot.symbols:
+        st.markdown("---")
+        _render_tw_constituent_intro_table(
+            etf_code=etf_text,
+            symbols=list(snapshot.symbols),
+            service=service,
+        )
+    elif etf_text == "00910":
+        st.markdown("---")
+        _render_00910_constituent_intro_table(
+            service=service,
+            full_rows=full_rows_00910,
+        )
 
 
 def _render_tw_etf_rotation_view():
