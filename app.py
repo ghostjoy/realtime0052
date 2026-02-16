@@ -751,6 +751,27 @@ def _to_rgba(color: str, alpha: float) -> str:
     return text
 
 
+HEATMAP_EXCESS_COLORSCALE: list[list[object]] = [
+    [0.00, "rgba(239,68,68,0.78)"],
+    [0.24, "rgba(248,113,113,0.58)"],
+    [0.50, "rgba(148,163,184,0.18)"],
+    [0.76, "rgba(52,211,153,0.58)"],
+    [1.00, "rgba(5,150,105,0.78)"],
+]
+HEATMAP_TEXT_COLOR = "#0F172A"
+
+
+def _heatmap_max_abs(z: np.ndarray, *, min_floor: float = 0.15) -> float:
+    finite = np.abs(z[np.isfinite(z)])
+    if finite.size == 0:
+        return 1.0
+    raw_max = float(np.nanmax(finite))
+    p85 = float(np.nanpercentile(finite, 85))
+    # Cap by high percentile so one outlier does not wash out most tiles.
+    capped = min(raw_max, p85 * 1.35)
+    return max(0.01, max(float(min_floor), capped))
+
+
 def _palette_with(base: dict[str, object], **overrides: object) -> dict[str, object]:
     out = dict(base)
     out.update(overrides)
@@ -957,6 +978,21 @@ def _inject_ui_styles():
         }}
         [data-testid="stDataFrame"] * {{
             color: {text_color} !important;
+        }}
+        [data-testid="stMultiSelect"] [data-baseweb="tag"] {{
+            background: #ffffff !important;
+            border: 1px solid rgba(15, 23, 42, 0.30) !important;
+            border-radius: 9px !important;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55) !important;
+        }}
+        [data-testid="stMultiSelect"] [data-baseweb="tag"] *,
+        [data-testid="stMultiSelect"] [data-baseweb="tag"] span {{
+            color: #0F172A !important;
+            fill: #0F172A !important;
+        }}
+        [data-testid="stMultiSelect"] [data-baseweb="tag"]:hover {{
+            border-color: rgba(15, 23, 42, 0.48) !important;
+            background: #ffffff !important;
         }}
         div[data-testid="stMetric"] {{
             background: {card_bg};
@@ -3423,9 +3459,6 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
     m4.metric("平均超額報酬", f"{avg_excess:+.2f}%")
 
     palette = _ui_palette()
-    win_color = _to_rgba(str(palette["fill_buy"]), 0.95)
-    lose_color = _to_rgba(str(palette["fill_sell"]), 0.95)
-    neutral_color = "#E5E7EB"
     tiles_per_row = 6
     tile_rows = int(math.ceil(len(frame) / tiles_per_row))
     z = np.full((tile_rows, tiles_per_row), np.nan)
@@ -3437,8 +3470,8 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         r = i // tiles_per_row
         c = i % tiles_per_row
         z[r, c] = float(row["excess_pct"])
-        label = f"{row['symbol']} {row['name']}" if row["name"] != row["symbol"] else row["symbol"]
-        txt[r, c] = f"{label}<br>{row['excess_pct']:+.2f}%"
+        label = str(row["symbol"]).strip()
+        txt[r, c] = f"<b>{label}</b><br>{row['excess_pct']:+.2f}%"
         custom[r, c, 0] = float(row["asset_return_pct"])
         custom[r, c, 1] = float(row["benchmark_return_pct"])
         custom[r, c, 2] = str(row.get("benchmark_symbol", ""))
@@ -3446,20 +3479,23 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         custom[r, c, 4] = str(row.get("market_tag", ""))
         custom[r, c, 5] = str(row.get("weight_pct", ""))
 
-    max_abs = float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0
-    max_abs = max(max_abs, 0.01)
+    max_abs = _heatmap_max_abs(z)
     fig_heat = go.Figure(
         data=[
             go.Heatmap(
                 z=z,
                 text=txt,
                 texttemplate="%{text}",
-                textfont=dict(size=12),
+                textfont=dict(size=12, color=HEATMAP_TEXT_COLOR, family="Noto Sans TC, Segoe UI, sans-serif"),
                 customdata=custom,
                 zmin=-max_abs,
                 zmax=max_abs,
-                colorscale=[[0.0, lose_color], [0.5, neutral_color], [1.0, win_color]],
-                colorbar=dict(title=colorbar_title),
+                zmid=0.0,
+                colorscale=HEATMAP_EXCESS_COLORSCALE,
+                xgap=6,
+                ygap=6,
+                hoverongaps=False,
+                colorbar=dict(title=colorbar_title, thickness=14, len=0.78),
                 hovertemplate=(
                     "標的報酬：%{customdata[0]:+.2f}%<br>"
                     "基準報酬：%{customdata[1]:+.2f}%<br>"
@@ -3481,7 +3517,12 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         template=str(palette["plot_template"]),
         paper_bgcolor=str(palette["paper_bg"]),
         plot_bgcolor=str(palette["plot_bg"]),
-        font=dict(color=str(palette["text_color"])),
+        font=dict(color=str(palette["text_color"]), family="Noto Sans TC, Segoe UI, sans-serif"),
+        hoverlabel=dict(
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(15,23,42,0.16)",
+            font=dict(color="#0F172A"),
+        ),
     )
     st.plotly_chart(fig_heat, use_container_width=True)
 
@@ -3956,10 +3997,24 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     if not current_pick:
         current_pick = symbol_options
     st.session_state[symbol_key] = current_pick
+    symbol_name_map_for_pick: dict[str, str] = {}
+    if etf_text == "00935":
+        symbol_name_map_for_pick = service.get_tw_symbol_names(symbol_options)
+
+    def _format_symbol_option(sym: str) -> str:
+        code = str(sym)
+        if etf_text != "00935":
+            return code
+        name = str(symbol_name_map_for_pick.get(code, code)).strip()
+        if name and name != code:
+            return f"{code} {name}"
+        return code
+
     selected_symbols = st.multiselect(
         "納入比較標的（預設全選）",
         options=symbol_options,
         key=symbol_key,
+        format_func=_format_symbol_option,
     )
 
     if not selected_symbols:
@@ -4250,9 +4305,6 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     )
 
     palette = _ui_palette()
-    win_color = _to_rgba(str(palette["fill_buy"]), 0.95)
-    lose_color = _to_rgba(str(palette["fill_sell"]), 0.95)
-    neutral_color = "#E5E7EB"
     tiles_per_row = 8
     tile_rows = int(math.ceil(len(rows_df) / tiles_per_row))
     z = np.full((tile_rows, tiles_per_row), np.nan)
@@ -4264,27 +4316,34 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         r = i // tiles_per_row
         c = i % tiles_per_row
         z[r, c] = float(row["excess_pct"])
-        label = f"{row['symbol']} {row['name']}" if str(row["name"]) != str(row["symbol"]) else f"{row['symbol']}"
-        txt[r, c] = f"{label}<br>{row['excess_pct']:+.2f}%"
+        label = str(row["symbol"]).strip()
+        name_text = str(row.get("name", "")).strip()
+        if etf_text == "00935" and name_text and name_text != label:
+            txt[r, c] = f"<b>{label}</b><br>{name_text}<br>{row['excess_pct']:+.2f}%"
+        else:
+            txt[r, c] = f"<b>{label}</b><br>{row['excess_pct']:+.2f}%"
         custom[r, c, 0] = float(row["strategy_return_pct"])
         custom[r, c, 1] = float(row["benchmark_return_pct"])
         custom[r, c, 2] = str(row["status"])
         custom[r, c, 3] = str(row["name"])
 
-    max_abs = float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0
-    max_abs = max(max_abs, 0.01)
+    max_abs = _heatmap_max_abs(z)
     fig_heat = go.Figure(
         data=[
             go.Heatmap(
                 z=z,
                 text=txt,
                 texttemplate="%{text}",
-                textfont=dict(size=12),
+                textfont=dict(size=12, color=HEATMAP_TEXT_COLOR, family="Noto Sans TC, Segoe UI, sans-serif"),
                 customdata=custom,
                 zmin=-max_abs,
                 zmax=max_abs,
-                colorscale=[[0.0, lose_color], [0.5, neutral_color], [1.0, win_color]],
-                colorbar=dict(title="相對大盤 %"),
+                zmid=0.0,
+                colorscale=HEATMAP_EXCESS_COLORSCALE,
+                xgap=6,
+                ygap=6,
+                hoverongaps=False,
+                colorbar=dict(title="相對大盤 %", thickness=14, len=0.8),
                 hovertemplate=(
                     "公司：%{customdata[3]}<br>"
                     "策略報酬：%{customdata[0]:+.2f}%<br>"
@@ -4304,7 +4363,12 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         template=str(palette["plot_template"]),
         paper_bgcolor=str(palette["paper_bg"]),
         plot_bgcolor=str(palette["plot_bg"]),
-        font=dict(color=str(palette["text_color"])),
+        font=dict(color=str(palette["text_color"]), family="Noto Sans TC, Segoe UI, sans-serif"),
+        hoverlabel=dict(
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(15,23,42,0.16)",
+            font=dict(color="#0F172A"),
+        ),
     )
     st.plotly_chart(fig_heat, use_container_width=True)
 
