@@ -576,6 +576,7 @@ PAGE_CARDS = [
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
     {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
+    {"key": "00993A 熱力圖", "desc": "00993A 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "資料庫檢視", "desc": "直接查看 SQLite 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
@@ -965,6 +966,15 @@ def _inject_ui_styles():
             color: {text_color} !important;
             border: 1px solid {control_border} !important;
         }}
+        div[class*="st-key-page-card"] button[kind="primary"] {{
+            background: #16a34a !important;
+            color: #ffffff !important;
+            border: 1px solid #15803d !important;
+            box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.16) !important;
+        }}
+        div[class*="st-key-page-card"] button[kind="primary"]:hover {{
+            border-color: #166534 !important;
+        }}
         [data-testid="stButton"] button:hover,
         [data-testid="stDownloadButton"] button:hover {{
             border-color: {accent} !important;
@@ -1006,22 +1016,34 @@ def _inject_ui_styles():
             border-radius: 14px;
             box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
         }}
+        .page-nav-card {{
+            border: 1px solid {card_border};
+            background: {card_bg};
+            border-radius: 10px;
+            padding: 7px 9px 6px;
+            margin-bottom: 0.30rem;
+            min-height: 78px;
+        }}
+        .page-nav-card.active {{
+            border-color: rgba(37,99,235,0.52);
+            box-shadow: 0 0 0 1px rgba(37,99,235,0.18);
+        }}
         .page-card-title {{
-            font-size: 1.0rem;
+            font-size: 0.90rem;
             font-weight: 700;
-            margin-bottom: 0.2rem;
+            line-height: 1.18;
+            margin-bottom: 0.08rem;
         }}
         .page-card-desc {{
-            font-size: 0.86rem;
-            line-height: 1.35;
+            font-size: 0.76rem;
+            line-height: 1.2;
             color: {text_muted};
-            min-height: 2.4rem;
-            margin-bottom: 0.35rem;
-        }}
-        .page-card-tag {{
-            font-size: 0.78rem;
-            color: {text_muted};
-            margin-bottom: 0.35rem;
+            min-height: 1.75rem;
+            margin-bottom: 0.18rem;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
         }}
         .card-section-title {{
             font-size: 1.04rem;
@@ -1107,27 +1129,30 @@ def _render_page_cards_nav() -> str:
         st.session_state["active_page"] = active_page
 
     st.markdown("#### 功能卡片")
-    cols = st.columns(3, gap="medium")
+    cols = st.columns(5, gap="small")
     for idx, item in enumerate(PAGE_CARDS):
         key = item["key"]
         desc = item["desc"]
         is_active = key == active_page
-        with cols[idx % 3]:
-            with st.container(border=True):
-                st.markdown(f"<div class='page-card-title'>{key}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='page-card-desc'>{desc}</div>", unsafe_allow_html=True)
-                st.markdown(
-                    f"<div class='page-card-tag'>{'目前頁面' if is_active else '點擊下方按鈕切換'}</div>",
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    "已開啟" if is_active else "開啟",
-                    key=f"page-card:{key}",
-                    use_container_width=True,
-                    disabled=is_active,
-                ):
-                    st.session_state["active_page"] = key
-                    st.rerun()
+        with cols[idx % 5]:
+            st.markdown(
+                (
+                    f"<div class='page-nav-card{' active' if is_active else ''}'>"
+                    f"<div class='page-card-title'>{key}</div>"
+                    f"<div class='page-card-desc'>{desc}</div>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+            clicked = st.button(
+                "已開啟" if is_active else "開啟",
+                key=f"page-card:{key}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            )
+            if clicked and not is_active:
+                st.session_state["active_page"] = key
+                st.rerun()
 
     return str(st.session_state.get("active_page", active_page))
 
@@ -3921,7 +3946,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     snapshot = store.load_universe_snapshot(universe_id)
     u1, u2 = st.columns([1, 4])
     refresh_constituents = u1.button(f"更新 {etf_text} 成分股", use_container_width=True)
-    if refresh_constituents or snapshot is None or not snapshot.symbols:
+    if refresh_constituents:
         with st.spinner(f"抓取 {etf_text} 成分股中..."):
             symbols_new, source_new = service.get_tw_etf_constituents(etf_text, limit=None)
             if symbols_new:
@@ -3974,8 +3999,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             else:
                 st.caption("00910 完整成分股（含海外）目前抓取失敗，請稍後按「更新 00910 成分股」重試。")
     else:
-        st.warning(f"目前無法取得 {etf_text} 成分股，請稍後再試。")
-        return
+        u2.caption(f"尚未載入 {etf_text} 成分股快取。你仍可先查看上次回測結果，或按「更新 {etf_text} 成分股」後再重新回測。")
 
     if etf_text == "00910":
         _render_00910_global_ytd_block(
@@ -3988,7 +4012,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         st.markdown("#### 台股子集合進階熱力圖（自訂區間/策略）")
         st.caption("下方為 00910 台股子集合回測，僅比較可回測的台股成分。")
 
-    symbol_options = snapshot.symbols
+    symbol_options = list(snapshot.symbols) if snapshot and snapshot.symbols else []
     symbol_key = f"{page_key}_symbol_pick"
     current_pick = st.session_state.get(symbol_key, symbol_options)
     if not isinstance(current_pick, list):
@@ -4093,6 +4117,9 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     if st.button(f"執行 {etf_text} 熱力圖回測", type="primary", use_container_width=True):
         if not date_is_valid:
             st.error("日期區間無效，請先修正起訖日期。")
+            return
+        if not symbol_options:
+            st.error(f"尚未載入 {etf_text} 成分股，請先按「更新 {etf_text} 成分股」。")
             return
         if not selected_symbols:
             st.error("請至少選擇 1 檔成分股。")
@@ -4382,7 +4409,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         hide_index=True,
     )
 
-    if etf_text in {"00935", "0050"} and snapshot and snapshot.symbols:
+    if etf_text in {"00935", "00993A", "0050"} and snapshot and snapshot.symbols:
         st.markdown("---")
         _render_tw_constituent_intro_table(
             etf_code=etf_text,
@@ -4959,6 +4986,10 @@ def _render_0050_heatmap_view():
     _render_tw_etf_heatmap_view("0050", page_desc="台灣50")
 
 
+def _render_00993a_heatmap_view():
+    _render_tw_etf_heatmap_view("00993A", page_desc="台股ETF")
+
+
 def _render_db_browser_view():
     st.subheader("SQLite 資料庫檢視")
     store = _history_store()
@@ -5073,6 +5104,7 @@ def main():
         "ETF 輪動策略": _render_tw_etf_rotation_view,
         "00910 熱力圖": _render_00910_heatmap_view,
         "00935 熱力圖": _render_00935_heatmap_view,
+        "00993A 熱力圖": _render_00993a_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
         "資料庫檢視": _render_db_browser_view,
         "新手教學": _render_tutorial_view,
