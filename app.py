@@ -573,6 +573,7 @@ PAGE_CARDS = [
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
     {"key": "2025 前十大 ETF", "desc": "2025 年全年台股 ETF 報酬率前十名。"},
     {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
+    {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效。"},
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
     {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
@@ -760,6 +761,24 @@ HEATMAP_EXCESS_COLORSCALE: list[list[object]] = [
     [1.00, "rgba(5,150,105,0.78)"],
 ]
 HEATMAP_TEXT_COLOR = "#0F172A"
+ACTIVE_ETF_LINE_COLORS: list[str] = [
+    "#1f77b4",
+    "#d62728",
+    "#2ca02c",
+    "#ff7f0e",
+    "#9467bd",
+    "#17becf",
+    "#8c564b",
+    "#e377c2",
+    "#bcbd22",
+    "#7f7f7f",
+    "#0ea5e9",
+    "#dc2626",
+    "#16a34a",
+    "#f59e0b",
+    "#4f46e5",
+]
+ACTIVE_ETF_LINE_DASHES: list[str] = ["solid", "dot", "dash", "longdash", "dashdot"]
 
 
 def _heatmap_max_abs(z: np.ndarray, *, min_floor: float = 0.15) -> float:
@@ -771,6 +790,42 @@ def _heatmap_max_abs(z: np.ndarray, *, min_floor: float = 0.15) -> float:
     # Cap by high percentile so one outlier does not wash out most tiles.
     capped = min(raw_max, p85 * 1.35)
     return max(0.01, max(float(min_floor), capped))
+
+
+def _series_metrics_basic(series: pd.Series) -> dict[str, float]:
+    if series is None or series.empty:
+        return {"total_return": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "sharpe": 0.0}
+    clean = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+    if len(clean) < 2:
+        return {"total_return": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "sharpe": 0.0}
+    returns = clean.pct_change().fillna(0.0)
+    running_max = clean.cummax()
+    drawdown = clean / running_max - 1.0
+    years = max((clean.index[-1] - clean.index[0]).days / 365.25, 1 / 365.25)
+    total_return = clean.iloc[-1] / clean.iloc[0] - 1.0
+    cagr = (1.0 + total_return) ** (1.0 / years) - 1.0 if total_return > -1 else -1.0
+    sharpe = (returns.mean() / returns.std() * np.sqrt(252.0)) if returns.std() > 0 else 0.0
+    return {
+        "total_return": float(total_return),
+        "cagr": float(cagr),
+        "max_drawdown": float(drawdown.min()),
+        "sharpe": float(sharpe),
+    }
+
+
+def _build_symbol_line_styles(symbols: list[str]) -> dict[str, dict[str, str]]:
+    ordered = sorted({str(sym or "").strip().upper() for sym in symbols if str(sym or "").strip()})
+    out: dict[str, dict[str, str]] = {}
+    if not ordered:
+        return out
+    color_count = len(ACTIVE_ETF_LINE_COLORS)
+    dash_count = len(ACTIVE_ETF_LINE_DASHES)
+    for idx, sym in enumerate(ordered):
+        out[sym] = {
+            "color": ACTIVE_ETF_LINE_COLORS[idx % color_count],
+            "dash": ACTIVE_ETF_LINE_DASHES[(idx // color_count) % dash_count],
+        }
+    return out
 
 
 def _palette_with(base: dict[str, object], **overrides: object) -> dict[str, object]:
@@ -1285,6 +1340,37 @@ def _is_tw_equity_etf(code: str, name: str) -> bool:
     return True
 
 
+def _is_tw_active_etf(code: str, name: str) -> bool:
+    code_text = str(code or "").strip().upper()
+    name_text = str(name or "").strip()
+    if not _is_tw_equity_etf(code_text, name_text):
+        return False
+    if not code_text.endswith("A"):
+        return False
+    if "主動" not in name_text:
+        return False
+    return True
+
+
+def _split_factor_and_events_between(symbol: str, start_used: str, end_used: str) -> tuple[float, str]:
+    factor = 1.0
+    tags: list[str] = []
+    start_used_ts = pd.Timestamp(start_used, tz="UTC")
+    end_used_ts = pd.Timestamp(end_used, tz="UTC")
+    for ev in known_split_events(symbol=str(symbol), market="TW"):
+        ev_ts = pd.Timestamp(ev.date)
+        if ev_ts.tzinfo is None:
+            ev_ts = ev_ts.tz_localize("UTC")
+        else:
+            ev_ts = ev_ts.tz_convert("UTC")
+        if start_used_ts < ev_ts <= end_used_ts:
+            ratio = float(ev.ratio)
+            if ratio > 0:
+                factor *= ratio
+                tags.append(f"{ev_ts.date()} x{ratio:.6f}")
+    return float(factor), ", ".join(tags)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple[pd.DataFrame, str, str]:
     start_used, start_df = _fetch_twse_snapshot_with_fallback(start_yyyymmdd)
@@ -1304,26 +1390,7 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
     if merged.empty:
         return pd.DataFrame(), start_used, end_used
     merged = merged.rename(columns={"name": "name", "close": "end_close"})
-    start_used_ts = pd.Timestamp(start_used, tz="UTC")
-    end_used_ts = pd.Timestamp(end_used, tz="UTC")
-
-    def _split_factor_and_events(symbol: str) -> tuple[float, str]:
-        factor = 1.0
-        tags: list[str] = []
-        for ev in known_split_events(symbol=str(symbol), market="TW"):
-            ev_ts = pd.Timestamp(ev.date)
-            if ev_ts.tzinfo is None:
-                ev_ts = ev_ts.tz_localize("UTC")
-            else:
-                ev_ts = ev_ts.tz_convert("UTC")
-            if start_used_ts < ev_ts <= end_used_ts:
-                ratio = float(ev.ratio)
-                if ratio > 0:
-                    factor *= ratio
-                    tags.append(f"{ev_ts.date()} x{ratio:.6f}")
-        return float(factor), ", ".join(tags)
-
-    factor_info = merged["code"].map(lambda c: _split_factor_and_events(str(c)))
+    factor_info = merged["code"].map(lambda c: _split_factor_and_events_between(symbol=str(c), start_used=start_used, end_used=end_used))
     merged["split_factor"] = factor_info.map(lambda x: float(x[0]))
     merged["split_events"] = factor_info.map(lambda x: str(x[1]))
     merged["adj_start_close"] = pd.to_numeric(merged["start_close"], errors="coerce") * pd.to_numeric(merged["split_factor"], errors="coerce")
@@ -1350,6 +1417,57 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
         }
     )
     out["區間報酬(%)"] = pd.to_numeric(out["區間報酬(%)"], errors="coerce").round(2)
+    out["期初收盤"] = pd.to_numeric(out["期初收盤"], errors="coerce").round(2)
+    out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
+    out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
+    out["復權事件"] = out["復權事件"].replace("", "—")
+    return out, start_used, end_used
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _build_tw_active_etf_ytd_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple[pd.DataFrame, str, str]:
+    start_used, start_df = _fetch_twse_snapshot_with_fallback(start_yyyymmdd)
+    end_used, end_df = _fetch_twse_snapshot_with_fallback(end_yyyymmdd)
+
+    start_df = start_df[start_df.apply(lambda r: _is_tw_active_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1)].copy()
+    end_df = end_df[end_df.apply(lambda r: _is_tw_active_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1)].copy()
+    if start_df.empty or end_df.empty:
+        return pd.DataFrame(), start_used, end_used
+
+    merged = end_df.merge(
+        start_df[["code", "close"]].rename(columns={"close": "start_close"}),
+        on="code",
+        how="inner",
+    )
+    if merged.empty:
+        return pd.DataFrame(), start_used, end_used
+    merged = merged.rename(columns={"name": "name", "close": "end_close"})
+
+    factor_info = merged["code"].map(lambda c: _split_factor_and_events_between(symbol=str(c), start_used=start_used, end_used=end_used))
+    merged["split_factor"] = factor_info.map(lambda x: float(x[0]))
+    merged["split_events"] = factor_info.map(lambda x: str(x[1]))
+    merged["adj_start_close"] = pd.to_numeric(merged["start_close"], errors="coerce") * pd.to_numeric(merged["split_factor"], errors="coerce")
+    merged["return_pct"] = (pd.to_numeric(merged["end_close"], errors="coerce") / pd.to_numeric(merged["adj_start_close"], errors="coerce") - 1.0) * 100.0
+    merged = merged.replace([np.inf, -np.inf], np.nan).dropna(subset=["return_pct", "start_close", "end_close", "adj_start_close"])
+    if merged.empty:
+        return pd.DataFrame(), start_used, end_used
+
+    merged = merged.sort_values("return_pct", ascending=False).copy()
+    merged["rank"] = range(1, len(merged) + 1)
+    out = merged[["rank", "code", "name", "start_close", "adj_start_close", "end_close", "split_events", "return_pct"]].copy()
+    out = out.rename(
+        columns={
+            "rank": "排名",
+            "code": "代碼",
+            "name": "ETF",
+            "start_close": "期初收盤",
+            "adj_start_close": "復權期初",
+            "end_close": "期末收盤",
+            "split_events": "復權事件",
+            "return_pct": "YTD報酬(%)",
+        }
+    )
+    out["YTD報酬(%)"] = pd.to_numeric(out["YTD報酬(%)"], errors="coerce").round(2)
     out["期初收盤"] = pd.to_numeric(out["期初收盤"], errors="coerce").round(2)
     out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
     out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
@@ -1406,6 +1524,357 @@ def _render_top10_etf_2026_ytd_view():
         start_yyyymmdd="20251231",
         end_yyyymmdd=datetime.now().strftime("%Y%m%d"),
     )
+
+
+def _render_active_etf_2026_ytd_view():
+    st.subheader("2026 年主動式 ETF YTD（Buy & Hold）")
+    start_target = "20260101"
+    end_target = datetime.now().strftime("%Y%m%d")
+
+    with st.container(border=True):
+        _render_card_section_header("主動式 ETF 績效卡", "台股主動式 ETF，2026 YTD Buy & Hold（復權版）。")
+        try:
+            active_df, start_used, end_used = _build_tw_active_etf_ytd_between(start_yyyymmdd=start_target, end_yyyymmdd=end_target)
+        except Exception as exc:
+            st.error(f"無法建立主動式 ETF YTD 清單：{exc}")
+            return
+        if active_df.empty:
+            st.warning("目前沒有可顯示的台股主動式 ETF YTD 資料。")
+            return
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("樣本數", str(len(active_df)))
+        m2.metric("正報酬檔數", str(int((active_df["YTD報酬(%)"] > 0).sum())))
+        m3.metric("負報酬檔數", str(int((active_df["YTD報酬(%)"] < 0).sum())))
+        m4.metric("有復權事件", str(int((active_df["復權事件"] != "—").sum())))
+        st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
+        st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）。主動式規則：代碼結尾 A 且名稱含「主動」。")
+        st.caption("報酬計算：Buy & Hold（復權版，套用已知 split 事件）。")
+        st.dataframe(active_df, use_container_width=True, hide_index=True)
+
+    symbols = [str(x).strip().upper() for x in active_df["代碼"].astype(str).tolist() if str(x).strip()]
+    if not symbols:
+        return
+    name_map = {
+        str(row["代碼"]).strip().upper(): str(row["ETF"]).strip()
+        for _, row in active_df.iterrows()
+        if str(row.get("代碼", "")).strip()
+    }
+
+    with st.container(border=True):
+        _render_card_section_header("Benchmark 對照卡", "策略曲線、基準曲線與每檔 Buy & Hold 同圖比較。")
+        c1, c2, c3 = st.columns([2, 2, 1])
+        benchmark_choice = c1.selectbox(
+            "Benchmark",
+            options=["twii", "0050", "006208"],
+            index=0,
+            format_func=lambda x: {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(x, x),
+            key="active_etf_ytd_benchmark",
+        )
+        sync_before_run = c2.checkbox(
+            "執行前同步最新日K（較慢）",
+            value=False,
+            key="active_etf_ytd_sync_before_run",
+        )
+        force_refresh = c3.button("重新計算", use_container_width=True, key="active_etf_ytd_refresh")
+
+        start_dt = datetime.combine(datetime.strptime(start_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
+        end_dt = datetime.combine(datetime.strptime(end_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
+        run_key = f"active_etf_ytd:{start_used}:{end_used}:{benchmark_choice}:{sync_before_run}:{','.join(symbols)}"
+        payload_key = "active_etf_ytd_compare_payload"
+        payload = st.session_state.get(payload_key)
+        if not isinstance(payload, dict):
+            payload = {}
+
+        should_recompute = force_refresh or payload.get("run_key") != run_key
+        if should_recompute:
+            store = _history_store()
+            symbol_sync_issues: list[str] = []
+            benchmark_sync_issues: list[str] = []
+
+            def _benchmark_candidates_tw(choice: str) -> list[str]:
+                mapping = {
+                    "twii": ["^TWII"],
+                    "0050": ["0050"],
+                    "006208": ["006208"],
+                }
+                return mapping.get(str(choice or "").strip().lower(), ["^TWII"])
+
+            with st.spinner("計算主動式 ETF Benchmark 對照中..."):
+                if sync_before_run:
+                    _, symbol_sync_issues = _sync_symbols_history(
+                        store,
+                        market="TW",
+                        symbols=symbols,
+                        start=start_dt,
+                        end=end_dt,
+                        parallel=True,
+                    )
+
+                bars_by_symbol: dict[str, pd.DataFrame] = {}
+                skipped_symbols: list[str] = []
+                for symbol in symbols:
+                    bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+                    if len(bars) < 2 and not sync_before_run:
+                        report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+                        if report.error:
+                            symbol_sync_issues.append(f"{symbol}: {report.error}")
+                        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+                    if len(bars) < 2:
+                        skipped_symbols.append(symbol)
+                        continue
+                    bars, _ = apply_split_adjustment(
+                        bars=bars,
+                        symbol=symbol,
+                        market="TW",
+                        use_known=True,
+                        use_auto_detect=True,
+                    )
+                    if len(bars) < 2:
+                        skipped_symbols.append(symbol)
+                        continue
+                    bars_by_symbol[symbol] = bars
+
+                if not bars_by_symbol:
+                    payload = {
+                        "run_key": run_key,
+                        "error": "可用主動式 ETF 歷史資料不足，無法建立對照圖。",
+                        "symbol_sync_issues": symbol_sync_issues,
+                        "benchmark_sync_issues": benchmark_sync_issues,
+                    }
+                    st.session_state[payload_key] = payload
+                else:
+                    target_index = pd.DatetimeIndex([])
+                    for bars in bars_by_symbol.values():
+                        target_index = target_index.union(pd.DatetimeIndex(bars.index))
+                    target_index = target_index.sort_values()
+
+                    initial_capital = 1_000_000.0
+                    strategy_equity = build_buy_hold_equity(
+                        bars_by_symbol=bars_by_symbol,
+                        target_index=target_index,
+                        initial_capital=initial_capital,
+                    ).dropna()
+
+                    per_symbol_equity: dict[str, pd.Series] = {}
+                    for symbol, bars in bars_by_symbol.items():
+                        eq_sym = build_buy_hold_equity(
+                            bars_by_symbol={symbol: bars},
+                            target_index=target_index,
+                            initial_capital=initial_capital,
+                        ).dropna()
+                        if not eq_sym.empty:
+                            per_symbol_equity[symbol] = eq_sym
+
+                    benchmark_symbol_used = ""
+                    benchmark_equity = pd.Series(dtype=float)
+                    for candidate in _benchmark_candidates_tw(benchmark_choice):
+                        if sync_before_run:
+                            report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
+                            if report.error:
+                                benchmark_sync_issues.append(f"{candidate}: {report.error}")
+                        bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt))
+                        if bench_bars.empty and not sync_before_run:
+                            report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
+                            if report.error:
+                                benchmark_sync_issues.append(f"{candidate}: {report.error}")
+                            bench_bars = _normalize_ohlcv_frame(
+                                store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt)
+                            )
+                        if bench_bars.empty:
+                            continue
+                        bench_bars, _ = apply_split_adjustment(
+                            bars=bench_bars,
+                            symbol=candidate,
+                            market="TW",
+                            use_known=True,
+                            use_auto_detect=True,
+                        )
+                        if bench_bars.empty or "close" not in bench_bars.columns:
+                            continue
+                        bench_close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
+                        if len(bench_close) < 2:
+                            continue
+                        aligned = bench_close.reindex(target_index).ffill()
+                        valid = aligned.dropna()
+                        if len(valid) < 2:
+                            continue
+                        base_val = float(valid.iloc[0])
+                        if not math.isfinite(base_val) or base_val <= 0:
+                            continue
+                        benchmark_equity = (aligned.loc[valid.index[0] :] / base_val) * initial_capital
+                        benchmark_equity = benchmark_equity.dropna()
+                        benchmark_symbol_used = candidate
+                        break
+
+                    common_index = pd.DatetimeIndex(strategy_equity.index)
+                    if not benchmark_equity.empty:
+                        common_index = common_index.intersection(pd.DatetimeIndex(benchmark_equity.index))
+                    common_index = common_index.sort_values()
+                    if len(common_index) < 2:
+                        payload = {
+                            "run_key": run_key,
+                            "error": "Strategy 與 Benchmark 缺少足夠重疊交易日，無法建立對照圖。",
+                            "symbol_sync_issues": symbol_sync_issues,
+                            "benchmark_sync_issues": benchmark_sync_issues,
+                        }
+                        st.session_state[payload_key] = payload
+                    else:
+                        strategy_plot = strategy_equity.reindex(common_index).ffill().dropna()
+                        benchmark_plot = benchmark_equity.reindex(common_index).ffill().dropna() if not benchmark_equity.empty else pd.Series(dtype=float)
+                        per_symbol_plot: dict[str, pd.Series] = {}
+                        for symbol, series in per_symbol_equity.items():
+                            aligned = series.reindex(common_index).ffill().dropna()
+                            if len(aligned) >= 2:
+                                per_symbol_plot[symbol] = aligned
+
+                        payload = {
+                            "run_key": run_key,
+                            "error": "",
+                            "benchmark_symbol": benchmark_symbol_used,
+                            "strategy_equity": strategy_plot,
+                            "benchmark_equity": benchmark_plot,
+                            "per_symbol_equity": per_symbol_plot,
+                            "used_symbols": sorted(list(bars_by_symbol.keys())),
+                            "skipped_symbols": sorted(skipped_symbols),
+                            "symbol_sync_issues": symbol_sync_issues,
+                            "benchmark_sync_issues": benchmark_sync_issues,
+                        }
+                        st.session_state[payload_key] = payload
+
+        payload = st.session_state.get(payload_key, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        error_text = str(payload.get("error", "")).strip()
+        if error_text:
+            st.warning(error_text)
+            return
+
+        symbol_sync_issues = payload.get("symbol_sync_issues", [])
+        if isinstance(symbol_sync_issues, list) and symbol_sync_issues:
+            preview = [" ".join(str(item).split()) for item in symbol_sync_issues[:3]]
+            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+            remain = len(symbol_sync_issues) - len(preview)
+            remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
+            st.warning(f"部分 ETF 同步失敗，已盡量使用本地可用資料：{preview_text}{remain_text}")
+
+        benchmark_sync_issues = payload.get("benchmark_sync_issues", [])
+        if isinstance(benchmark_sync_issues, list) and benchmark_sync_issues:
+            preview = [" ".join(str(item).split()) for item in benchmark_sync_issues[:2]]
+            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+            st.warning(f"Benchmark 同步有部分錯誤，已盡量使用本地可用資料：{preview_text}")
+
+        strategy_equity = payload.get("strategy_equity")
+        benchmark_equity = payload.get("benchmark_equity")
+        per_symbol_equity = payload.get("per_symbol_equity")
+        if not isinstance(strategy_equity, pd.Series) or strategy_equity.empty:
+            st.warning("目前無法建立策略曲線。")
+            return
+        if not isinstance(benchmark_equity, pd.Series):
+            benchmark_equity = pd.Series(dtype=float)
+        if not isinstance(per_symbol_equity, dict):
+            per_symbol_equity = {}
+
+        palette = _ui_palette()
+        symbol_styles = _build_symbol_line_styles(list(per_symbol_equity.keys()))
+        fig_cmp = go.Figure()
+        fig_cmp.add_trace(
+            go.Scatter(
+                x=strategy_equity.index,
+                y=strategy_equity.values,
+                mode="lines",
+                name="Strategy Equity（主動式ETF等權）",
+                line=dict(color=str(palette["equity"]), width=2.4),
+            )
+        )
+        if not benchmark_equity.empty:
+            benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+            fig_cmp.add_trace(
+                go.Scatter(
+                    x=benchmark_equity.index,
+                    y=benchmark_equity.values,
+                    mode="lines",
+                    name=f"Benchmark Equity（{benchmark_label}）",
+                    line=dict(color=str(palette["benchmark"]), width=2.1),
+                )
+            )
+
+        for symbol in sorted(per_symbol_equity.keys()):
+            series = per_symbol_equity[symbol]
+            if not isinstance(series, pd.Series) or len(series) < 2:
+                continue
+            style = symbol_styles.get(symbol, {"color": "#1f77b4", "dash": "solid"})
+            label_name = str(name_map.get(symbol, symbol)).strip()
+            trace_name = f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
+            fig_cmp.add_trace(
+                go.Scatter(
+                    x=series.index,
+                    y=series.values,
+                    mode="lines",
+                    name=trace_name,
+                    line=dict(color=str(style["color"]), width=1.8, dash=str(style["dash"])),
+                )
+            )
+
+        fig_cmp.update_layout(
+            height=460,
+            margin=dict(l=10, r=10, t=30, b=10),
+            template=str(palette["plot_template"]),
+            paper_bgcolor=str(palette["paper_bg"]),
+            plot_bgcolor=str(palette["plot_bg"]),
+            font=dict(color=str(palette["text_color"])),
+        )
+        fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
+        fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
+        st.plotly_chart(fig_cmp, use_container_width=True)
+
+        summary_rows: list[dict[str, object]] = []
+        strategy_perf = _series_metrics_basic(strategy_equity)
+        summary_rows.append(
+            {
+                "Series": "Strategy Equity（主動式ETF等權）",
+                "Total Return %": round(strategy_perf["total_return"] * 100.0, 2),
+                "CAGR %": round(strategy_perf["cagr"] * 100.0, 2),
+                "MDD %": round(strategy_perf["max_drawdown"] * 100.0, 2),
+                "Sharpe": round(strategy_perf["sharpe"], 2),
+            }
+        )
+        if not benchmark_equity.empty:
+            benchmark_perf = _series_metrics_basic(benchmark_equity)
+            benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+            summary_rows.append(
+                {
+                    "Series": f"Benchmark Equity（{benchmark_label}）",
+                    "Total Return %": round(benchmark_perf["total_return"] * 100.0, 2),
+                    "CAGR %": round(benchmark_perf["cagr"] * 100.0, 2),
+                    "MDD %": round(benchmark_perf["max_drawdown"] * 100.0, 2),
+                    "Sharpe": round(benchmark_perf["sharpe"], 2),
+                }
+            )
+
+        for symbol in sorted(per_symbol_equity.keys()):
+            series = per_symbol_equity[symbol]
+            if not isinstance(series, pd.Series) or len(series) < 2:
+                continue
+            perf = _series_metrics_basic(series)
+            label_name = str(name_map.get(symbol, symbol)).strip()
+            series_name = f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
+            summary_rows.append(
+                {
+                    "Series": series_name,
+                    "Total Return %": round(perf["total_return"] * 100.0, 2),
+                    "CAGR %": round(perf["cagr"] * 100.0, 2),
+                    "MDD %": round(perf["max_drawdown"] * 100.0, 2),
+                    "Sharpe": round(perf["sharpe"], 2),
+                }
+            )
+
+        if summary_rows:
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        used_symbols = payload.get("used_symbols", [])
+        skipped_symbols = payload.get("skipped_symbols", [])
+        if isinstance(used_symbols, list) and isinstance(skipped_symbols, list):
+            st.caption(f"可用ETF：{len(used_symbols)} 檔 | 資料不足未納入：{len(skipped_symbols)} 檔")
 
 
 def _render_quality_bar(ctx, refresh_sec: int):
@@ -5101,6 +5570,7 @@ def main():
         "回測工作台": _render_backtest_view,
         "2025 前十大 ETF": _render_top10_etf_2025_view,
         "2026 YTD 前十大 ETF": _render_top10_etf_2026_ytd_view,
+        "2026 YTD 主動式 ETF": _render_active_etf_2026_ytd_view,
         "ETF 輪動策略": _render_tw_etf_rotation_view,
         "00910 熱力圖": _render_00910_heatmap_view,
         "00935 熱力圖": _render_00935_heatmap_view,

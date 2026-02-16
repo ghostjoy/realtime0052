@@ -1,11 +1,12 @@
 # 台美股即時看盤 + 多來源資料 + 回測（Streamlit）
 
-這個專案現在有十一個主要分頁：
+這個專案現在有十二個主要分頁：
 
 - `即時看盤`：台股/美股即時與近即時走勢、技術指標、文字建議
 - `回測工作台`：日K歷史下載、本地資料庫同步、策略回測、播放式回放
 - `2025 前十大 ETF`：以 2025 全年區間計算前十大台股 ETF（卡片頁）
 - `2026 YTD 前十大 ETF`：以 2026/01/01 至今區間計算前十大台股 ETF（卡片頁）
+- `2026 YTD 主動式 ETF`：台股主動式 ETF 的 2026 YTD Buy & Hold 績效卡，含 Benchmark 對照圖（策略/基準/各ETF買進持有）
 - `ETF 輪動策略`：台股多ETF（月頻）動能輪動策略回測與Benchmark對照
 - `00910 熱力圖`：支援全球成分股 YTD（Buy & Hold）分組熱力圖（國內/海外分開對齊基準），並保留台股子集合進階回測
 - `00935 熱力圖`：00935 成分股逐檔回測、相對大盤超額報酬熱力圖
@@ -251,7 +252,7 @@ uv run python -m unittest discover -s tests -v
 
 ## 專案結構（主要）
 
-- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / 2025 前十大 ETF / 2026 YTD 前十大 ETF / ETF 輪動策略 / 00910 熱力圖 / 00935 熱力圖 / 00993A 熱力圖 / 0050 熱力圖 / 資料庫檢視 / 新手教學）
+- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / 2025 前十大 ETF / 2026 YTD 前十大 ETF / 2026 YTD 主動式 ETF / ETF 輪動策略 / 00910 熱力圖 / 00935 熱力圖 / 00993A 熱力圖 / 0050 熱力圖 / 資料庫檢視 / 新手教學）
 - `services/market_data_service.py`：多來源 provider chain 與資料品質封裝
 - `providers/`：各資料來源 adapter
 - `storage/history_store.py`：SQLite schema、增量同步、回測紀錄
