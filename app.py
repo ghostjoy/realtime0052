@@ -4763,7 +4763,19 @@ def _render_tutorial_view():
     )
     st.dataframe(params_df, use_container_width=True, hide_index=True)
 
-    st.markdown("### 11) 新手建議操作（先簡單再進階）")
+    st.markdown("### 11) 技術指標速讀（RSI / MACD / 布林通道 / KD）")
+    indicators_df = pd.DataFrame(
+        [
+            {"指標": "RSI", "白話解釋": "看短期買賣力道是否過熱或過冷", "常見看法": "低檔區偏弱、高檔區偏強", "新手提醒": "不要單看超買超賣，先看大方向趨勢"},
+            {"指標": "MACD", "白話解釋": "看趨勢加速度與轉折", "常見看法": "快慢線黃金交叉偏多、死亡交叉偏空", "新手提醒": "盤整盤容易來回假訊號"},
+            {"指標": "布林通道", "白話解釋": "看波動區間與價格相對位置", "常見看法": "貼上軌代表強勢、貼下軌代表弱勢", "新手提醒": "貼軌不等於立刻反轉，可能是趨勢延續"},
+            {"指標": "KD", "白話解釋": "看短線動能轉折速度", "常見看法": "K 上穿 D 偏多、K 下穿 D 偏空", "新手提醒": "在強趨勢中容易過早反向判斷"},
+        ]
+    )
+    st.dataframe(indicators_df, use_container_width=True, hide_index=True)
+    st.caption("建議做法：先用趨勢類指標（如 MACD）判方向，再用 RSI/KD 找節奏，最後用布林通道觀察波動風險。")
+
+    st.markdown("### 12) 新手建議操作（先簡單再進階）")
     st.markdown(
         "\n".join(
             [
