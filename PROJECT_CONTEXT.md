@@ -29,6 +29,17 @@
   - 台股即時來源：`Fugle WS -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`
   - 台股日K來源：`Fugle Historical -> TW OpenAPI -> TPEx OpenAPI -> Yahoo`
   - Benchmark / 00935 成分股來源整合
+- `services/benchmark_loader.py`
+  - 台股 Benchmark 候選鏈、同步、split 調整與載入結果格式統一（熱力圖/輪動/比較卡共用）
+- `services/backtest_cache.py`
+  - 回測 `run_key` 與回放簽章（`schema_version/source_hash`）共用產生器
+- `services/sync_orchestrator.py`
+  - 標的同步流程共用化（全量/缺口/最少K數）與錯誤收斂
+- `services/bootstrap_loader.py`
+  - 市場基礎資料預載與每日增量更新流程
+  - 台股代碼 metadata 擷取（TWSE/TPEx）
+- `state_keys.py`
+  - 回測工作台 `session_state/widget key` 集中管理，降低 key 漂移與衝突
 - `storage/history_store.py`
   - SQLite schema 與歷史資料同步
   - 回測結果、成分股快取與台股即時 tick 持久化
@@ -51,11 +62,13 @@
 - `daily_bars`
 - `intraday_ticks`（台股即時 tick；保留天數可由 `REALTIME0052_INTRADAY_RETAIN_DAYS` 調整，預設 1095 天）
 - `sync_state`
+- `symbol_metadata`（代碼名稱/交易所/產業 metadata）
 - `backtest_runs`
 - `backtest_replay_runs`（回測工作台完整回放快取）
 - `universe_snapshots`（成分股清單快取）
 - `heatmap_runs`（熱力圖最近一次結果）
 - `rotation_runs`（ETF 輪動最近一次結果）
+- `bootstrap_runs`（預載與增量更新任務紀錄）
 
 ## 5) 既定行為與假設
 

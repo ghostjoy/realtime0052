@@ -1,3 +1,3 @@
-from storage.history_store import HistoryStore, SyncReport
+from storage.history_store import BootstrapRun, HistoryStore, SymbolMetadata, SyncReport
 
-__all__ = ["HistoryStore", "SyncReport"]
+__all__ = ["HistoryStore", "SyncReport", "SymbolMetadata", "BootstrapRun"]

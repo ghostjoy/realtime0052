@@ -77,10 +77,25 @@ git config --get core.hooksPath
   - `daily_bars`
   - `intraday_ticks`
   - `sync_state`
+  - `symbol_metadata`（代碼/名稱/產業等快取）
+  - `bootstrap_runs`（預載/增量更新任務紀錄）
   - `backtest_runs`
   - `universe_snapshots`
   - `heatmap_runs`
   - `rotation_runs`
+
+### 2.5) 基礎資料預載（降低第一次等待）
+
+- `資料庫檢視` 分頁可直接執行：
+  - `啟動基礎資料預載`（台股 + 美股核心）
+  - `執行一次增量更新`
+- CLI 版本：
+
+```bash
+uv run python scripts/bootstrap_market_data.py --scope both --years 5 --max-workers 6
+```
+
+- 預載流程會先建立 `symbol_metadata`，再批次同步 `daily_bars`，最後把任務摘要寫入 `bootstrap_runs`。
 
 ### 3) 回測（第一版）
 
@@ -112,6 +127,11 @@ git config --get core.hooksPath
 - 還原權息（Adj Close）：回測頁可開啟 `還原權息計算（Adj Close）`，若資料有 `adj_close` 會優先套用，並避免與分割調整重複計算
 - 回測頁可開啟 `回測前自動補資料缺口（推薦）`，僅同步缺口標的，降低「天數不足」機率
 - 回測回放快取加入 `schema_version + source_hash` 參數簽章，避免載入不相容舊快取
+- 回測回放 payload 升級為 `v3` 分層格式（`meta / bars / results`），並保留舊版 `v2` 載入相容
+- 回測 `run_key` 與回放簽章改由共用模組產生（`services/backtest_cache.py`），降低 key 不一致風險
+- 台股 Benchmark 載入鏈路改由共用 loader 處理（`services/benchmark_loader.py`），熱力圖/輪動/比較卡邏輯一致
+- 回測同步流程改由 `services/sync_orchestrator.py` 共用（all/backfill/min_rows）
+- 回測頁 widget/session key 改由 `state_keys.py` 管理，減少日後功能擴充時 key 衝突
 
 ### 3.6) 00935 成分股熱力圖回測
 

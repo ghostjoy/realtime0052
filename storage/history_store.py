@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -105,6 +105,34 @@ class BacktestReplayRun:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class SymbolMetadata:
+    symbol: str
+    market: str
+    name: str
+    exchange: str
+    industry: str
+    asset_type: str
+    currency: str
+    source: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class BootstrapRun:
+    run_id: str
+    scope: str
+    status: str
+    started_at: datetime
+    finished_at: Optional[datetime]
+    total_symbols: int
+    synced_symbols: int
+    failed_symbols: int
+    params: Dict[str, object]
+    summary: Dict[str, object]
+    error: Optional[str]
+
+
 class HistoryStore:
     def __init__(self, db_path: Optional[str] = None, service: Optional[MarketDataService] = None):
         self.db_path = resolve_history_db_path(db_path)
@@ -114,6 +142,12 @@ class HistoryStore:
         self.intraday_retain_days = resolve_intraday_retain_days()
         self.service = service or MarketDataService()
         self._init_db()
+        set_metadata_store = getattr(self.service, "set_metadata_store", None)
+        if callable(set_metadata_store):
+            try:
+                set_metadata_store(self)
+            except Exception:
+                pass
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -214,6 +248,34 @@ class HistoryStore:
                     payload_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS symbol_metadata (
+                    symbol TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    exchange TEXT NOT NULL DEFAULT '',
+                    industry TEXT NOT NULL DEFAULT '',
+                    asset_type TEXT NOT NULL DEFAULT '',
+                    currency TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(symbol, market)
+                );
+
+                CREATE TABLE IF NOT EXISTS bootstrap_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL UNIQUE,
+                    scope TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    total_symbols INTEGER NOT NULL DEFAULT 0,
+                    synced_symbols INTEGER NOT NULL DEFAULT 0,
+                    failed_symbols INTEGER NOT NULL DEFAULT 0,
+                    params_json TEXT NOT NULL,
+                    summary_json TEXT,
+                    error TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
@@ -231,8 +293,268 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_backtest_replay_runs_key_created_at
                     ON backtest_replay_runs(run_key, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_symbol_metadata_market_symbol
+                    ON symbol_metadata(market, symbol);
+
+                CREATE INDEX IF NOT EXISTS idx_bootstrap_runs_started_at
+                    ON bootstrap_runs(started_at DESC);
                 """
             )
+
+    @staticmethod
+    def _parse_iso_datetime(value: object) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text)
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    @staticmethod
+    def _normalize_symbol_token(value: object) -> str:
+        return str(value or "").strip().upper()
+
+    @staticmethod
+    def _normalize_market_token(value: object) -> str:
+        return str(value or "").strip().upper()
+
+    @staticmethod
+    def _normalize_text(value: object) -> str:
+        return str(value or "").strip()
+
+    def upsert_symbol_metadata(self, rows: list[Dict[str, object]]) -> int:
+        payload: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = self._normalize_symbol_token(row.get("symbol"))
+            market = self._normalize_market_token(row.get("market"))
+            if not symbol or not market:
+                continue
+            payload.append(
+                (
+                    symbol,
+                    market,
+                    self._normalize_text(row.get("name")),
+                    self._normalize_text(row.get("exchange")),
+                    self._normalize_text(row.get("industry")),
+                    self._normalize_text(row.get("asset_type")),
+                    self._normalize_text(row.get("currency")),
+                    self._normalize_text(row.get("source")),
+                    now_iso,
+                )
+            )
+        if not payload:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO symbol_metadata(
+                    symbol, market, name, exchange, industry, asset_type, currency, source, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, market) DO UPDATE SET
+                    name=COALESCE(NULLIF(excluded.name, ''), symbol_metadata.name),
+                    exchange=COALESCE(NULLIF(excluded.exchange, ''), symbol_metadata.exchange),
+                    industry=COALESCE(NULLIF(excluded.industry, ''), symbol_metadata.industry),
+                    asset_type=COALESCE(NULLIF(excluded.asset_type, ''), symbol_metadata.asset_type),
+                    currency=COALESCE(NULLIF(excluded.currency, ''), symbol_metadata.currency),
+                    source=COALESCE(NULLIF(excluded.source, ''), symbol_metadata.source),
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
+        return len(payload)
+
+    def load_symbol_metadata(self, symbols: list[str], market: str) -> dict[str, dict[str, object]]:
+        normalized_symbols: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            token = self._normalize_symbol_token(symbol)
+            if not token or token in seen:
+                continue
+            normalized_symbols.append(token)
+            seen.add(token)
+        market_token = self._normalize_market_token(market)
+        if not normalized_symbols or not market_token:
+            return {}
+        placeholders = ",".join(["?"] * len(normalized_symbols))
+        sql = f"""
+            SELECT symbol, market, name, exchange, industry, asset_type, currency, source, updated_at
+            FROM symbol_metadata
+            WHERE market=? AND symbol IN ({placeholders})
+        """
+        params: list[object] = [market_token, *normalized_symbols]
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        out: dict[str, dict[str, object]] = {}
+        for row in rows:
+            symbol = self._normalize_symbol_token(row[0])
+            if not symbol:
+                continue
+            out[symbol] = {
+                "symbol": symbol,
+                "market": self._normalize_market_token(row[1]),
+                "name": self._normalize_text(row[2]),
+                "exchange": self._normalize_text(row[3]),
+                "industry": self._normalize_text(row[4]),
+                "asset_type": self._normalize_text(row[5]),
+                "currency": self._normalize_text(row[6]),
+                "source": self._normalize_text(row[7]),
+                "updated_at": self._parse_iso_datetime(row[8]),
+            }
+        return out
+
+    def list_symbols(self, market: str, limit: Optional[int] = None) -> list[str]:
+        market_token = self._normalize_market_token(market)
+        if not market_token:
+            return []
+        limit_sql = ""
+        params: list[object] = [market_token]
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT symbol
+                FROM symbol_metadata
+                WHERE market=?
+                ORDER BY symbol ASC
+                {limit_sql}
+                """,
+                params,
+            ).fetchall()
+        if rows:
+            return [self._normalize_symbol_token(row[0]) for row in rows if self._normalize_symbol_token(row[0])]
+
+        instrument_params: list[object] = [market_token]
+        instrument_limit_sql = ""
+        if limit is not None:
+            instrument_limit_sql = " LIMIT ?"
+            instrument_params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            fallback_rows = conn.execute(
+                f"""
+                SELECT symbol
+                FROM instruments
+                WHERE market=?
+                ORDER BY symbol ASC
+                {instrument_limit_sql}
+                """,
+                instrument_params,
+            ).fetchall()
+        return [self._normalize_symbol_token(row[0]) for row in fallback_rows if self._normalize_symbol_token(row[0])]
+
+    def start_bootstrap_run(self, scope: str, params: Dict[str, object]) -> str:
+        run_id = f"bootstrap:{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S%f')}"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO bootstrap_runs(
+                    run_id, scope, status, started_at, params_json
+                )
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    self._normalize_text(scope) or "unknown",
+                    "running",
+                    datetime.now(tz=timezone.utc).isoformat(),
+                    json.dumps(params, ensure_ascii=False),
+                ),
+            )
+        return run_id
+
+    def finish_bootstrap_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        total_symbols: int,
+        synced_symbols: int,
+        failed_symbols: int,
+        summary: Optional[Dict[str, object]] = None,
+        error: Optional[str] = None,
+    ):
+        key = self._normalize_text(run_id)
+        if not key:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE bootstrap_runs
+                SET
+                    status=?,
+                    finished_at=?,
+                    total_symbols=?,
+                    synced_symbols=?,
+                    failed_symbols=?,
+                    summary_json=?,
+                    error=?
+                WHERE run_id=?
+                """,
+                (
+                    self._normalize_text(status) or "unknown",
+                    datetime.now(tz=timezone.utc).isoformat(),
+                    max(0, int(total_symbols)),
+                    max(0, int(synced_symbols)),
+                    max(0, int(failed_symbols)),
+                    json.dumps(summary or {}, ensure_ascii=False),
+                    self._normalize_text(error) or None,
+                    key,
+                ),
+            )
+
+    def load_latest_bootstrap_run(self) -> Optional[BootstrapRun]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, scope, status, started_at, finished_at,
+                       total_symbols, synced_symbols, failed_symbols,
+                       params_json, summary_json, error
+                FROM bootstrap_runs
+                ORDER BY started_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        params_obj: Dict[str, Any] = {}
+        summary_obj: Dict[str, Any] = {}
+        try:
+            loaded = json.loads(str(row[8] or "{}"))
+            if isinstance(loaded, dict):
+                params_obj = loaded
+        except Exception:
+            params_obj = {}
+        try:
+            loaded = json.loads(str(row[9] or "{}"))
+            if isinstance(loaded, dict):
+                summary_obj = loaded
+        except Exception:
+            summary_obj = {}
+        started_at = self._parse_iso_datetime(row[3]) or datetime.now(tz=timezone.utc)
+        finished_at = self._parse_iso_datetime(row[4])
+        return BootstrapRun(
+            run_id=self._normalize_text(row[0]),
+            scope=self._normalize_text(row[1]),
+            status=self._normalize_text(row[2]),
+            started_at=started_at,
+            finished_at=finished_at,
+            total_symbols=max(0, int(row[5] or 0)),
+            synced_symbols=max(0, int(row[6] or 0)),
+            failed_symbols=max(0, int(row[7] or 0)),
+            params=params_obj,
+            summary=summary_obj,
+            error=self._normalize_text(row[10]) or None,
+        )
 
     @staticmethod
     def _normalize_daily_bars_frame(df: pd.DataFrame) -> pd.DataFrame:

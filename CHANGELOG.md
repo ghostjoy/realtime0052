@@ -11,6 +11,15 @@
 ## [Unreleased] - 2026-02-15
 
 ### Added
+- 新增 `symbol_metadata`（SQLite）：
+  - 儲存 `symbol / market / name / exchange / industry / currency / source / updated_at`
+  - 供公司名稱/產業查詢優先走本地資料，降低重複打外部 API
+- 新增 `bootstrap_runs`（SQLite）：
+  - 記錄資料預載與每日增量更新任務（範圍、狀態、成功/失敗數、摘要與錯誤）
+- 新增 `services/bootstrap_loader.py`：
+  - 提供台股 metadata 擷取、全量預載、每日增量更新共用流程
+- 新增 `scripts/bootstrap_market_data.py`：
+  - 可從 CLI 一次預建台股/美股核心資料（含 metadata + 歷史日K）
 - 新增 `00935 熱力圖` 分頁：可批次比較 00935 成分股相對大盤的超額報酬，並用紅綠熱力圖顯示強弱。
 - 新增 `0050 熱力圖` 分頁：可批次比較 0050 成分股相對大盤的超額報酬，並用紅綠熱力圖顯示強弱。
 - 新增 `ETF輪動` 分頁：固定 `0050/0052/00935/0056/00878/00919` 的日K月頻輪動回測。
@@ -67,6 +76,14 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated PROJECT_CONTEXT.md, README.md, app.py, market_data_types.py, scripts/bootstrap_market_data.py, services/__init__.py, ... (+17) [id:54e33a04fe]
+- `MarketDataService.get_tw_symbol_names/get_tw_symbol_industries` 改為「SQLite 優先、API 補抓、結果回寫 SQLite」：
+  - 命中本地 metadata 時可直接回傳，不再重複網路請求
+  - API 命中後會自動 upsert 回 `symbol_metadata`
+- `資料庫檢視` 分頁新增「市場基礎資料預載」操作區：
+  - 支援手動啟動 `台股+美股核心` 預載（可設定歷史年數、平行工作數、台股上限）
+  - 支援手動執行一次增量更新，並顯示最近任務摘要/錯誤
+- App 啟動後新增「每日一次」自動增量更新（有 seed symbols 時才執行），同步回寫 `bootstrap_runs` 任務紀錄。
 - Auto: updated .gitignore, PROJECT_CONTEXT.md, README.md, app.py, market_data_types.py, tests/test_active_etf_page.py [id:7909c33419]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py, tests/test_history_store.py, ... (+1) [id:c89bc1cf9d]
 - Auto: updated README.md, app.py, tests/test_active_etf_page.py [id:4d84559a83]
@@ -84,6 +101,16 @@
   - 抽出台股基準候選清單 helper（支援 `twii` 單一路徑或自動 fallback 模式）
   - 抽出台股基準日K/收盤序列載入 helper（同步策略、split 調整、錯誤收集格式統一）
   - 熱力圖、ETF 輪動與多標的 Benchmark 對照卡改為共用同一套載入流程
+- 新增共用模組 `services/benchmark_loader.py` 與資料型別 `BenchmarkLoadResult`，將基準載入流程從 `app.py` UI 邏輯中分離。
+- 回測快取 key/簽章標準化：
+  - 新增 `services/backtest_cache.py`（`run_key`、`params_base`、`source_hash` 共用產生器）
+  - 回測工作台改用共用函式產生 `run_key` 與 `schema_version/source_hash`，降低同參數 key 漂移風險
+- 回測工作台 state key 治理：
+  - 新增 `state_keys.py` 集中定義 `bt_*` widget/session key
+  - 回測頁切換為 `BT_KEYS` 常數，降低硬編字串與 key 衝突風險
+- 回測回放 payload 升級為 `v3` 分層格式（`meta / bars / results`），並保留 `v2` 載入相容。
+- 回測快取 schema 升級為 `3`，`_load_cached_backtest_payload` 可相容讀取 schema `2/3`（簽章一致時）。
+- 新增 `services/sync_orchestrator.py`，統一同步流程（`all/backfill/min_rows`）與回測頁同步行為。
 - 新增可切換 `深色專業（Data Dark）` 主題，並同步調整深色模式下卡片、控制項、標籤與圖表 hover 可讀性。
 - Benchmark 視覺統一：各比較圖基準曲線改用一致樣式（主題基準色 + 虛線），提升策略線對照辨識度。
 - `回測工作台` 改為「輸入條件即自動回測」：

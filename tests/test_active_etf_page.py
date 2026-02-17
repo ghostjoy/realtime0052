@@ -6,10 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+import plotly.graph_objects as go
 
 from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
+    _apply_unified_benchmark_hover,
     _benchmark_candidates_tw,
     _decorate_tw_etf_top10_ytd_table,
     _build_data_health,
@@ -156,6 +158,18 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(len(set(used_colors)), len(used_colors))
         for color in used_colors:
             self.assertIn(color, ACTIVE_ETF_LINE_COLORS)
+
+    def test_apply_unified_benchmark_hover_sets_layout(self):
+        fig = go.Figure()
+        palette = {
+            "benchmark": "#64748b",
+            "text_muted": "#4b5563",
+            "is_dark": False,
+        }
+        _apply_unified_benchmark_hover(fig, palette)
+        self.assertEqual(str(fig.layout.hovermode), "x unified")
+        self.assertEqual(int(fig.layout.spikedistance), -1)
+        self.assertTrue(bool(fig.layout.xaxis.showspikes))
 
     def test_build_tw_active_etf_ytd_between_filters_and_sorts(self):
         _build_tw_active_etf_ytd_between.clear()

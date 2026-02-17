@@ -281,6 +281,53 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertFalse(bars.empty)
             self.assertTrue({"open", "high", "low", "close", "volume"}.issubset(bars.columns))
 
+    def test_symbol_metadata_upsert_and_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            written = store.upsert_symbol_metadata(
+                [
+                    {"symbol": "2330", "market": "TW", "name": "台積電", "exchange": "TW", "industry": "24"},
+                    {"symbol": "AAPL", "market": "US", "name": "Apple", "exchange": "US", "currency": "USD"},
+                ]
+            )
+            self.assertEqual(written, 2)
+
+            tw_meta = store.load_symbol_metadata(["2330", "2454"], market="TW")
+            self.assertEqual(tw_meta["2330"]["name"], "台積電")
+            self.assertEqual(tw_meta["2330"]["industry"], "24")
+            self.assertNotIn("2454", tw_meta)
+
+            us_symbols = store.list_symbols("US")
+            self.assertIn("AAPL", us_symbols)
+
+    def test_bootstrap_run_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            run_id = store.start_bootstrap_run(
+                scope="manual:both",
+                params={"years": 5, "parallel": True},
+            )
+            store.finish_bootstrap_run(
+                run_id,
+                status="completed",
+                total_symbols=10,
+                synced_symbols=8,
+                failed_symbols=2,
+                summary={"scope": "both"},
+                error=None,
+            )
+            latest = store.load_latest_bootstrap_run()
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.run_id, run_id)
+            self.assertEqual(latest.status, "completed")
+            self.assertEqual(latest.total_symbols, 10)
+            self.assertEqual(latest.synced_symbols, 8)
+            self.assertEqual(latest.failed_symbols, 2)
+            self.assertEqual(latest.summary.get("scope"), "both")
+
     def test_save_and_load_intraday_ticks_with_retention(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"

@@ -70,6 +70,36 @@ class _OhlcvProvider:
         )
 
 
+class _FakeMetadataStore:
+    def __init__(self, seed: dict[tuple[str, str], dict[str, object]] | None = None):
+        self.seed = seed or {}
+        self.upserted: list[dict[str, object]] = []
+
+    def load_symbol_metadata(self, symbols: list[str], market: str):
+        out: dict[str, dict[str, object]] = {}
+        market_token = str(market or "").strip().upper()
+        for symbol in symbols:
+            token = str(symbol or "").strip().upper()
+            row = self.seed.get((market_token, token))
+            if isinstance(row, dict):
+                out[token] = dict(row)
+        return out
+
+    def upsert_symbol_metadata(self, rows: list[dict[str, object]]):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            market = str(row.get("market", "")).strip().upper()
+            symbol = str(row.get("symbol", "")).strip().upper()
+            if not market or not symbol:
+                continue
+            existing = dict(self.seed.get((market, symbol), {}))
+            existing.update(row)
+            self.seed[(market, symbol)] = existing
+            self.upserted.append(dict(row))
+        return len(rows)
+
+
 class MarketDataServiceTests(unittest.TestCase):
     def test_quote_chain_fallback(self):
         service = MarketDataService()
@@ -204,6 +234,91 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertTrue(mock_get.called)
 
     @patch("requests.get")
+    def test_get_tw_symbol_names_prefers_sqlite_metadata(self, mock_get):
+        service = MarketDataService()
+        service.set_metadata_store(
+            _FakeMetadataStore(
+                seed={
+                    ("TW", "2330"): {
+                        "symbol": "2330",
+                        "market": "TW",
+                        "name": "台積電",
+                    }
+                }
+            )
+        )
+        out = service.get_tw_symbol_names(["2330"])
+        self.assertEqual(out["2330"], "台積電")
+        mock_get.assert_not_called()
+
+    @patch("requests.get")
+    def test_get_tw_symbol_names_writes_back_to_metadata_store(self, mock_get):
+        twse_resp = unittest.mock.MagicMock()
+        twse_resp.raise_for_status.return_value = None
+        twse_resp.json.return_value = [{"Code": "2330", "Name": "台積電"}]
+
+        tpex_resp = unittest.mock.MagicMock()
+        tpex_resp.raise_for_status.return_value = None
+        tpex_resp.json.return_value = []
+
+        def _fake_get(url, timeout=12):
+            text = str(url)
+            if "openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL" in text:
+                return twse_resp
+            if "www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes" in text:
+                return tpex_resp
+            raise RuntimeError(f"unexpected url: {url}")
+
+        mock_get.side_effect = _fake_get
+        metadata = _FakeMetadataStore()
+        service = MarketDataService()
+        service.set_metadata_store(metadata)
+        out = service.get_tw_symbol_names(["2330"])
+        self.assertEqual(out["2330"], "台積電")
+        self.assertTrue(any(str(item.get("symbol", "")) == "2330" for item in metadata.upserted))
+
+    @patch("requests.get")
+    def test_get_tw_symbol_names_fallback_profiles(self, mock_get):
+        twse_resp = unittest.mock.MagicMock()
+        twse_resp.raise_for_status.return_value = None
+        twse_resp.json.return_value = []
+
+        tpex_resp = unittest.mock.MagicMock()
+        tpex_resp.raise_for_status.return_value = None
+        tpex_resp.json.return_value = []
+
+        twse_profile_resp = unittest.mock.MagicMock()
+        twse_profile_resp.raise_for_status.return_value = None
+        twse_profile_resp.json.return_value = [
+            {"公司代號": "2330", "公司簡稱": "台積電"},
+        ]
+
+        tpex_profile_resp = unittest.mock.MagicMock()
+        tpex_profile_resp.raise_for_status.return_value = None
+        tpex_profile_resp.json.return_value = [
+            {"SecuritiesCompanyCode": "6510", "CompanyName": "精測"},
+        ]
+
+        def _fake_get(url, timeout=12):
+            text = str(url)
+            if "openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL" in text:
+                return twse_resp
+            if "www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes" in text:
+                return tpex_resp
+            if "openapi.twse.com.tw/v1/opendata/t187ap03_L" in text:
+                return twse_profile_resp
+            if "www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O" in text:
+                return tpex_profile_resp
+            raise RuntimeError(f"unexpected url: {url}")
+
+        mock_get.side_effect = _fake_get
+
+        service = MarketDataService()
+        out = service.get_tw_symbol_names(["2330", "6510"])
+        self.assertEqual(out["2330"], "台積電")
+        self.assertEqual(out["6510"], "精測")
+
+    @patch("requests.get")
     def test_get_tw_symbol_industries(self, mock_get):
         twse_resp = unittest.mock.MagicMock()
         twse_resp.raise_for_status.return_value = None
@@ -234,6 +349,24 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertEqual(out["9999"], "")
         out2 = service.get_tw_symbol_industries(["2330", "3017", "6510", "9999"])
         self.assertEqual(out2["2330"], "24")
+
+    @patch("requests.get")
+    def test_get_tw_symbol_industries_prefers_sqlite_metadata(self, mock_get):
+        service = MarketDataService()
+        service.set_metadata_store(
+            _FakeMetadataStore(
+                seed={
+                    ("TW", "2330"): {
+                        "symbol": "2330",
+                        "market": "TW",
+                        "industry": "24",
+                    }
+                }
+            )
+        )
+        out = service.get_tw_symbol_industries(["2330"])
+        self.assertEqual(out["2330"], "24")
+        mock_get.assert_not_called()
 
     @patch("yfinance.Ticker")
     def test_get_tw_etf_constituents_fallback(self, mock_ticker):

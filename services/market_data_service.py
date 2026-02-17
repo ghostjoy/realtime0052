@@ -65,6 +65,45 @@ class MarketDataService:
         self.tw_openapi = TwOpenApiProvider()
         self.tw_tpex = TwTpexOpenApiProvider()
         self.cache = _TtlCache()
+        self._metadata_store = None
+
+    def set_metadata_store(self, store: object):
+        self._metadata_store = store
+
+    def _load_cached_symbol_metadata(self, market: str, symbols: list[str]) -> dict[str, dict[str, object]]:
+        store = getattr(self, "_metadata_store", None)
+        if store is None:
+            return {}
+        loader = getattr(store, "load_symbol_metadata", None)
+        if not callable(loader):
+            return {}
+        try:
+            obj = loader(symbols=symbols, market=market)
+        except Exception:
+            return {}
+        if not isinstance(obj, dict):
+            return {}
+        out: dict[str, dict[str, object]] = {}
+        for key, value in obj.items():
+            token = str(key or "").strip().upper()
+            if not token or not isinstance(value, dict):
+                continue
+            out[token] = value
+        return out
+
+    def _persist_symbol_metadata(self, rows: list[dict[str, object]]):
+        if not rows:
+            return
+        store = getattr(self, "_metadata_store", None)
+        if store is None:
+            return
+        upsert = getattr(store, "upsert_symbol_metadata", None)
+        if not callable(upsert):
+            return
+        try:
+            upsert(rows)
+        except Exception:
+            pass
 
     @staticmethod
     def _quality(quote: QuoteSnapshot, fallback_depth: int, reason: Optional[str]) -> DataQuality:
@@ -504,50 +543,130 @@ class MarketDataService:
             return {str(k): str(v) for k, v in cached.items()}
 
         out = {symbol: symbol for symbol in normalized}
-        wanted = set(normalized)
+        metadata = self._load_cached_symbol_metadata("TW", normalized)
+        for symbol in normalized:
+            row = metadata.get(symbol, {})
+            name = str(row.get("name", "")).strip() if isinstance(row, dict) else ""
+            if name:
+                out[symbol] = name
 
-        twse_ok = False
+        wanted = {symbol for symbol in normalized if str(out.get(symbol, symbol)).strip().upper() == symbol}
+        if not wanted:
+            self.cache.set(cache_key, out, ttl_sec=21600)
+            return out
+        metadata_updates: dict[str, dict[str, object]] = {}
+
+        def _first_nonempty(row: dict, keys: tuple[str, ...]) -> str:
+            for key in keys:
+                val = str(row.get(key, "")).strip()
+                if val:
+                    return val
+            return ""
+
+        def _fill_from_rows(
+            rows: object,
+            code_keys: tuple[str, ...],
+            name_keys: tuple[str, ...],
+            *,
+            exchange: str = "",
+            source: str = "",
+        ) -> bool:
+            if not isinstance(rows, list):
+                return False
+            matched = False
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                code = _first_nonempty(row, code_keys).upper()
+                if code not in wanted:
+                    continue
+                name = _first_nonempty(row, name_keys)
+                if not name:
+                    continue
+                out[code] = name
+                meta = metadata_updates.setdefault(code, {"symbol": code, "market": "TW"})
+                meta["name"] = name
+                if exchange:
+                    meta["exchange"] = exchange
+                if source:
+                    meta["source"] = source
+                matched = True
+            return matched
+
+        def _unresolved_count() -> int:
+            return sum(1 for code in wanted if str(out.get(code, code)).strip().upper() == code)
+
+        source_ok = False
+
+        # 1) TWSE daily quote snapshot
         twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
         try:
             resp = requests.get(twse_url, timeout=12)
             resp.raise_for_status()
             rows = resp.json()
-            if isinstance(rows, list):
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    code = str(row.get("Code", "")).strip().upper()
-                    if code not in wanted:
-                        continue
-                    name = str(row.get("Name", "")).strip()
-                    if name:
-                        out[code] = name
-                twse_ok = True
+            source_ok = _fill_from_rows(
+                rows,
+                ("Code",),
+                ("Name",),
+                exchange="TW",
+                source="twse_stock_day_all",
+            ) or source_ok
         except Exception:
-            twse_ok = False
+            pass
 
-        # TPEx 上櫃名稱補齊（例如 6510 精測）
-        tpex_ok = False
+        # 2) TPEx daily quote snapshot
         tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
         try:
             resp = requests.get(tpex_url, timeout=12)
             resp.raise_for_status()
             rows = resp.json()
-            if isinstance(rows, list):
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    code = str(row.get("SecuritiesCompanyCode", "")).strip().upper()
-                    if code not in wanted:
-                        continue
-                    name = str(row.get("CompanyName", "")).strip()
-                    if name:
-                        out[code] = name
-                tpex_ok = True
+            source_ok = _fill_from_rows(
+                rows,
+                ("SecuritiesCompanyCode",),
+                ("CompanyName",),
+                exchange="OTC",
+                source="tpex_mainboard_daily_close_quotes",
+            ) or source_ok
         except Exception:
-            tpex_ok = False
+            pass
 
-        ttl = 21600 if (twse_ok or tpex_ok) else 900
+        # 3) TWSE company profile fallback
+        if _unresolved_count() > 0:
+            twse_profile_url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+            try:
+                resp = requests.get(twse_profile_url, timeout=12)
+                resp.raise_for_status()
+                rows = resp.json()
+                source_ok = _fill_from_rows(
+                    rows,
+                    ("公司代號", "Code"),
+                    ("公司簡稱", "公司名稱", "Name"),
+                    exchange="TW",
+                    source="twse_t187ap03_l",
+                ) or source_ok
+            except Exception:
+                pass
+
+        # 4) TPEx company profile fallback
+        if _unresolved_count() > 0:
+            tpex_profile_url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
+            try:
+                resp = requests.get(tpex_profile_url, timeout=12)
+                resp.raise_for_status()
+                rows = resp.json()
+                source_ok = _fill_from_rows(
+                    rows,
+                    ("SecuritiesCompanyCode", "公司代號"),
+                    ("CompanyName", "公司簡稱", "SecuritiesCompanyName"),
+                    exchange="OTC",
+                    source="tpex_mopsfin_t187ap03_o",
+                ) or source_ok
+            except Exception:
+                pass
+
+        if metadata_updates:
+            self._persist_symbol_metadata(list(metadata_updates.values()))
+        ttl = 21600 if source_ok else 900
         self.cache.set(cache_key, out, ttl_sec=ttl)
         return out
 
@@ -569,8 +688,18 @@ class MarketDataService:
         if isinstance(cached, dict):
             return {str(k): str(v) for k, v in cached.items()}
 
-        wanted = set(normalized)
         out = {symbol: "" for symbol in normalized}
+        metadata = self._load_cached_symbol_metadata("TW", normalized)
+        for symbol in normalized:
+            row = metadata.get(symbol, {})
+            industry = str(row.get("industry", "")).strip() if isinstance(row, dict) else ""
+            if industry:
+                out[symbol] = industry
+        wanted = {symbol for symbol in normalized if not str(out.get(symbol, "")).strip()}
+        if not wanted:
+            self.cache.set(cache_key, out, ttl_sec=21600)
+            return out
+        metadata_updates: dict[str, dict[str, object]] = {}
         twse_ok = False
         tpex_ok = False
 
@@ -590,6 +719,10 @@ class MarketDataService:
                     industry = str(row.get("產業別", "")).strip()
                     if industry:
                         out[code] = industry
+                        meta = metadata_updates.setdefault(code, {"symbol": code, "market": "TW"})
+                        meta["industry"] = industry
+                        meta["exchange"] = "TW"
+                        meta["source"] = "twse_t187ap03_l"
                 twse_ok = True
         except Exception:
             twse_ok = False
@@ -610,10 +743,16 @@ class MarketDataService:
                     industry = str(row.get("SecuritiesIndustryCode", "")).strip()
                     if industry:
                         out[code] = industry
+                        meta = metadata_updates.setdefault(code, {"symbol": code, "market": "TW"})
+                        meta["industry"] = industry
+                        meta["exchange"] = "OTC"
+                        meta["source"] = "tpex_mopsfin_t187ap03_o"
                 tpex_ok = True
         except Exception:
             tpex_ok = False
 
+        if metadata_updates:
+            self._persist_symbol_metadata(list(metadata_updates.values()))
         ttl = 21600 if (twse_ok or tpex_ok) else 900
         self.cache.set(cache_key, out, ttl_sec=ttl)
         return out

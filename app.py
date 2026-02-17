@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from io import StringIO
 from typing import Optional
@@ -42,6 +40,21 @@ from indicators import add_indicators
 from market_data_types import DataHealth
 from providers import TwMisProvider
 from services import LiveOptions, MarketDataService
+from services.backtest_cache import (
+    build_backtest_run_key,
+    build_backtest_run_params_base,
+    build_replay_params_with_signature,
+    build_source_hash,
+    stable_json_dumps,
+)
+from services.benchmark_loader import benchmark_candidates_tw, load_tw_benchmark_bars, load_tw_benchmark_close
+from services.bootstrap_loader import run_incremental_refresh, run_market_data_bootstrap
+from services.sync_orchestrator import (
+    bars_need_backfill as orchestrated_bars_need_backfill,
+    sync_symbols_history as orchestrated_sync_symbols_history,
+    sync_symbols_if_needed,
+)
+from state_keys import BT_KEYS
 from storage import HistoryStore
 
 try:
@@ -62,7 +75,35 @@ def _history_store() -> HistoryStore:
     return HistoryStore(service=_market_service())
 
 
-BACKTEST_REPLAY_SCHEMA_VERSION = 2
+def _auto_run_daily_incremental_refresh(store: HistoryStore):
+    today_token = date.today().isoformat()
+    session_key = f"daily_incremental_done:{today_token}"
+    if st.session_state.get(session_key):
+        return
+    latest = store.load_latest_bootstrap_run()
+    if latest is not None:
+        latest_date = latest.started_at.astimezone(timezone.utc).date()
+        if latest.scope == "daily_incremental" and latest_date == date.today():
+            st.session_state[session_key] = True
+            return
+    if not store.list_symbols("TW", limit=1) and not store.list_symbols("US", limit=1):
+        return
+    st.session_state[session_key] = True
+    try:
+        summary = run_incremental_refresh(
+            store=store,
+            years=5,
+            parallel=True,
+            max_workers=4,
+            tw_limit=120,
+            us_limit=50,
+        )
+        st.session_state["daily_incremental_summary"] = summary
+    except Exception as exc:
+        st.session_state["daily_incremental_error"] = str(exc)
+
+
+BACKTEST_REPLAY_SCHEMA_VERSION = 3
 
 
 def _sync_symbols_history(
@@ -75,60 +116,85 @@ def _sync_symbols_history(
     parallel: bool = True,
     max_workers: int = 6,
 ) -> tuple[dict[str, object], list[str]]:
-    ordered_symbols: list[str] = []
-    for symbol in symbols:
-        text = str(symbol or "").strip().upper()
-        if text and text not in ordered_symbols:
-            ordered_symbols.append(text)
-    reports: dict[str, object] = {}
-    issues: list[str] = []
-    if not ordered_symbols:
-        return reports, issues
-
-    def _run_one(symbol: str) -> object:
-        return store.sync_symbol_history(symbol=symbol, market=market, start=start, end=end)
-
-    use_parallel = parallel and len(ordered_symbols) > 1
-    if not use_parallel:
-        for symbol in ordered_symbols:
-            try:
-                report = _run_one(symbol)
-                reports[symbol] = report
-                err = str(getattr(report, "error", "") or "").strip()
-                if err:
-                    issues.append(f"{symbol}: {err}")
-            except Exception as exc:
-                reports[symbol] = None
-                issues.append(f"{symbol}: {exc}")
-        return reports, issues
-
-    workers = max(1, min(int(max_workers), len(ordered_symbols)))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_run_one, symbol): symbol for symbol in ordered_symbols}
-        for future in as_completed(futures):
-            symbol = futures[future]
-            try:
-                report = future.result()
-                reports[symbol] = report
-                err = str(getattr(report, "error", "") or "").strip()
-                if err:
-                    issues.append(f"{symbol}: {err}")
-            except Exception as exc:
-                reports[symbol] = None
-                issues.append(f"{symbol}: {exc}")
-    return reports, issues
+    return orchestrated_sync_symbols_history(
+        store=store,
+        market=market,
+        symbols=symbols,
+        start=start,
+        end=end,
+        parallel=parallel,
+        max_workers=max_workers,
+    )
 
 
 def _bars_need_backfill(bars: pd.DataFrame, *, start: datetime, end: datetime) -> bool:
-    if bars is None or bars.empty:
-        return True
-    idx = pd.to_datetime(bars.index, utc=True, errors="coerce")
-    idx = idx.dropna()
-    if idx.empty:
-        return True
-    first_ts = pd.Timestamp(idx.min()).to_pydatetime().replace(tzinfo=timezone.utc)
-    last_ts = pd.Timestamp(idx.max()).to_pydatetime().replace(tzinfo=timezone.utc)
-    return first_ts > start or last_ts < end
+    return orchestrated_bars_need_backfill(bars, start=start, end=end)
+
+
+def _looks_like_tw_symbol(symbol: str) -> bool:
+    token = str(symbol or "").strip().upper()
+    return bool(re.fullmatch(r"\d{4,6}[A-Z]?", token))
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fetch_tw_exchange_symbol_lists() -> tuple[list[str], list[str]]:
+    import requests
+
+    twse_codes: set[str] = set()
+    tpex_codes: set[str] = set()
+
+    try:
+        resp = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=12)
+        resp.raise_for_status()
+        rows = resp.json()
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                code = str(row.get("Code", "")).strip().upper()
+                if _looks_like_tw_symbol(code):
+                    twse_codes.add(code)
+    except Exception:
+        pass
+
+    try:
+        resp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", timeout=12)
+        resp.raise_for_status()
+        rows = resp.json()
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                code = str(row.get("SecuritiesCompanyCode", "")).strip().upper()
+                if _looks_like_tw_symbol(code):
+                    tpex_codes.add(code)
+    except Exception:
+        pass
+
+    return sorted(twse_codes), sorted(tpex_codes)
+
+
+def _infer_tw_symbol_exchanges(symbols: list[str]) -> dict[str, str]:
+    twse_list, tpex_list = _fetch_tw_exchange_symbol_lists()
+    twse_set = set(twse_list)
+    tpex_set = set(tpex_list)
+    out: dict[str, str] = {}
+    for symbol in symbols:
+        code = str(symbol or "").strip().upper()
+        if not _looks_like_tw_symbol(code):
+            continue
+        in_twse = code in twse_set
+        in_tpex = code in tpex_set
+        if in_twse and not in_tpex:
+            out[code] = "TW"
+        elif in_tpex and not in_twse:
+            out[code] = "OTC"
+        elif in_twse and in_tpex:
+            out[code] = "TW"
+        elif code.startswith("00"):
+            # Most Taiwan ETF codes are listed on TWSE.
+            out[code] = "TW"
+    return out
 
 
 def _persist_live_tick_buffer(
@@ -532,6 +598,52 @@ def _render_tw_constituent_intro_table(
     )
 
 
+def _extract_tw_code_from_row(row: dict[str, object]) -> str:
+    code = str(row.get("tw_code", "")).strip().upper()
+    if re.fullmatch(r"\d{4}", code):
+        return code
+    raw_symbol = str(row.get("symbol", "")).strip().upper()
+    if not raw_symbol:
+        return ""
+    match = re.search(r"(\d{4})", raw_symbol)
+    if not match:
+        return ""
+    return str(match.group(1)).strip().upper()
+
+
+def _enrich_rows_with_tw_names(
+    *,
+    rows: list[dict[str, object]],
+    service: MarketDataService,
+) -> list[dict[str, object]]:
+    out_rows: list[dict[str, object]] = []
+    tw_codes: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = _extract_tw_code_from_row(row)
+        if code and code not in tw_codes:
+            tw_codes.append(code)
+    name_map = service.get_tw_symbol_names(tw_codes) if tw_codes else {}
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_out = dict(row)
+        tw_code = _extract_tw_code_from_row(row_out)
+        if tw_code and not str(row_out.get("tw_code", "")).strip():
+            row_out["tw_code"] = tw_code
+
+        raw_symbol = str(row_out.get("symbol", "")).strip()
+        raw_name = str(row_out.get("name", "")).strip()
+        mapped_name = str(name_map.get(tw_code, "")).strip() if tw_code else ""
+        if tw_code and mapped_name:
+            if (not raw_name) or raw_name.upper() == raw_symbol.upper() or raw_name.upper() == tw_code:
+                row_out["name"] = mapped_name
+        out_rows.append(row_out)
+    return out_rows
+
+
 def _render_00910_constituent_intro_table(
     *,
     service: MarketDataService,
@@ -543,13 +655,19 @@ def _render_00910_constituent_intro_table(
     if not rows_full_for_intro:
         return
 
+    rows_full_for_intro = _enrich_rows_with_tw_names(rows=rows_full_for_intro, service=service)
     intro_df = pd.DataFrame(rows_full_for_intro)
     if "rank" in intro_df.columns:
         intro_df["rank"] = pd.to_numeric(intro_df["rank"], errors="coerce")
         intro_df = intro_df.sort_values("rank", ascending=True, na_position="last")
     intro_df["symbol"] = intro_df.get("symbol", pd.Series(dtype=str)).astype(str)
+    intro_df["tw_code"] = intro_df.get("tw_code", pd.Series(dtype=str)).astype(str).str.upper()
     intro_df["name"] = intro_df.get("name", pd.Series(dtype=str)).astype(str)
     intro_df["market"] = intro_df.get("market", pd.Series(dtype=str)).astype(str).str.upper()
+    tw_mask = intro_df["tw_code"].str.fullmatch(r"\d{4}", na=False)
+    if tw_mask.any():
+        intro_df.loc[tw_mask, "symbol"] = intro_df.loc[tw_mask, "tw_code"]
+        intro_df.loc[tw_mask & (intro_df["market"] == ""), "market"] = "TW"
     intro_df["weight_pct"] = pd.to_numeric(intro_df.get("weight_pct"), errors="coerce").round(2)
     briefs: list[str] = []
     for _, row in intro_df.iterrows():
@@ -592,6 +710,9 @@ PAGE_CARDS = [
     {"key": "資料庫檢視", "desc": "直接查看 SQLite 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
 ]
+DEFAULT_ACTIVE_PAGE = "回測工作台"
+FIXED_UI_THEME = "灰白專業（Soft Gray）"
+BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
 
 
 def _strategy_label(name: str) -> str:
@@ -750,12 +871,11 @@ def _build_snapshot_health(*, start_used: str, end_used: str, target_yyyymmdd: s
 
 
 def _stable_json_dumps(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return stable_json_dumps(payload)
 
 
 def _build_replay_source_hash(payload: dict[str, object]) -> str:
-    raw = _stable_json_dumps(payload)
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return build_source_hash(payload)
 
 
 def _resolve_live_change_metrics(
@@ -990,6 +1110,23 @@ def _plot_hoverlabel_style(palette: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _apply_unified_benchmark_hover(fig: go.Figure, palette: dict[str, object]):
+    fig.update_layout(
+        hovermode="x unified",
+        hoverlabel=_plot_hoverlabel_style(palette),
+        hoverdistance=140,
+        spikedistance=-1,
+    )
+    fig.update_xaxes(
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikedash="dot",
+        spikecolor=str(palette.get("benchmark", palette.get("text_muted", "#64748b"))),
+        spikethickness=1,
+    )
+
+
 HEATMAP_EXCESS_COLORSCALE: list[list[object]] = [
     [0.00, "rgba(239,68,68,0.78)"],
     [0.24, "rgba(248,113,113,0.58)"],
@@ -1066,19 +1203,7 @@ def _build_symbol_line_styles(symbols: list[str]) -> dict[str, dict[str, str]]:
 
 
 def _benchmark_candidates_tw(choice: str, *, allow_twii_fallback: bool = False) -> list[str]:
-    twii_candidates = ["^TWII", "0050", "006208"] if bool(allow_twii_fallback) else ["^TWII"]
-    mapping = {
-        "twii": twii_candidates,
-        "0050": ["0050"],
-        "006208": ["006208"],
-    }
-    raw = mapping.get(str(choice or "").strip().lower(), twii_candidates)
-    ordered: list[str] = []
-    for symbol in raw:
-        text = str(symbol or "").strip().upper()
-        if text and text not in ordered:
-            ordered.append(text)
-    return ordered
+    return benchmark_candidates_tw(choice, allow_twii_fallback=allow_twii_fallback)
 
 
 def _load_tw_benchmark_bars(
@@ -1091,31 +1216,16 @@ def _load_tw_benchmark_bars(
     allow_twii_fallback: bool = False,
     min_rows: int = 2,
 ) -> tuple[pd.DataFrame, str, list[str]]:
-    sync_issues: list[str] = []
-    required_rows = max(1, int(min_rows))
-    for benchmark_symbol in _benchmark_candidates_tw(choice, allow_twii_fallback=allow_twii_fallback):
-        if sync_first:
-            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            if report.error:
-                sync_issues.append(f"{benchmark_symbol}: {report.error}")
-        bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
-        if bench_bars.empty and not sync_first:
-            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            if report.error:
-                sync_issues.append(f"{benchmark_symbol}: {report.error}")
-            bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
-        if bench_bars.empty:
-            continue
-        bench_bars, _ = apply_split_adjustment(
-            bars=bench_bars,
-            symbol=benchmark_symbol,
-            market="TW",
-            use_known=True,
-            use_auto_detect=True,
-        )
-        if len(bench_bars) >= required_rows:
-            return bench_bars, benchmark_symbol, sync_issues
-    return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]), "", sync_issues
+    loaded = load_tw_benchmark_bars(
+        store=store,
+        choice=choice,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        sync_first=sync_first,
+        allow_twii_fallback=allow_twii_fallback,
+        min_rows=min_rows,
+    )
+    return loaded.bars, loaded.symbol_used, loaded.sync_issues
 
 
 def _load_tw_benchmark_close(
@@ -1127,21 +1237,15 @@ def _load_tw_benchmark_close(
     sync_first: bool,
     allow_twii_fallback: bool = False,
 ) -> tuple[pd.Series, str, list[str]]:
-    bench_bars, benchmark_symbol, sync_issues = _load_tw_benchmark_bars(
+    loaded = load_tw_benchmark_close(
         store=store,
         choice=choice,
         start_dt=start_dt,
         end_dt=end_dt,
         sync_first=sync_first,
         allow_twii_fallback=allow_twii_fallback,
-        min_rows=2,
     )
-    if bench_bars.empty or "close" not in bench_bars.columns:
-        return pd.Series(dtype=float), "", sync_issues
-    close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
-    if len(close) < 2:
-        return pd.Series(dtype=float), "", sync_issues
-    return close, benchmark_symbol, sync_issues
+    return loaded.close, loaded.symbol_used, loaded.sync_issues
 
 
 def _compute_tw_equal_weight_compare_payload(
@@ -1420,14 +1524,13 @@ _THEME_PALETTES: dict[str, dict[str, object]] = {
 
 
 def _theme_options() -> list[str]:
-    return list(_THEME_PALETTES.keys())
+    return [FIXED_UI_THEME]
 
 
 def _current_theme_name() -> str:
-    default_theme = "灰白專業（Soft Gray）"
-    theme = str(st.session_state.get("ui_theme", default_theme))
-    if theme not in _THEME_PALETTES:
-        theme = default_theme
+    theme = FIXED_UI_THEME
+    if st.session_state.get("ui_theme") != theme:
+        st.session_state["ui_theme"] = theme
     return theme
 
 
@@ -1697,10 +1800,11 @@ def _render_design_toolbox():
 
 def _render_page_cards_nav() -> str:
     page_options = [item["key"] for item in PAGE_CARDS]
-    active_page = str(st.session_state.get("active_page", page_options[0]))
+    default_page = DEFAULT_ACTIVE_PAGE if DEFAULT_ACTIVE_PAGE in page_options else page_options[0]
+    active_page = str(st.session_state.get("active_page", default_page))
     if active_page not in page_options:
-        active_page = page_options[0]
-        st.session_state["active_page"] = active_page
+        active_page = default_page
+    st.session_state["active_page"] = active_page
 
     st.markdown("#### 功能卡片")
     cols = st.columns(5, gap="small")
@@ -1728,7 +1832,7 @@ def _render_page_cards_nav() -> str:
                 st.session_state["active_page"] = key
                 st.rerun()
 
-    return str(st.session_state.get("active_page", active_page))
+    return str(st.session_state.get("active_page", default_page))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2498,6 +2602,7 @@ def _render_top10_etf_2026_ytd_view():
         )
         fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
         fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
+        _apply_unified_benchmark_hover(fig_cmp, palette)
         st.plotly_chart(fig_cmp, use_container_width=True)
 
         summary_rows: list[dict[str, object]] = []
@@ -2847,6 +2952,7 @@ def _render_active_etf_2026_ytd_view():
             )
             fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
             fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
+            _apply_unified_benchmark_hover(fig_cmp, palette)
             st.plotly_chart(fig_cmp, use_container_width=True)
 
             summary_rows: list[dict[str, object]] = []
@@ -3251,17 +3357,8 @@ def _render_live_view():
 
     with st.sidebar:
         st.subheader("介面")
-        theme_options = _theme_options()
         current_theme = _current_theme_name()
-        default_idx = theme_options.index(current_theme) if current_theme in theme_options else 0
-        st.selectbox(
-            "配色主題",
-            options=theme_options,
-            index=default_idx,
-            key="ui_theme",
-            help="提供多種專業配色（含夜間與日間），可依閱讀情境快速切換。",
-        )
-        st.caption(f"目前主題：{st.session_state.get('ui_theme', current_theme)}")
+        st.caption(f"配色主題：{current_theme}（固定）")
         st.subheader("即時模式")
         market = st.selectbox("市場", options=["美股(US)", "台股(TWSE)"], index=0)
         if market == "台股(TWSE)":
@@ -3592,6 +3689,22 @@ def _cache_int(value: object, default: int = 0) -> int:
         return int(default)
 
 
+def _build_sync_rows(symbols: list[str], reports: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        report = reports.get(symbol)
+        rows.append(
+            {
+                "symbol": symbol,
+                "rows": int(getattr(report, "rows_upserted", 0) or 0),
+                "source": str(getattr(report, "source", "unknown") or "unknown"),
+                "fallback": int(getattr(report, "fallback_depth", 0) or 0),
+                "error": str(getattr(report, "error", "") or ""),
+            }
+        )
+    return rows
+
+
 def _to_utc_timestamp(value: object) -> pd.Timestamp:
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
@@ -3786,7 +3899,7 @@ def _deserialize_portfolio_backtest_result(payload: object) -> Optional[Portfoli
     )
 
 
-def _serialize_backtest_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
+def _serialize_backtest_run_payload_v2(run_payload: dict[str, object]) -> dict[str, object]:
     mode = str(run_payload.get("mode", "")).strip()
     serialized: dict[str, object] = {
         "mode": mode,
@@ -3831,7 +3944,7 @@ def _serialize_backtest_run_payload(run_payload: dict[str, object]) -> dict[str,
     return serialized
 
 
-def _deserialize_backtest_run_payload(payload: object) -> Optional[dict[str, object]]:
+def _deserialize_backtest_run_payload_v2(payload: object) -> Optional[dict[str, object]]:
     data = payload if isinstance(payload, dict) else {}
     mode = str(data.get("mode", "")).strip()
     if mode not in {"single", "portfolio"}:
@@ -3898,6 +4011,85 @@ def _deserialize_backtest_run_payload(payload: object) -> Optional[dict[str, obj
     return run_payload
 
 
+def _serialize_backtest_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
+    legacy = _serialize_backtest_run_payload_v2(run_payload)
+    mode = str(legacy.get("mode", "")).strip()
+    walk_forward = bool(legacy.get("walk_forward"))
+    meta: dict[str, object] = {
+        "mode": mode,
+        "walk_forward": walk_forward,
+        "initial_capital": _cache_float(legacy.get("initial_capital"), default=1_000_000.0),
+    }
+    if mode == "single":
+        meta["symbol"] = str(legacy.get("symbol", "")).strip().upper()
+    else:
+        symbols_raw = legacy.get("symbols", [])
+        if isinstance(symbols_raw, list):
+            meta["symbols"] = [str(s).strip().upper() for s in symbols_raw if str(s).strip()]
+    if walk_forward:
+        meta["split_date"] = str(legacy.get("split_date", "") or "")
+        best_params = legacy.get("best_params", {})
+        if isinstance(best_params, dict):
+            meta["best_params"] = best_params
+        candidates = legacy.get("candidates")
+        if isinstance(candidates, (dict, int, float)):
+            meta["candidates"] = candidates
+
+    train_payload = legacy.get("train_result", {})
+    if not isinstance(train_payload, dict):
+        train_payload = {}
+    return {
+        "format_version": 3,
+        "meta": meta,
+        "bars": {"by_symbol": legacy.get("bars_by_symbol", {})},
+        "results": {
+            "test": legacy.get("result", {}),
+            "train": train_payload,
+        },
+    }
+
+
+def _deserialize_backtest_run_payload(payload: object) -> Optional[dict[str, object]]:
+    data = payload if isinstance(payload, dict) else {}
+    if int(data.get("format_version", 0) or 0) == 3:
+        meta = data.get("meta", {})
+        if not isinstance(meta, dict):
+            return None
+        bars_layer = data.get("bars", {})
+        bars_by_symbol = bars_layer.get("by_symbol", {}) if isinstance(bars_layer, dict) else {}
+        results_layer = data.get("results", {})
+        if not isinstance(results_layer, dict):
+            return None
+
+        mode = str(meta.get("mode", "")).strip()
+        if mode not in {"single", "portfolio"}:
+            return None
+        legacy_payload: dict[str, object] = {
+            "mode": mode,
+            "walk_forward": bool(meta.get("walk_forward")),
+            "initial_capital": _cache_float(meta.get("initial_capital"), default=1_000_000.0),
+            "bars_by_symbol": bars_by_symbol if isinstance(bars_by_symbol, dict) else {},
+            "result": results_layer.get("test", {}),
+        }
+        if mode == "single":
+            legacy_payload["symbol"] = str(meta.get("symbol", "")).strip().upper()
+        else:
+            symbols_raw = meta.get("symbols", [])
+            if isinstance(symbols_raw, list):
+                legacy_payload["symbols"] = [str(s).strip().upper() for s in symbols_raw if str(s).strip()]
+        if bool(meta.get("walk_forward")):
+            legacy_payload["train_result"] = results_layer.get("train", {})
+            legacy_payload["split_date"] = str(meta.get("split_date", "") or "")
+            best_params = meta.get("best_params", {})
+            if isinstance(best_params, dict):
+                legacy_payload["best_params"] = best_params
+            candidates = meta.get("candidates")
+            if isinstance(candidates, (dict, int, float)):
+                legacy_payload["candidates"] = candidates
+        return _deserialize_backtest_run_payload_v2(legacy_payload)
+    return _deserialize_backtest_run_payload_v2(payload)
+
+
 def _load_cached_backtest_payload(
     *,
     store: HistoryStore,
@@ -3911,7 +4103,10 @@ def _load_cached_backtest_payload(
     cached_params = cached_replay.params if isinstance(cached_replay.params, dict) else {}
     cached_schema = int(cached_params.get("schema_version", 0) or 0)
     cached_hash = str(cached_params.get("source_hash", "")).strip()
-    if cached_schema != expected_schema or cached_hash != expected_hash:
+    compatible_schemas = {int(expected_schema)}
+    if int(expected_schema) >= 3:
+        compatible_schemas.add(2)
+    if cached_schema not in compatible_schemas or cached_hash != expected_hash:
         return None, "偵測到舊版快取或參數簽章不一致，本次會重新計算回測。"
     restored = _deserialize_backtest_run_payload(cached_replay.payload)
     if restored is None:
@@ -3960,13 +4155,9 @@ def _render_backtest_view():
         if selected == "off":
             return []
         if market_code == "TW":
-            mapping = {
-                "auto": ["^TWII", "0050", "006208"],
-                "twii": ["^TWII"],
-                "0050": ["0050"],
-                "006208": ["006208"],
-            }
-            return mapping.get(selected, ["^TWII"])
+            if selected == "auto":
+                return benchmark_candidates_tw("twii", allow_twii_fallback=True)
+            return benchmark_candidates_tw(selected, allow_twii_fallback=False)
         mapping = {
             "auto": ["^GSPC", "SPY", "QQQ", "DIA"],
             "gspc": ["^GSPC"],
@@ -4017,19 +4208,30 @@ def _render_backtest_view():
     _render_card_section_header("回測設定卡", "先設定基本條件，再調整策略/成本與進階回放選項。")
     st.markdown("#### 基本設定")
     c1, c2, c3, c4 = st.columns(4)
-    market = c1.selectbox("市場", ["TW", "US"], index=0, key="bt_market")
-    mode = c2.selectbox("模式", ["單一標的", "投組(多標的)"], index=0, key="bt_mode")
-    default_symbol = "0052" if market == "TW" else "TSLA"
+    market_options = ["TW", "OTC", "US"]
+    market_labels = {"TW": "台股上市(TWSE)", "OTC": "台股上櫃(OTC)", "US": "美股(US)"}
+    market_selector = c1.selectbox(
+        "市場",
+        market_options,
+        index=0,
+        format_func=lambda v: market_labels.get(str(v), str(v)),
+        key=BT_KEYS.market,
+    )
+    is_tw_market = market_selector in {"TW", "OTC"}
+    market_code = "TW" if is_tw_market else "US"
+    mode = c2.selectbox("模式", ["單一標的", "投組(多標的)"], index=0, key=BT_KEYS.mode)
+    default_symbol = "0052" if market_selector == "TW" else ("8069" if market_selector == "OTC" else "TSLA")
     symbol_text = c3.text_input(
         "代碼（投組用逗號分隔）",
-        value=default_symbol if mode == "單一標的" else ("0052,2330" if market == "TW" else "AAPL,MSFT,TSLA"),
-        key="bt_symbol",
+        value=default_symbol if mode == "單一標的" else ("0052,2330" if market_selector == "TW" else ("8069,4123" if market_selector == "OTC" else "AAPL,MSFT,TSLA")),
+        key=BT_KEYS.symbol,
     ).strip().upper()
     strategy = c4.selectbox(
         "策略",
         options=DAILY_STRATEGY_OPTIONS,
-        index=1,
+        index=0,
         format_func=_strategy_label,
+        key=BT_KEYS.strategy,
     )
     symbols = _parse_symbols(symbol_text)
     if mode == "單一標的":
@@ -4037,28 +4239,42 @@ def _render_backtest_view():
     if not symbols:
         st.warning("請輸入至少一個代碼。")
         return
+    tw_like_symbols = [sym for sym in symbols if _looks_like_tw_symbol(sym)]
+    if tw_like_symbols and len(tw_like_symbols) == len(symbols):
+        inferred_map = _infer_tw_symbol_exchanges(tw_like_symbols)
+        inferred_tags = [inferred_map.get(sym) for sym in tw_like_symbols if inferred_map.get(sym) in {"TW", "OTC"}]
+        inferred_target: Optional[str] = None
+        if inferred_tags:
+            inferred_target = "OTC" if all(tag == "OTC" for tag in inferred_tags) else "TW"
+            if market_selector != inferred_target:
+                st.session_state[BT_KEYS.market] = inferred_target
+                st.rerun()
+        if inferred_target == "OTC":
+            st.caption("代碼已自動判斷為台股上櫃（OTC）。")
+        elif inferred_target == "TW":
+            st.caption("代碼已自動判斷為台股上市（TWSE）。")
 
-    auto_cost_key = "bt_auto_cost"
-    fee_key = "bt_fee_rate"
-    tax_key = "bt_sell_tax"
-    slip_key = "bt_slippage"
-    cost_profile_key = "bt_cost_profile"
+    auto_cost_key = BT_KEYS.auto_cost
+    fee_key = BT_KEYS.fee_rate
+    tax_key = BT_KEYS.sell_tax
+    slip_key = BT_KEYS.slippage
+    cost_profile_key = BT_KEYS.cost_profile
     if auto_cost_key not in st.session_state:
         st.session_state[auto_cost_key] = True
-    current_cost_profile = f"{market}:{','.join(symbols)}"
+    current_cost_profile = f"{market_selector}:{','.join(symbols)}"
     if st.session_state.get(auto_cost_key) and st.session_state.get(cost_profile_key) != current_cost_profile:
-        fee_default, tax_default, slip_default = _default_cost_params(market, symbols)
+        fee_default, tax_default, slip_default = _default_cost_params(market_code, symbols)
         st.session_state[fee_key] = float(fee_default)
         st.session_state[tax_key] = float(tax_default)
         st.session_state[slip_key] = float(slip_default)
         st.session_state[cost_profile_key] = current_cost_profile
 
     d1, d2 = st.columns(2)
-    start_date = d1.date_input("起始日期", value=date(date.today().year - 5, 1, 1))
-    end_date = d2.date_input("結束日期", value=date.today())
+    start_date = d1.date_input("起始日期", value=date(date.today().year - 5, 1, 1), key=BT_KEYS.start_date)
+    end_date = d2.date_input("結束日期", value=date.today(), key=BT_KEYS.end_date)
     benchmark_options = (
         [("auto", "Auto（台股加權 ^TWII，失敗時改用 0050/006208）"), ("twii", "^TWII"), ("0050", "0050（ETF代理）"), ("006208", "006208（ETF代理）"), ("off", "關閉 Benchmark")]
-        if market == "TW"
+        if is_tw_market
         else [("auto", "Auto（S&P500 ^GSPC，失敗時改用 SPY/QQQ/DIA）"), ("gspc", "^GSPC"), ("spy", "SPY（ETF代理）"), ("qqq", "QQQ（ETF代理）"), ("dia", "DIA（ETF代理）"), ("off", "關閉 Benchmark")]
     )
     bench_codes = [x[0] for x in benchmark_options]
@@ -4068,11 +4284,12 @@ def _render_backtest_view():
         options=bench_codes,
         format_func=lambda v: bench_labels.get(v, v),
         index=0,
+        key=BT_KEYS.benchmark_choice,
         help="可手動選基準；Auto 會在主來源失敗時自動改用替代基準。",
     )
-    invest_mode_key = "bt_invest_start_mode"
-    invest_date_key = "bt_invest_start_date"
-    invest_k_key = "bt_invest_start_k"
+    invest_mode_key = BT_KEYS.invest_start_mode
+    invest_date_key = BT_KEYS.invest_start_date
+    invest_k_key = BT_KEYS.invest_start_k
 
     st.markdown("#### 策略參數")
     st.caption(f"目前策略：{_strategy_label(strategy)} | {STRATEGY_DESC.get(strategy, '')}")
@@ -4185,7 +4402,7 @@ def _render_backtest_view():
         "Sell Tax",
         min_value=0.0,
         max_value=0.01,
-        value=float(st.session_state.get(tax_key, 0.0 if market == "US" else 0.003)),
+        value=float(st.session_state.get(tax_key, 0.0 if market_code == "US" else 0.003)),
         step=0.0001,
         format="%.6f",
         key=tax_key,
@@ -4215,6 +4432,7 @@ def _render_backtest_view():
     enable_wf = wf1.checkbox(
         "啟用 Walk-Forward",
         value=False,
+        key=BT_KEYS.enable_wf,
         help="先用 Train 區段挑參數，再到 Test 區段驗證，降低過度擬合風險。",
     )
     if strategy == "buy_hold" and enable_wf:
@@ -4226,20 +4444,23 @@ def _render_backtest_view():
         max_value=0.85,
         value=0.70,
         step=0.05,
+        key=BT_KEYS.train_ratio,
         help="例如 0.70 代表前 70% 用於挑參數，後 30% 用於驗證。",
     )
     objective = wf3.selectbox(
         "參數挑選目標",
         ["sharpe", "cagr", "total_return", "mdd"],
         index=0,
+        key=BT_KEYS.objective,
         help="Walk-Forward 會用這個指標在訓練區挑最佳參數。",
     )
     adj1, adj2, adj3 = st.columns(3)
-    use_split_adjustment = adj1.checkbox("分割調整（復權）", value=True)
-    auto_detect_split = adj2.checkbox("自動偵測分割事件", value=True)
+    use_split_adjustment = adj1.checkbox("分割調整（復權）", value=True, key=BT_KEYS.use_split_adjustment)
+    auto_detect_split = adj2.checkbox("自動偵測分割事件", value=True, key=BT_KEYS.auto_detect_split)
     use_total_return_adjustment = adj3.checkbox(
         "還原權息計算（Adj Close）",
         value=False,
+        key=BT_KEYS.use_total_return_adjustment,
         help="有 `adj_close` 時，會將 OHLC 轉成還原權息價格。若已還原，會略過額外分割調整避免重複計算。",
     )
     if use_total_return_adjustment and use_split_adjustment:
@@ -4334,80 +4555,86 @@ def _render_backtest_view():
             )
         )
 
+    run_key = build_backtest_run_key(
+        market=market_selector,
+        symbols=list(symbols),
+        strategy=strategy,
+        start_date=start_date,
+        end_date=end_date,
+        enable_wf=bool(enable_wf),
+        train_ratio=float(train_ratio),
+        objective=objective,
+        initial_capital=float(initial_capital),
+        strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+        fee_rate=float(fee_rate),
+        sell_tax=float(sell_tax),
+        slippage=float(slippage),
+        use_split_adjustment=bool(use_split_adjustment),
+        auto_detect_split=bool(auto_detect_split),
+        use_total_return_adjustment=bool(use_total_return_adjustment),
+        invest_start_mode=str(invest_start_mode),
+        invest_start_date=invest_start_date,
+        invest_start_k=int(invest_start_k) if invest_start_k is not None else -1,
+    )
+    with st.container(border=True):
+        _render_card_section_header("回測執行", "按下按鈕後才會執行；同條件會優先讀取 SQLite 快取。")
+        run_clicked = st.button("執行回測", type="primary", use_container_width=True, key="bt_execute_run")
+    if run_clicked:
+        st.session_state[BACKTEST_RUN_REQUEST_KEY] = run_key
+    run_requested = st.session_state.get(BACKTEST_RUN_REQUEST_KEY) == run_key
+
     sync_parallel = st.checkbox(
         "多標的同步平行處理",
         value=True,
+        key=BT_KEYS.sync_parallel,
         help="多檔標的時通常更快；若網路不穩可關閉改為逐檔同步。",
     )
     auto_sync = st.checkbox(
         "App 啟動時自動增量同步（較慢）",
         value=False,
+        key=BT_KEYS.auto_sync,
         help="關閉可先直接使用本地 SQLite；需要時再手動同步。",
     )
     auto_fill_gaps = st.checkbox(
         "回測前自動補資料缺口（推薦）",
         value=True,
+        key=BT_KEYS.auto_fill_gaps,
         help="若發現本地資料起訖缺口，會只同步缺口標的；可減少「回測天數不夠」問題。",
     )
-    sync_key = f"synced:{market}:{','.join(symbols)}:{start_date}:{end_date}"
-    gapfill_key = f"gapfill:{market}:{','.join(symbols)}:{start_date}:{end_date}"
+    sync_key = f"synced:{market_selector}:{','.join(symbols)}:{start_date}:{end_date}"
+    gapfill_key = f"gapfill:{market_selector}:{','.join(symbols)}:{start_date}:{end_date}"
     sync_start = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
     sync_end = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-    if auto_sync and not st.session_state.get(sync_key):
-        reports, sync_issues = _sync_symbols_history(
-            store,
-            market=market,
+    if run_requested and auto_sync and not st.session_state.get(sync_key):
+        reports, plan = sync_symbols_if_needed(
+            store=store,
+            market=market_code,
             symbols=symbols,
             start=sync_start,
             end=sync_end,
             parallel=sync_parallel,
+            mode="all",
         )
-        sync_rows = []
-        for symbol in symbols:
-            report = reports.get(symbol)
-            sync_rows.append(
-                {
-                    "symbol": symbol,
-                    "rows": int(getattr(report, "rows_upserted", 0) or 0),
-                    "source": str(getattr(report, "source", "unknown") or "unknown"),
-                    "fallback": int(getattr(report, "fallback_depth", 0) or 0),
-                    "error": str(getattr(report, "error", "") or ""),
-                }
-            )
+        sync_rows = _build_sync_rows(list(symbols), reports)
         st.session_state[sync_key] = True
         sync_df = pd.DataFrame(sync_rows)
-        if sync_issues:
+        if plan.issues:
             st.warning("部分同步失敗，請檢查下方同步結果。")
         st.dataframe(sync_df, use_container_width=True, hide_index=True)
 
-    if auto_fill_gaps and not st.session_state.get(gapfill_key):
-        gap_symbols: list[str] = []
-        for symbol in symbols:
-            bars = store.load_daily_bars(symbol=symbol, market=market, start=sync_start, end=sync_end)
-            if _bars_need_backfill(bars, start=sync_start, end=sync_end):
-                gap_symbols.append(symbol)
-        if gap_symbols:
-            reports, sync_issues = _sync_symbols_history(
-                store,
-                market=market,
-                symbols=gap_symbols,
-                start=sync_start,
-                end=sync_end,
-                parallel=sync_parallel,
-            )
-            sync_rows = []
-            for symbol in gap_symbols:
-                report = reports.get(symbol)
-                sync_rows.append(
-                    {
-                        "symbol": symbol,
-                        "rows": int(getattr(report, "rows_upserted", 0) or 0),
-                        "source": str(getattr(report, "source", "unknown") or "unknown"),
-                        "fallback": int(getattr(report, "fallback_depth", 0) or 0),
-                        "error": str(getattr(report, "error", "") or ""),
-                    }
-                )
-            if sync_issues:
+    if run_requested and auto_fill_gaps and not st.session_state.get(gapfill_key):
+        reports, plan = sync_symbols_if_needed(
+            store=store,
+            market=market_code,
+            symbols=symbols,
+            start=sync_start,
+            end=sync_end,
+            parallel=sync_parallel,
+            mode="backfill",
+        )
+        if plan.synced_symbols:
+            sync_rows = _build_sync_rows(plan.synced_symbols, reports)
+            if plan.issues:
                 st.warning("缺口補齊時有部分同步失敗，請檢查下方結果。")
             else:
                 st.caption("已自動補齊回測區間資料缺口。")
@@ -4415,37 +4642,31 @@ def _render_backtest_view():
         st.session_state[gapfill_key] = True
 
     if st.button("同步歷史資料", use_container_width=True):
-        reports, sync_issues = _sync_symbols_history(
-            store,
-            market=market,
+        reports, plan = sync_symbols_if_needed(
+            store=store,
+            market=market_code,
             symbols=symbols,
             start=sync_start,
             end=sync_end,
             parallel=sync_parallel,
+            mode="all",
         )
-        sync_rows = []
-        for symbol in symbols:
-            report = reports.get(symbol)
-            sync_rows.append(
-                {
-                    "symbol": symbol,
-                    "rows": int(getattr(report, "rows_upserted", 0) or 0),
-                    "source": str(getattr(report, "source", "unknown") or "unknown"),
-                    "fallback": int(getattr(report, "fallback_depth", 0) or 0),
-                    "error": str(getattr(report, "error", "") or ""),
-                }
-            )
+        sync_rows = _build_sync_rows(list(symbols), reports)
         sync_df = pd.DataFrame(sync_rows)
-        if sync_issues:
+        if plan.issues:
             st.error("部分同步失敗，請檢查同步結果。")
         else:
             st.success("同步成功。")
         st.dataframe(sync_df, use_container_width=True, hide_index=True)
 
+    if not run_requested:
+        st.info("已就緒。按下「執行回測」後才會開始載入資料並執行回測。")
+        return
+
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     availability_rows = []
     for symbol in symbols:
-        bars = store.load_daily_bars(symbol=symbol, market=market, start=sync_start, end=sync_end)
+        bars = store.load_daily_bars(symbol=symbol, market=market_code, start=sync_start, end=sync_end)
         if bars.empty:
             availability_rows.append({"symbol": symbol, "rows": 0, "sources": "", "status": "EMPTY", "adj_mode": ""})
             continue
@@ -4457,7 +4678,7 @@ def _render_backtest_view():
             bars, split_events = apply_split_adjustment(
                 bars=bars,
                 symbol=symbol,
-                market=market,
+                market=market_code,
                 use_known=True,
                 use_auto_detect=auto_detect_split,
             )
@@ -4522,45 +4743,32 @@ def _render_backtest_view():
             )
         return
 
-    strategy_token = _stable_json_dumps(strategy_params if isinstance(strategy_params, dict) else {})
-    run_key = (
-        f"bt_result:{market}:{','.join(symbols)}:{strategy}:{start_date}:{end_date}:"
-        f"{int(enable_wf)}:{train_ratio}:{objective}:{int(initial_capital)}:"
-        f"{strategy_token}:{fee_rate:.6f}:{sell_tax:.6f}:{slippage:.6f}:"
-        f"{int(use_split_adjustment)}:{int(auto_detect_split)}:{int(use_total_return_adjustment)}:"
-        f"{invest_start_mode}:{invest_start_date}:{invest_start_k}"
+    run_params_base = build_backtest_run_params_base(
+        market=market_selector,
+        mode=mode,
+        symbols=list(symbols),
+        strategy=strategy,
+        strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+        start_date=start_date,
+        end_date=end_date,
+        enable_walk_forward=bool(enable_wf),
+        train_ratio=float(train_ratio),
+        objective=objective,
+        initial_capital=float(initial_capital),
+        fee_rate=float(fee_rate),
+        sell_tax_rate=float(sell_tax),
+        slippage_rate=float(slippage),
+        use_split_adjustment=bool(use_split_adjustment),
+        auto_detect_split=bool(auto_detect_split),
+        use_total_return_adjustment=bool(use_total_return_adjustment),
+        invest_start_mode=str(invest_start_mode),
+        invest_start_date=invest_start_date,
+        invest_start_k=int(invest_start_k) if invest_start_k is not None else -1,
     )
-    with st.container(border=True):
-        _render_card_section_header("回測執行", "輸入完成後會自動回測；同條件會優先讀取 SQLite 快取。")
-
-    run_params_base = {
-        "market": market,
-        "mode": mode,
-        "symbols": list(symbols),
-        "strategy": strategy,
-        "strategy_params": strategy_params if isinstance(strategy_params, dict) else {},
-        "start_date": str(start_date),
-        "end_date": str(end_date),
-        "enable_walk_forward": bool(enable_wf),
-        "train_ratio": float(train_ratio),
-        "objective": objective if enable_wf else "",
-        "initial_capital": float(initial_capital),
-        "fee_rate": float(fee_rate),
-        "sell_tax_rate": float(sell_tax),
-        "slippage_rate": float(slippage),
-        "use_split_adjustment": bool(use_split_adjustment),
-        "auto_detect_split": bool(auto_detect_split),
-        "use_total_return_adjustment": bool(use_total_return_adjustment),
-        "invest_start_mode": str(invest_start_mode),
-        "invest_start_date": str(invest_start_date) if invest_start_date is not None else "",
-        "invest_start_k": int(invest_start_k) if invest_start_k is not None else -1,
-    }
-    run_params_hash = _build_replay_source_hash(run_params_base)
-    run_params = {
-        **run_params_base,
-        "schema_version": BACKTEST_REPLAY_SCHEMA_VERSION,
-        "source_hash": run_params_hash,
-    }
+    run_params, run_params_hash = build_replay_params_with_signature(
+        params_base=run_params_base,
+        schema_version=BACKTEST_REPLAY_SCHEMA_VERSION,
+    )
 
     payload = st.session_state.get(run_key)
     if payload is None:
@@ -4669,7 +4877,7 @@ def _render_backtest_view():
         summary_metrics = run_payload["result"].metrics.__dict__
         store.save_backtest_run(
             symbol=primary,
-            market=market,
+            market=market_selector,
             strategy=strategy,
             params=run_payload.get("best_params", strategy_params),
             cost={
@@ -4706,9 +4914,9 @@ def _render_backtest_view():
         target_index=pd.DatetimeIndex(strategy_equity.index),
         initial_capital=run_initial_capital,
     )
-    benchmark_raw = _load_benchmark_from_store(market_code=market, start=sync_start, end=sync_end, choice=benchmark_choice)
+    benchmark_raw = _load_benchmark_from_store(market_code=market_code, start=sync_start, end=sync_end, choice=benchmark_choice)
     if benchmark_raw.empty:
-        benchmark_raw = service.get_benchmark_series(market=market, start=sync_start, end=sync_end, benchmark=benchmark_choice)
+        benchmark_raw = service.get_benchmark_series(market=market_code, start=sync_start, end=sync_end, benchmark=benchmark_choice)
     benchmark_adj_info: dict[str, object] = {"applied": False}
     if use_total_return_adjustment and not benchmark_raw.empty:
         benchmark_raw, benchmark_adj_info = _apply_total_return_adjustment(benchmark_raw)
@@ -4721,13 +4929,13 @@ def _render_backtest_view():
                 fallback_symbol_map_us = {"gspc": "^GSPC", "spy": "SPY", "qqq": "QQQ", "dia": "DIA"}
                 benchmark_symbol = (
                     fallback_symbol_map_tw.get(benchmark_choice, "^TWII")
-                    if market == "TW"
+                    if market_code == "TW"
                     else fallback_symbol_map_us.get(benchmark_choice, "^GSPC")
                 )
             adjusted, benchmark_split_events = apply_split_adjustment(
                 bars=benchmark_raw,
                 symbol=benchmark_symbol,
-                market=market,
+                market=market_code,
                 use_known=True,
                 use_auto_detect=auto_detect_split,
             )
@@ -5155,6 +5363,7 @@ def _render_backtest_view():
             plot_bgcolor=str(palette["plot_bg"]),
             font=dict(color=str(palette["text_color"])),
         )
+        _apply_unified_benchmark_hover(fig, palette)
         st.plotly_chart(fig, use_container_width=True, key=f"playback_chart:{run_key}")
         if st.session_state.get(indicator_panel_key):
             _render_indicator_panels(
@@ -5315,7 +5524,6 @@ def _render_backtest_view():
 
             if not norm.empty:
                 palette = _ui_palette()
-                multi_symbol_compare = len([c for c in norm.columns if c.startswith("asset:")]) >= 2
                 fig_cmp = go.Figure()
                 fig_cmp.add_trace(
                     go.Scatter(
@@ -5324,11 +5532,7 @@ def _render_backtest_view():
                         mode="lines",
                         name="Strategy Equity",
                         line=dict(color=str(palette["equity"]), width=2.2),
-                        hovertemplate=(
-                            _hovertemplate_with_code("MULTI_STRATEGY", value_label="Normalized", y_format=".4f")
-                            if multi_symbol_compare
-                            else None
-                        ),
+                        hovertemplate=_hovertemplate_with_code("STRATEGY", value_label="Normalized", y_format=".4f"),
                     )
                 )
                 fig_cmp.add_trace(
@@ -5338,14 +5542,15 @@ def _render_backtest_view():
                         mode="lines",
                         name="Benchmark Equity",
                         line=_benchmark_line_style(palette, width=2.0),
-                        hovertemplate=(
-                            _hovertemplate_with_code(benchmark_symbol or "BENCHMARK", value_label="Normalized", y_format=".4f")
-                            if multi_symbol_compare
-                            else None
+                        hovertemplate=_hovertemplate_with_code(
+                            benchmark_symbol or "BENCHMARK",
+                            value_label="Normalized",
+                            y_format=".4f",
                         ),
                     )
                 )
                 if "buy_hold" in norm.columns and norm["buy_hold"].notna().any():
+                    buy_hold_code = "EW_POOL" if is_portfolio else selected_symbols[0]
                     fig_cmp.add_trace(
                         go.Scatter(
                             x=norm.index,
@@ -5353,10 +5558,10 @@ def _render_backtest_view():
                             mode="lines",
                             name=buy_hold_label,
                             line=dict(color=str(palette["buy_hold"]), width=1.9),
-                            hovertemplate=(
-                                _hovertemplate_with_code("EW_POOL", value_label="Normalized", y_format=".4f")
-                                if multi_symbol_compare
-                                else None
+                            hovertemplate=_hovertemplate_with_code(
+                                buy_hold_code,
+                                value_label="Normalized",
+                                y_format=".4f",
                             ),
                         )
                     )
@@ -5373,11 +5578,7 @@ def _render_backtest_view():
                             mode="lines",
                             name=f"Buy-and-Hold Equity ({sym})",
                             line=dict(color=line_color, width=1.6),
-                            hovertemplate=(
-                                _hovertemplate_with_code(sym, value_label="Normalized", y_format=".4f")
-                                if multi_symbol_compare
-                                else None
-                            ),
+                            hovertemplate=_hovertemplate_with_code(sym, value_label="Normalized", y_format=".4f"),
                         )
                     )
                 fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
@@ -5390,6 +5591,7 @@ def _render_backtest_view():
                     plot_bgcolor=str(palette["plot_bg"]),
                     font=dict(color=str(palette["text_color"])),
                 )
+                _apply_unified_benchmark_hover(fig_cmp, palette)
                 st.plotly_chart(fig_cmp, use_container_width=True)
 
                 strategy_perf = _series_metrics(comp_view["strategy"])
@@ -5943,6 +6145,7 @@ def _render_00910_global_ytd_block(
         if not rows_full:
             st.error("目前抓不到 00910 完整成分股（含海外），請稍後重試。")
             return
+        rows_full = _enrich_rows_with_tw_names(rows=rows_full, service=service)
 
         market_benchmark_map = {
             "US": us_benchmark,
@@ -6280,9 +6483,9 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             full_rows, full_source = service.get_etf_constituents_full(
                 etf_text, limit=None, force_refresh=bool(refresh_constituents)
             )
-            full_rows_00910 = list(full_rows)
+            full_rows_00910 = _enrich_rows_with_tw_names(rows=list(full_rows), service=service)
             if full_rows:
-                full_df = pd.DataFrame(full_rows)
+                full_df = pd.DataFrame(full_rows_00910)
                 tw_subset_count = int((full_df["tw_code"].astype(str) != "").sum()) if "tw_code" in full_df.columns else 0
                 st.caption(
                     f"00910 完整成分股（含海外）共 {len(full_rows)} 檔 | 來源：{full_source} | "
@@ -6371,7 +6574,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         help="標的較多時通常更快；若網路不穩可關閉改逐檔同步。",
     )
 
-    strategy_token = json.dumps(strategy_params, sort_keys=True, ensure_ascii=False)
+    strategy_token = _stable_json_dumps(strategy_params if isinstance(strategy_params, dict) else {})
     run_key = (
         f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
         f"{fee_rate}:{sell_tax}:{slippage}:{','.join(selected_symbols)}"
@@ -7102,16 +7305,19 @@ def _render_tw_etf_rotation_view():
             mode="lines",
             name="Strategy Equity (ETF Rotation)",
             line=dict(color=str(palette["equity"]), width=2.3),
+            hovertemplate=_hovertemplate_with_code("ROTATION", value_label="Equity", y_format=",.0f"),
         )
     )
     if not benchmark_series.empty:
+        benchmark_label = str(payload.get("benchmark_symbol", "Benchmark")).strip() or "Benchmark"
         fig.add_trace(
             go.Scatter(
                 x=benchmark_series.index,
                 y=benchmark_series.values,
                 mode="lines",
-                name=f"Benchmark Equity ({payload.get('benchmark_symbol', 'Benchmark')})",
+                name=f"Benchmark Equity ({benchmark_label})",
                 line=_benchmark_line_style(palette, width=2.0),
+                hovertemplate=_hovertemplate_with_code(benchmark_label, value_label="Equity", y_format=",.0f"),
             )
         )
     if not buy_hold_series.empty:
@@ -7122,6 +7328,7 @@ def _render_tw_etf_rotation_view():
                 mode="lines",
                 name="Buy-and-Hold Equity (Equal-Weight ETF Pool)",
                 line=dict(color=str(palette["buy_hold"]), width=1.9),
+                hovertemplate=_hovertemplate_with_code("EW_POOL", value_label="Equity", y_format=",.0f"),
             )
         )
     fig.update_layout(
@@ -7134,6 +7341,7 @@ def _render_tw_etf_rotation_view():
     )
     fig.update_xaxes(gridcolor=str(palette["grid"]))
     fig.update_yaxes(gridcolor=str(palette["grid"]))
+    _apply_unified_benchmark_hover(fig, palette)
     st.plotly_chart(fig, use_container_width=True)
 
     metrics = payload.get("metrics", {})
@@ -7244,6 +7452,117 @@ def _render_db_browser_view():
     db_size_mb = db_path.stat().st_size / (1024 * 1024)
     st.caption(f"檔案大小：約 {db_size_mb:.2f} MB")
 
+    st.markdown("#### 市場基礎資料預載")
+    latest_bootstrap = store.load_latest_bootstrap_run()
+    if latest_bootstrap is None:
+        st.info("尚未有預載紀錄。可先執行一次台股/美股核心資料預載。")
+    else:
+        finished_text = "進行中"
+        if latest_bootstrap.finished_at is not None:
+            finished_text = latest_bootstrap.finished_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        st.caption(
+            "最近一次任務："
+            f"{latest_bootstrap.scope}｜狀態 {latest_bootstrap.status}｜"
+            f"啟動 {latest_bootstrap.started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}｜"
+            f"完成 {finished_text}｜"
+            f"總數 {latest_bootstrap.total_symbols} / 成功 {latest_bootstrap.synced_symbols} / 失敗 {latest_bootstrap.failed_symbols}"
+        )
+        if latest_bootstrap.error:
+            st.warning(f"最近一次任務錯誤：{latest_bootstrap.error}")
+
+    b1, b2, b3, b4 = st.columns([1.5, 1, 1, 1])
+    scope_label = b1.selectbox(
+        "預載範圍",
+        options=["台股+美股核心", "僅台股", "僅美股核心"],
+        index=0,
+        key="db_bootstrap_scope",
+    )
+    years = int(b2.selectbox("歷史年數", options=[3, 5, 8], index=1, key="db_bootstrap_years"))
+    workers = int(b3.selectbox("平行工作數", options=[2, 4, 6, 8], index=2, key="db_bootstrap_workers"))
+    tw_limit_input = int(
+        b4.number_input(
+            "台股筆數上限",
+            min_value=0,
+            value=0,
+            step=50,
+            key="db_bootstrap_tw_limit",
+            help="0 代表全量台股；可先輸入 200 做試跑。",
+        )
+    )
+    scope_token = {
+        "台股+美股核心": "both",
+        "僅台股": "tw",
+        "僅美股核心": "us",
+    }.get(scope_label, "both")
+    tw_limit = None if tw_limit_input <= 0 else tw_limit_input
+
+    a1, a2 = st.columns([1, 1])
+    if a1.button("啟動基礎資料預載", type="primary", use_container_width=True, key="db_run_bootstrap"):
+        with st.spinner("預載中（會同步 metadata 與日線歷史）..."):
+            summary = run_market_data_bootstrap(
+                store=store,
+                scope=scope_token,
+                years=years,
+                parallel=True,
+                max_workers=workers,
+                tw_limit=tw_limit,
+                sync_mode="min_rows",
+            )
+        st.session_state["db_manual_bootstrap_summary"] = summary
+        if str(summary.get("status", "")) == "completed":
+            st.success("基礎資料預載完成。")
+        else:
+            st.warning(f"預載完成，但有部分失敗（狀態：{summary.get('status', 'unknown')}）。")
+
+    if a2.button("執行一次增量更新", use_container_width=True, key="db_run_incremental_refresh"):
+        with st.spinner("增量更新中（只補缺漏或最新區間）..."):
+            summary = run_incremental_refresh(
+                store=store,
+                years=5,
+                parallel=True,
+                max_workers=min(workers, 4),
+                tw_limit=180,
+                us_limit=80,
+            )
+        st.session_state["db_incremental_refresh_summary"] = summary
+        if str(summary.get("status", "")) == "completed":
+            st.success("增量更新完成。")
+        else:
+            st.warning(f"增量更新完成，但有部分失敗（狀態：{summary.get('status', 'unknown')}）。")
+
+    manual_summary = st.session_state.get("db_manual_bootstrap_summary")
+    if isinstance(manual_summary, dict):
+        preview = {
+            "任務ID": manual_summary.get("run_id", ""),
+            "範圍": manual_summary.get("scope", ""),
+            "總數": manual_summary.get("total_symbols", 0),
+            "成功": manual_summary.get("synced_success", 0),
+            "跳過": manual_summary.get("skipped_symbols", 0),
+            "失敗": manual_summary.get("failed_symbols", 0),
+            "狀態": manual_summary.get("status", ""),
+        }
+        st.caption("最近一次手動預載摘要")
+        st.dataframe(pd.DataFrame([preview]), use_container_width=True, hide_index=True)
+        issues = manual_summary.get("issues")
+        if isinstance(issues, list) and issues:
+            _render_sync_issues("手動預載有部分同步錯誤", [str(item) for item in issues], preview_limit=3)
+
+    incremental_summary = st.session_state.get("db_incremental_refresh_summary")
+    if isinstance(incremental_summary, dict):
+        preview = {
+            "任務ID": incremental_summary.get("run_id", ""),
+            "總數": incremental_summary.get("total_symbols", 0),
+            "成功": incremental_summary.get("synced_success", 0),
+            "跳過": incremental_summary.get("skipped_symbols", 0),
+            "失敗": incremental_summary.get("failed_symbols", 0),
+            "狀態": incremental_summary.get("status", ""),
+        }
+        st.caption("最近一次增量更新摘要")
+        st.dataframe(pd.DataFrame([preview]), use_container_width=True, hide_index=True)
+        issues = incremental_summary.get("issues")
+        if isinstance(issues, list) and issues:
+            _render_sync_issues("增量更新有部分同步錯誤", [str(item) for item in issues], preview_limit=3)
+
     conn = sqlite3.connect(str(db_path))
     try:
         tables_df = pd.read_sql_query(
@@ -7334,6 +7653,7 @@ def _render_db_browser_view():
 def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
+    _auto_run_daily_incremental_refresh(_history_store())
     st.title("即時走勢 / 多來源資料 / 回測平台")
     _render_design_toolbox()
     active_page = _render_page_cards_nav()

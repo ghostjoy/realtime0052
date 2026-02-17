@@ -72,6 +72,24 @@ class DataHealth:
 
 
 @dataclass(frozen=True)
+class BenchmarkLoadResult:
+    bars: pd.DataFrame
+    close: pd.Series
+    symbol_used: str
+    sync_issues: list[str]
+    source_chain: list[str]
+    candidates: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SyncPlanResult:
+    synced_symbols: list[str]
+    skipped_symbols: list[str]
+    issues: list[str]
+    source_chain: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class LiveContext:
     quote: QuoteSnapshot
     intraday: pd.DataFrame
