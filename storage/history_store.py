@@ -97,6 +97,14 @@ class RotationRun:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class BacktestReplayRun:
+    run_key: str
+    params: Dict[str, object]
+    payload: Dict[str, object]
+    created_at: datetime
+
+
 class HistoryStore:
     def __init__(self, db_path: Optional[str] = None, service: Optional[MarketDataService] = None):
         self.db_path = resolve_history_db_path(db_path)
@@ -174,6 +182,14 @@ class HistoryStore:
                     result_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS backtest_replay_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    params_json TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS universe_snapshots (
                     universe_id TEXT PRIMARY KEY,
                     symbols_json TEXT NOT NULL,
@@ -212,6 +228,9 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_rotation_runs_universe_created_at
                     ON rotation_runs(universe_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_backtest_replay_runs_key_created_at
+                    ON backtest_replay_runs(run_key, created_at DESC);
                 """
             )
 
@@ -644,6 +663,79 @@ class HistoryStore:
                 ),
             )
             return int(cur.lastrowid)
+
+    def save_backtest_replay_run(
+        self,
+        run_key: str,
+        params: Dict[str, object],
+        payload: Dict[str, object],
+    ) -> int:
+        key = str(run_key or "").strip()
+        if not key:
+            raise ValueError("run_key is required")
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO backtest_replay_runs(run_key, created_at, params_json, payload_json)
+                VALUES(?, ?, ?, ?)
+                """,
+                (
+                    key,
+                    now,
+                    json.dumps(params, ensure_ascii=False),
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def load_latest_backtest_replay_run(self, run_key: str) -> Optional[BacktestReplayRun]:
+        key = str(run_key or "").strip()
+        if not key:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run_key, created_at, params_json, payload_json
+                FROM backtest_replay_runs
+                WHERE run_key=?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        created_at = datetime.now(tz=timezone.utc)
+        try:
+            created_at = datetime.fromisoformat(str(row[1]))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+        params: Dict[str, object] = {}
+        payload: Dict[str, object] = {}
+        try:
+            obj = json.loads(str(row[2] or "{}"))
+            if isinstance(obj, dict):
+                params = obj
+        except Exception:
+            params = {}
+        try:
+            obj = json.loads(str(row[3] or "{}"))
+            if isinstance(obj, dict):
+                payload = obj
+        except Exception:
+            payload = {}
+
+        return BacktestReplayRun(
+            run_key=str(row[0] or ""),
+            params=params,
+            payload=payload,
+            created_at=created_at,
+        )
 
     def save_universe_snapshot(
         self,

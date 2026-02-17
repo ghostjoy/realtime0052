@@ -50,9 +50,10 @@ uv run python -m compileall app.py
 
 ## 6) UI 與主題規則（目前）
 
-- 主題只保留兩套：
+- 主題目前提供三套：
   - `日光白（Paper Light）`
   - `灰白專業（Soft Gray）`（預設）
+  - `深色專業（Data Dark）`
 - K 棒顏色採柔和低飽和、半透明填色
 
 ## 7) 不要做的事

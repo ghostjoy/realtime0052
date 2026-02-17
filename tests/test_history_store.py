@@ -219,6 +219,27 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(latest.params.get("top_n"), 3)
             self.assertEqual(latest.payload.get("generated_at"), "2026-01-02T00:00:00+00:00")
 
+    def test_save_and_load_latest_backtest_replay_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            store.save_backtest_replay_run(
+                run_key="bt:tw:0050",
+                params={"strategy": "buy_hold"},
+                payload={"generated_at": "2026-02-17T00:00:00+00:00", "mode": "single"},
+            )
+            store.save_backtest_replay_run(
+                run_key="bt:tw:0050",
+                params={"strategy": "sma_cross"},
+                payload={"generated_at": "2026-02-18T00:00:00+00:00", "mode": "single"},
+            )
+            latest = store.load_latest_backtest_replay_run("bt:tw:0050")
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.run_key, "bt:tw:0050")
+            self.assertEqual(latest.params.get("strategy"), "sma_cross")
+            self.assertEqual(latest.payload.get("generated_at"), "2026-02-18T00:00:00+00:00")
+
     def test_sync_history_backfills_when_start_before_local_first_date(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"

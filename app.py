@@ -6,6 +6,7 @@ import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
+from io import StringIO
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -16,9 +17,13 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from backtest import (
+    BacktestMetrics,
+    BacktestResult,
     CostModel,
+    PortfolioBacktestResult,
     ROTATION_DEFAULT_UNIVERSE,
     ROTATION_MIN_BARS,
+    Trade,
     apply_start_to_bars_map,
     apply_split_adjustment,
     build_buy_hold_equity,
@@ -732,6 +737,52 @@ def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _apply_total_return_adjustment(
+    bars: pd.DataFrame,
+    *,
+    min_coverage_ratio: float = 0.6,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    if not isinstance(bars, pd.DataFrame) or bars.empty:
+        return bars.copy(), {"applied": False, "coverage_pct": 0.0, "reason": "empty"}
+    if "adj_close" not in bars.columns or "close" not in bars.columns:
+        return bars.copy(), {"applied": False, "coverage_pct": 0.0, "reason": "no_adj_close"}
+
+    close = pd.to_numeric(bars["close"], errors="coerce")
+    adj = pd.to_numeric(bars["adj_close"], errors="coerce")
+    valid = close.notna() & adj.notna() & (close > 0) & (adj > 0)
+    total_rows = int(len(bars))
+    valid_rows = int(valid.sum())
+    coverage = float(valid_rows / total_rows) if total_rows > 0 else 0.0
+    if valid_rows < 2 or coverage < float(min_coverage_ratio):
+        return bars.copy(), {
+            "applied": False,
+            "coverage_pct": round(coverage * 100.0, 1),
+            "reason": "insufficient_adj_close",
+            "valid_rows": valid_rows,
+            "total_rows": total_rows,
+        }
+
+    factor = pd.Series(np.nan, index=bars.index, dtype=float)
+    factor.loc[valid] = adj.loc[valid] / close.loc[valid]
+    factor = factor.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(1.0)
+
+    out = bars.copy()
+    for col in ["open", "high", "low", "close"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") * factor
+    if "adj_close" in out.columns:
+        out["adj_close"] = pd.to_numeric(out["adj_close"], errors="coerce")
+
+    max_delta = float((factor - 1.0).abs().max()) if not factor.empty else 0.0
+    return out, {
+        "applied": True,
+        "coverage_pct": round(coverage * 100.0, 1),
+        "valid_rows": valid_rows,
+        "total_rows": total_rows,
+        "factor_delta_max": round(max_delta, 6),
+    }
+
+
 def _to_rgba(color: str, alpha: float) -> str:
     text = str(color).strip()
     a = min(max(float(alpha), 0.0), 1.0)
@@ -766,6 +817,34 @@ def _hovertemplate_with_code(
         f"{value_label}=%{{y:{y_format}}}"
         "<extra></extra>"
     )
+
+
+def _benchmark_line_style(
+    palette: dict[str, object],
+    *,
+    width: float = 2.0,
+    dash: Optional[str] = None,
+) -> dict[str, object]:
+    return {
+        "color": str(palette["benchmark"]),
+        "width": float(width),
+        "dash": str(dash or palette.get("benchmark_dash", "dash")),
+    }
+
+
+def _plot_hoverlabel_style(palette: dict[str, object]) -> dict[str, object]:
+    is_dark = bool(palette.get("is_dark", False))
+    if is_dark:
+        return {
+            "bgcolor": "rgba(17,24,39,0.95)",
+            "bordercolor": "rgba(148,163,184,0.38)",
+            "font": {"color": "#E5E7EB"},
+        }
+    return {
+        "bgcolor": "rgba(255,255,255,0.94)",
+        "bordercolor": "rgba(15,23,42,0.16)",
+        "font": {"color": "#0F172A"},
+    }
 
 
 HEATMAP_EXCESS_COLORSCALE: list[list[object]] = [
@@ -871,12 +950,18 @@ _BASE_LIGHT_PALETTE: dict[str, object] = {
     "sma20": "#0284c7",
     "sma60": "#d97706",
     "vwap": "#059669",
+    "rsi_line": "#0284c7",
+    "kd_k": "#2563eb",
+    "kd_d": "#ea580c",
+    "macd_line": "#16a34a",
+    "macd_signal": "#d97706",
     "bb_upper": "rgba(220,38,38,0.28)",
     "bb_lower": "rgba(37,99,235,0.24)",
     "volume_up": "rgba(22,163,74,0.35)",
     "volume_down": "rgba(220,38,38,0.28)",
     "equity": "#16a34a",
-    "benchmark": "#7c3aed",
+    "benchmark": "#64748b",
+    "benchmark_dash": "dash",
     "buy_hold": "#d97706",
     "asset_palette": ["#0284c7", "#be123c", "#0f766e", "#7c2d12", "#4f46e5", "#0369a1"],
     "signal_buy": "#0284c7",
@@ -886,6 +971,11 @@ _BASE_LIGHT_PALETTE: dict[str, object] = {
     "marker_edge": "#0f172a",
     "trade_path": "rgba(71,85,105,0.45)",
     "fill_link": "rgba(100,116,139,0.30)",
+    "tag_bg": "#ffffff",
+    "tag_border": "rgba(15,23,42,0.30)",
+    "tag_text": "#0F172A",
+    "tag_bg_hover": "#ffffff",
+    "card_shadow": "0 4px 16px rgba(15, 23, 42, 0.04)",
 }
 
 _THEME_PALETTES: dict[str, dict[str, object]] = {
@@ -911,12 +1001,66 @@ _THEME_PALETTES: dict[str, dict[str, object]] = {
         sma20="#3B82F6",
         sma60="#D97706",
         vwap="#0F766E",
-        benchmark="#6D28D9",
+        rsi_line="#2563EB",
+        kd_k="#1D4ED8",
+        kd_d="#C2410C",
+        macd_line="#059669",
+        macd_signal="#B45309",
+        benchmark="#6B7280",
         asset_palette=["#4B5563", "#0EA5E9", "#10B981", "#F59E0B", "#6366F1", "#E11D48"],
         signal_buy="#2563EB",
         signal_sell="#D97706",
         fill_buy="#15803D",
         fill_sell="#DC2626",
+    ),
+    "深色專業（Data Dark）": _palette_with(
+        _BASE_LIGHT_PALETTE,
+        is_dark=True,
+        background="#0F1419",
+        sidebar_bg="#121922",
+        text_color="#E7E9EA",
+        text_muted="#8B98A5",
+        card_bg="rgba(30, 39, 50, 0.86)",
+        card_border="rgba(56, 68, 82, 0.62)",
+        control_bg="rgba(22, 30, 40, 0.90)",
+        control_border="rgba(56, 68, 82, 0.82)",
+        tab_bg="rgba(30, 39, 50, 0.78)",
+        tab_text="#E7E9EA",
+        accent="#F59E0B",
+        plot_template="plotly_dark",
+        paper_bg="#0F1419",
+        plot_bg="#111821",
+        grid="rgba(139,152,165,0.22)",
+        price_up="#5FA783",
+        price_down="#D78C95",
+        sma20="#38BDF8",
+        sma60="#F59E0B",
+        vwap="#34D399",
+        rsi_line="#60A5FA",
+        kd_k="#7DD3FC",
+        kd_d="#FBBF24",
+        macd_line="#4ADE80",
+        macd_signal="#FB923C",
+        bb_upper="rgba(248,113,113,0.34)",
+        bb_lower="rgba(96,165,250,0.30)",
+        volume_up="rgba(52,211,153,0.34)",
+        volume_down="rgba(248,113,113,0.30)",
+        equity="#22C55E",
+        benchmark="#8B98A5",
+        buy_hold="#F59E0B",
+        asset_palette=["#38BDF8", "#34D399", "#F59E0B", "#A78BFA", "#F87171", "#60A5FA"],
+        signal_buy="#60A5FA",
+        signal_sell="#FB923C",
+        fill_buy="#22C55E",
+        fill_sell="#F87171",
+        marker_edge="#E5E7EB",
+        trade_path="rgba(148,163,184,0.42)",
+        fill_link="rgba(148,163,184,0.34)",
+        tag_bg="rgba(30,39,50,0.92)",
+        tag_border="rgba(139,152,165,0.46)",
+        tag_text="#E7E9EA",
+        tag_bg_hover="rgba(38,49,63,0.96)",
+        card_shadow="0 8px 24px rgba(0, 0, 0, 0.24)",
     ),
 }
 
@@ -956,6 +1100,13 @@ def _inject_ui_styles():
     tab_bg = str(palette["tab_bg"])
     tab_text = str(palette["tab_text"])
     accent = str(palette["accent"])
+    tag_bg = str(palette.get("tag_bg", "#ffffff"))
+    tag_border = str(palette.get("tag_border", "rgba(15, 23, 42, 0.30)"))
+    tag_text = str(palette.get("tag_text", "#0F172A"))
+    tag_bg_hover = str(palette.get("tag_bg_hover", tag_bg))
+    card_shadow = str(palette.get("card_shadow", "0 4px 16px rgba(15, 23, 42, 0.04)"))
+    active_border = _to_rgba(accent, 0.55)
+    active_shadow = f"0 0 0 1px {_to_rgba(accent, 0.22)}"
 
     st.markdown(
         f"""
@@ -1060,19 +1211,18 @@ def _inject_ui_styles():
             color: {text_color} !important;
         }}
         [data-testid="stMultiSelect"] [data-baseweb="tag"] {{
-            background: #ffffff !important;
-            border: 1px solid rgba(15, 23, 42, 0.30) !important;
+            background: {tag_bg} !important;
+            border: 1px solid {tag_border} !important;
             border-radius: 9px !important;
-            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55) !important;
         }}
         [data-testid="stMultiSelect"] [data-baseweb="tag"] *,
         [data-testid="stMultiSelect"] [data-baseweb="tag"] span {{
-            color: #0F172A !important;
-            fill: #0F172A !important;
+            color: {tag_text} !important;
+            fill: {tag_text} !important;
         }}
         [data-testid="stMultiSelect"] [data-baseweb="tag"]:hover {{
-            border-color: rgba(15, 23, 42, 0.48) !important;
-            background: #ffffff !important;
+            border-color: {tag_border} !important;
+            background: {tag_bg_hover} !important;
         }}
         div[data-testid="stMetric"] {{
             background: {card_bg};
@@ -1084,7 +1234,7 @@ def _inject_ui_styles():
             background: {card_bg};
             border: 1px solid {card_border};
             border-radius: 14px;
-            box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+            box-shadow: {card_shadow};
         }}
         .page-nav-card {{
             border: 1px solid {card_border};
@@ -1095,8 +1245,8 @@ def _inject_ui_styles():
             min-height: 78px;
         }}
         .page-nav-card.active {{
-            border-color: rgba(37,99,235,0.52);
-            box-shadow: 0 0 0 1px rgba(37,99,235,0.18);
+            border-color: {active_border};
+            box-shadow: {active_shadow};
         }}
         .page-card-title {{
             font-size: 0.90rem;
@@ -2090,7 +2240,7 @@ def _render_top10_etf_2026_ytd_view():
                     y=benchmark_equity.values,
                     mode="lines",
                     name=f"Benchmark Equity（{benchmark_label}）",
-                    line=dict(color=str(palette["benchmark"]), width=2.1),
+                    line=_benchmark_line_style(palette, width=2.0),
                     hovertemplate=_hovertemplate_with_code(benchmark_label, value_label="Equity", y_format=",.0f"),
                 )
             )
@@ -2173,7 +2323,6 @@ def _render_top10_etf_2026_ytd_view():
         if isinstance(used_symbols, list) and isinstance(skipped_symbols, list):
             st.caption(f"可用ETF：{len(used_symbols)} 檔 | 資料不足未納入：{len(skipped_symbols)} 檔")
 
-
 def _render_active_etf_2026_ytd_view():
     title_col, refresh_col = st.columns([6, 1])
     with title_col:
@@ -2185,6 +2334,7 @@ def _render_active_etf_2026_ytd_view():
         _build_tw_active_etf_ytd_between.clear()
         _load_tw_market_return_between.clear()
         st.session_state.pop("active_etf_ytd_compare_payload", None)
+        st.session_state.pop("active_etf_2025_compare_payload", None)
         st.rerun()
 
     start_target = "20260101"
@@ -2310,339 +2460,381 @@ def _render_active_etf_2026_ytd_view():
         if str(row.get("代碼", "")).strip()
     }
 
-    with st.container(border=True):
-        _render_card_section_header("Benchmark 對照卡", "策略曲線、基準曲線與每檔 Buy & Hold 同圖比較。")
-        st.caption(
-            (
-                f"差異說明：上方表格的 `YTD報酬(%)` 採各檔在區間內首個可交易日起算；"
-                f"本對照卡曲線與下方 `Total Return %` 會以共同比較區間 `{start_used} -> {end_used}` 對齊，"
-                "因此同一檔數值可能略有差異。"
+    def _render_active_etf_benchmark_card(
+        *,
+        card_title: str,
+        period_caption: str,
+        date_start: str,
+        date_end: str,
+        key_prefix: str,
+        spinner_text: str,
+    ):
+        with st.container(border=True):
+            _render_card_section_header(card_title, "策略曲線、基準曲線與每檔 Buy & Hold 同圖比較。")
+            st.caption(period_caption)
+            st.markdown(
+                (
+                    "說明："
+                    "<span title='把可用主動式ETF平均分配資金後，從區間起點買進並持有到期末，不做換股或調倉。'>"
+                    "<code>Strategy Equity（主動式ETF等權）</code>（滑鼠移入查看）"
+                    "</span>"
+                ),
+                unsafe_allow_html=True,
             )
-        )
-        st.markdown(
-            (
-                "說明："
-                "<span title='把可用主動式ETF平均分配資金後，從區間起點買進並持有到期末，不做換股或調倉。'>"
-                "<code>Strategy Equity（主動式ETF等權）</code>（滑鼠移入查看）"
-                "</span>"
-            ),
-            unsafe_allow_html=True,
-        )
-        c1, c2, c3 = st.columns([2, 2, 1])
-        benchmark_choice = c1.selectbox(
-            "Benchmark",
-            options=["twii", "0050", "006208"],
-            index=0,
-            format_func=lambda x: {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(x, x),
-            key="active_etf_ytd_benchmark",
-        )
-        sync_before_run = c2.checkbox(
-            "執行前同步最新日K（較慢）",
-            value=False,
-            key="active_etf_ytd_sync_before_run",
-        )
-        force_refresh = c3.button("重新計算", use_container_width=True, key="active_etf_ytd_refresh")
+            c1, c2, c3 = st.columns([2, 2, 1])
+            benchmark_choice = c1.selectbox(
+                "Benchmark",
+                options=["twii", "0050", "006208"],
+                index=0,
+                format_func=lambda x: {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(x, x),
+                key=f"{key_prefix}_benchmark",
+            )
+            sync_before_run = c2.checkbox(
+                "執行前同步最新日K（較慢）",
+                value=False,
+                key=f"{key_prefix}_sync_before_run",
+            )
+            force_refresh = c3.button("重新計算", use_container_width=True, key=f"{key_prefix}_refresh")
 
-        start_dt = datetime.combine(datetime.strptime(start_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
-        end_dt = datetime.combine(datetime.strptime(end_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
-        run_key = f"active_etf_ytd:{start_used}:{end_used}:{benchmark_choice}:{sync_before_run}:{','.join(symbols)}"
-        payload_key = "active_etf_ytd_compare_payload"
-        payload = st.session_state.get(payload_key)
-        if not isinstance(payload, dict):
-            payload = {}
+            try:
+                start_dt = datetime.combine(datetime.strptime(date_start, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
+                end_dt = datetime.combine(datetime.strptime(date_end, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
+            except ValueError:
+                st.warning(f"{card_title} 日期格式不正確，無法建立對照圖。")
+                return
+            if end_dt <= start_dt:
+                st.warning(f"{card_title} 日期區間不足，無法建立對照圖。")
+                return
 
-        should_recompute = force_refresh or payload.get("run_key") != run_key
-        if should_recompute:
-            store = _history_store()
-            symbol_sync_issues: list[str] = []
-            benchmark_sync_issues: list[str] = []
+            run_key = f"{key_prefix}:{date_start}:{date_end}:{benchmark_choice}:{sync_before_run}:{','.join(symbols)}"
+            payload_key = f"{key_prefix}_compare_payload"
+            payload = st.session_state.get(payload_key)
+            if not isinstance(payload, dict):
+                payload = {}
 
-            def _benchmark_candidates_tw(choice: str) -> list[str]:
-                mapping = {
-                    "twii": ["^TWII"],
-                    "0050": ["0050"],
-                    "006208": ["006208"],
-                }
-                return mapping.get(str(choice or "").strip().lower(), ["^TWII"])
+            should_recompute = force_refresh or payload.get("run_key") != run_key
+            if should_recompute:
+                store = _history_store()
+                symbol_sync_issues: list[str] = []
+                benchmark_sync_issues: list[str] = []
 
-            with st.spinner("計算主動式 ETF Benchmark 對照中..."):
-                if sync_before_run:
-                    _, symbol_sync_issues = _sync_symbols_history(
-                        store,
-                        market="TW",
-                        symbols=symbols,
-                        start=start_dt,
-                        end=end_dt,
-                        parallel=True,
-                    )
-
-                bars_by_symbol: dict[str, pd.DataFrame] = {}
-                skipped_symbols: list[str] = []
-                for symbol in symbols:
-                    bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
-                    if len(bars) < 2 and not sync_before_run:
-                        report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-                        if report.error:
-                            symbol_sync_issues.append(f"{symbol}: {report.error}")
-                        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
-                    if len(bars) < 2:
-                        skipped_symbols.append(symbol)
-                        continue
-                    bars, _ = apply_split_adjustment(
-                        bars=bars,
-                        symbol=symbol,
-                        market="TW",
-                        use_known=True,
-                        use_auto_detect=True,
-                    )
-                    if len(bars) < 2:
-                        skipped_symbols.append(symbol)
-                        continue
-                    bars_by_symbol[symbol] = bars
-
-                if not bars_by_symbol:
-                    payload = {
-                        "run_key": run_key,
-                        "error": "可用主動式 ETF 歷史資料不足，無法建立對照圖。",
-                        "symbol_sync_issues": symbol_sync_issues,
-                        "benchmark_sync_issues": benchmark_sync_issues,
+                def _benchmark_candidates_tw(choice: str) -> list[str]:
+                    mapping = {
+                        "twii": ["^TWII"],
+                        "0050": ["0050"],
+                        "006208": ["006208"],
                     }
-                    st.session_state[payload_key] = payload
-                else:
-                    target_index = pd.DatetimeIndex([])
-                    for bars in bars_by_symbol.values():
-                        target_index = target_index.union(pd.DatetimeIndex(bars.index))
-                    target_index = target_index.sort_values()
+                    return mapping.get(str(choice or "").strip().lower(), ["^TWII"])
 
-                    initial_capital = 1_000_000.0
-                    strategy_equity = build_buy_hold_equity(
-                        bars_by_symbol=bars_by_symbol,
-                        target_index=target_index,
-                        initial_capital=initial_capital,
-                    ).dropna()
+                with st.spinner(spinner_text):
+                    if sync_before_run:
+                        _, symbol_sync_issues = _sync_symbols_history(
+                            store,
+                            market="TW",
+                            symbols=symbols,
+                            start=start_dt,
+                            end=end_dt,
+                            parallel=True,
+                        )
 
-                    per_symbol_equity: dict[str, pd.Series] = {}
-                    for symbol, bars in bars_by_symbol.items():
-                        eq_sym = build_buy_hold_equity(
-                            bars_by_symbol={symbol: bars},
-                            target_index=target_index,
-                            initial_capital=initial_capital,
-                        ).dropna()
-                        if not eq_sym.empty:
-                            per_symbol_equity[symbol] = eq_sym
-
-                    benchmark_symbol_used = ""
-                    benchmark_equity = pd.Series(dtype=float)
-                    for candidate in _benchmark_candidates_tw(benchmark_choice):
-                        if sync_before_run:
-                            report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
+                    bars_by_symbol: dict[str, pd.DataFrame] = {}
+                    skipped_symbols: list[str] = []
+                    for symbol in symbols:
+                        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+                        if len(bars) < 2 and not sync_before_run:
+                            report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
                             if report.error:
-                                benchmark_sync_issues.append(f"{candidate}: {report.error}")
-                        bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt))
-                        if bench_bars.empty and not sync_before_run:
-                            report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                            if report.error:
-                                benchmark_sync_issues.append(f"{candidate}: {report.error}")
-                            bench_bars = _normalize_ohlcv_frame(
-                                store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                            )
-                        if bench_bars.empty:
+                                symbol_sync_issues.append(f"{symbol}: {report.error}")
+                            bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+                        if len(bars) < 2:
+                            skipped_symbols.append(symbol)
                             continue
-                        bench_bars, _ = apply_split_adjustment(
-                            bars=bench_bars,
-                            symbol=candidate,
+                        bars, _ = apply_split_adjustment(
+                            bars=bars,
+                            symbol=symbol,
                             market="TW",
                             use_known=True,
                             use_auto_detect=True,
                         )
-                        if bench_bars.empty or "close" not in bench_bars.columns:
+                        if len(bars) < 2:
+                            skipped_symbols.append(symbol)
                             continue
-                        bench_close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
-                        if len(bench_close) < 2:
-                            continue
-                        aligned = bench_close.reindex(target_index).ffill()
-                        valid = aligned.dropna()
-                        if len(valid) < 2:
-                            continue
-                        base_val = float(valid.iloc[0])
-                        if not math.isfinite(base_val) or base_val <= 0:
-                            continue
-                        benchmark_equity = (aligned.loc[valid.index[0] :] / base_val) * initial_capital
-                        benchmark_equity = benchmark_equity.dropna()
-                        benchmark_symbol_used = candidate
-                        break
+                        bars_by_symbol[symbol] = bars
 
-                    common_index = pd.DatetimeIndex(strategy_equity.index)
-                    if not benchmark_equity.empty:
-                        common_index = common_index.intersection(pd.DatetimeIndex(benchmark_equity.index))
-                    common_index = common_index.sort_values()
-                    if len(common_index) < 2:
+                    if not bars_by_symbol:
                         payload = {
                             "run_key": run_key,
-                            "error": "Strategy 與 Benchmark 缺少足夠重疊交易日，無法建立對照圖。",
+                            "error": "可用主動式 ETF 歷史資料不足，無法建立對照圖。",
                             "symbol_sync_issues": symbol_sync_issues,
                             "benchmark_sync_issues": benchmark_sync_issues,
                         }
                         st.session_state[payload_key] = payload
                     else:
-                        strategy_plot = strategy_equity.reindex(common_index).ffill().dropna()
-                        benchmark_plot = benchmark_equity.reindex(common_index).ffill().dropna() if not benchmark_equity.empty else pd.Series(dtype=float)
-                        per_symbol_plot: dict[str, pd.Series] = {}
-                        for symbol, series in per_symbol_equity.items():
-                            aligned = series.reindex(common_index).ffill().dropna()
-                            if len(aligned) >= 2:
-                                per_symbol_plot[symbol] = aligned
+                        target_index = pd.DatetimeIndex([])
+                        for bars in bars_by_symbol.values():
+                            target_index = target_index.union(pd.DatetimeIndex(bars.index))
+                        target_index = target_index.sort_values()
 
-                        payload = {
-                            "run_key": run_key,
-                            "error": "",
-                            "benchmark_symbol": benchmark_symbol_used,
-                            "strategy_equity": strategy_plot,
-                            "benchmark_equity": benchmark_plot,
-                            "per_symbol_equity": per_symbol_plot,
-                            "used_symbols": sorted(list(bars_by_symbol.keys())),
-                            "skipped_symbols": sorted(skipped_symbols),
-                            "symbol_sync_issues": symbol_sync_issues,
-                            "benchmark_sync_issues": benchmark_sync_issues,
-                        }
-                        st.session_state[payload_key] = payload
+                        initial_capital = 1_000_000.0
+                        strategy_equity = build_buy_hold_equity(
+                            bars_by_symbol=bars_by_symbol,
+                            target_index=target_index,
+                            initial_capital=initial_capital,
+                        ).dropna()
 
-        payload = st.session_state.get(payload_key, {})
-        if not isinstance(payload, dict):
-            payload = {}
-        error_text = str(payload.get("error", "")).strip()
-        if error_text:
-            st.warning(error_text)
-            return
+                        per_symbol_equity: dict[str, pd.Series] = {}
+                        for symbol, bars in bars_by_symbol.items():
+                            eq_sym = build_buy_hold_equity(
+                                bars_by_symbol={symbol: bars},
+                                target_index=target_index,
+                                initial_capital=initial_capital,
+                            ).dropna()
+                            if not eq_sym.empty:
+                                per_symbol_equity[symbol] = eq_sym
 
-        symbol_sync_issues = payload.get("symbol_sync_issues", [])
-        if isinstance(symbol_sync_issues, list) and symbol_sync_issues:
-            preview = [" ".join(str(item).split()) for item in symbol_sync_issues[:3]]
-            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-            remain = len(symbol_sync_issues) - len(preview)
-            remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
-            st.warning(f"部分 ETF 同步失敗，已盡量使用本地可用資料：{preview_text}{remain_text}")
+                        benchmark_symbol_used = ""
+                        benchmark_equity = pd.Series(dtype=float)
+                        for candidate in _benchmark_candidates_tw(benchmark_choice):
+                            if sync_before_run:
+                                report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
+                                if report.error:
+                                    benchmark_sync_issues.append(f"{candidate}: {report.error}")
+                            bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt))
+                            if bench_bars.empty and not sync_before_run:
+                                report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
+                                if report.error:
+                                    benchmark_sync_issues.append(f"{candidate}: {report.error}")
+                                bench_bars = _normalize_ohlcv_frame(
+                                    store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt)
+                                )
+                            if bench_bars.empty:
+                                continue
+                            bench_bars, _ = apply_split_adjustment(
+                                bars=bench_bars,
+                                symbol=candidate,
+                                market="TW",
+                                use_known=True,
+                                use_auto_detect=True,
+                            )
+                            if bench_bars.empty or "close" not in bench_bars.columns:
+                                continue
+                            bench_close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
+                            if len(bench_close) < 2:
+                                continue
+                            aligned = bench_close.reindex(target_index).ffill()
+                            valid = aligned.dropna()
+                            if len(valid) < 2:
+                                continue
+                            base_val = float(valid.iloc[0])
+                            if not math.isfinite(base_val) or base_val <= 0:
+                                continue
+                            benchmark_equity = (aligned.loc[valid.index[0] :] / base_val) * initial_capital
+                            benchmark_equity = benchmark_equity.dropna()
+                            benchmark_symbol_used = candidate
+                            break
 
-        benchmark_sync_issues = payload.get("benchmark_sync_issues", [])
-        if isinstance(benchmark_sync_issues, list) and benchmark_sync_issues:
-            preview = [" ".join(str(item).split()) for item in benchmark_sync_issues[:2]]
-            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-            st.warning(f"Benchmark 同步有部分錯誤，已盡量使用本地可用資料：{preview_text}")
+                        common_index = pd.DatetimeIndex(strategy_equity.index)
+                        if not benchmark_equity.empty:
+                            common_index = common_index.intersection(pd.DatetimeIndex(benchmark_equity.index))
+                        common_index = common_index.sort_values()
+                        if len(common_index) < 2:
+                            payload = {
+                                "run_key": run_key,
+                                "error": "Strategy 與 Benchmark 缺少足夠重疊交易日，無法建立對照圖。",
+                                "symbol_sync_issues": symbol_sync_issues,
+                                "benchmark_sync_issues": benchmark_sync_issues,
+                            }
+                            st.session_state[payload_key] = payload
+                        else:
+                            strategy_plot = strategy_equity.reindex(common_index).ffill().dropna()
+                            benchmark_plot = (
+                                benchmark_equity.reindex(common_index).ffill().dropna() if not benchmark_equity.empty else pd.Series(dtype=float)
+                            )
+                            per_symbol_plot: dict[str, pd.Series] = {}
+                            for symbol, series in per_symbol_equity.items():
+                                aligned = series.reindex(common_index).ffill().dropna()
+                                if len(aligned) >= 2:
+                                    per_symbol_plot[symbol] = aligned
 
-        strategy_equity = payload.get("strategy_equity")
-        benchmark_equity = payload.get("benchmark_equity")
-        per_symbol_equity = payload.get("per_symbol_equity")
-        if not isinstance(strategy_equity, pd.Series) or strategy_equity.empty:
-            st.warning("目前無法建立策略曲線。")
-            return
-        if not isinstance(benchmark_equity, pd.Series):
-            benchmark_equity = pd.Series(dtype=float)
-        if not isinstance(per_symbol_equity, dict):
-            per_symbol_equity = {}
+                            payload = {
+                                "run_key": run_key,
+                                "error": "",
+                                "benchmark_symbol": benchmark_symbol_used,
+                                "strategy_equity": strategy_plot,
+                                "benchmark_equity": benchmark_plot,
+                                "per_symbol_equity": per_symbol_plot,
+                                "used_symbols": sorted(list(bars_by_symbol.keys())),
+                                "skipped_symbols": sorted(skipped_symbols),
+                                "symbol_sync_issues": symbol_sync_issues,
+                                "benchmark_sync_issues": benchmark_sync_issues,
+                            }
+                            st.session_state[payload_key] = payload
 
-        palette = _ui_palette()
-        symbol_styles = _build_symbol_line_styles(list(per_symbol_equity.keys()))
-        fig_cmp = go.Figure()
-        fig_cmp.add_trace(
-            go.Scatter(
-                x=strategy_equity.index,
-                y=strategy_equity.values,
-                mode="lines",
-                name="Strategy Equity（主動式ETF等權）",
-                line=dict(color=str(palette["equity"]), width=2.4),
-                hovertemplate=_hovertemplate_with_code("ACTIVE_EW", value_label="Equity", y_format=",.0f"),
-            )
-        )
-        if not benchmark_equity.empty:
-            benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+            payload = st.session_state.get(payload_key, {})
+            if not isinstance(payload, dict):
+                payload = {}
+            error_text = str(payload.get("error", "")).strip()
+            if error_text:
+                st.warning(error_text)
+                return
+
+            symbol_sync_issues = payload.get("symbol_sync_issues", [])
+            if isinstance(symbol_sync_issues, list) and symbol_sync_issues:
+                preview = [" ".join(str(item).split()) for item in symbol_sync_issues[:3]]
+                preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+                remain = len(symbol_sync_issues) - len(preview)
+                remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
+                st.warning(f"部分 ETF 同步失敗，已盡量使用本地可用資料：{preview_text}{remain_text}")
+
+            benchmark_sync_issues = payload.get("benchmark_sync_issues", [])
+            if isinstance(benchmark_sync_issues, list) and benchmark_sync_issues:
+                preview = [" ".join(str(item).split()) for item in benchmark_sync_issues[:2]]
+                preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+                st.warning(f"Benchmark 同步有部分錯誤，已盡量使用本地可用資料：{preview_text}")
+
+            strategy_equity = payload.get("strategy_equity")
+            benchmark_equity = payload.get("benchmark_equity")
+            per_symbol_equity = payload.get("per_symbol_equity")
+            if not isinstance(strategy_equity, pd.Series) or strategy_equity.empty:
+                st.warning("目前無法建立策略曲線。")
+                return
+            if not isinstance(benchmark_equity, pd.Series):
+                benchmark_equity = pd.Series(dtype=float)
+            if not isinstance(per_symbol_equity, dict):
+                per_symbol_equity = {}
+
+            palette = _ui_palette()
+            symbol_styles = _build_symbol_line_styles(list(per_symbol_equity.keys()))
+            fig_cmp = go.Figure()
             fig_cmp.add_trace(
                 go.Scatter(
-                    x=benchmark_equity.index,
-                    y=benchmark_equity.values,
+                    x=strategy_equity.index,
+                    y=strategy_equity.values,
                     mode="lines",
-                    name=f"Benchmark Equity（{benchmark_label}）",
-                    line=dict(color=str(palette["benchmark"]), width=2.1),
-                    hovertemplate=_hovertemplate_with_code(benchmark_label, value_label="Equity", y_format=",.0f"),
+                    name="Strategy Equity（主動式ETF等權）",
+                    line=dict(color=str(palette["equity"]), width=2.4),
+                    hovertemplate=_hovertemplate_with_code(f"{key_prefix.upper()}_EW", value_label="Equity", y_format=",.0f"),
                 )
             )
-
-        for symbol in sorted(per_symbol_equity.keys()):
-            series = per_symbol_equity[symbol]
-            if not isinstance(series, pd.Series) or len(series) < 2:
-                continue
-            style = symbol_styles.get(symbol, {"color": "#1f77b4", "dash": "solid"})
-            label_name = str(name_map.get(symbol, symbol)).strip()
-            trace_name = f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
-            fig_cmp.add_trace(
-                go.Scatter(
-                    x=series.index,
-                    y=series.values,
-                    mode="lines",
-                    name=trace_name,
-                    line=dict(color=str(style["color"]), width=1.8, dash=str(style["dash"])),
-                    hovertemplate=_hovertemplate_with_code(symbol, value_label="Equity", y_format=",.0f"),
+            if not benchmark_equity.empty:
+                benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+                fig_cmp.add_trace(
+                    go.Scatter(
+                        x=benchmark_equity.index,
+                        y=benchmark_equity.values,
+                        mode="lines",
+                        name=f"Benchmark Equity（{benchmark_label}）",
+                        line=_benchmark_line_style(palette, width=2.0),
+                        hovertemplate=_hovertemplate_with_code(benchmark_label, value_label="Equity", y_format=",.0f"),
+                    )
                 )
+
+            for symbol in sorted(per_symbol_equity.keys()):
+                series = per_symbol_equity[symbol]
+                if not isinstance(series, pd.Series) or len(series) < 2:
+                    continue
+                style = symbol_styles.get(symbol, {"color": "#1f77b4", "dash": "solid"})
+                label_name = str(name_map.get(symbol, symbol)).strip()
+                trace_name = (
+                    f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
+                )
+                fig_cmp.add_trace(
+                    go.Scatter(
+                        x=series.index,
+                        y=series.values,
+                        mode="lines",
+                        name=trace_name,
+                        line=dict(color=str(style["color"]), width=1.8, dash=str(style["dash"])),
+                        hovertemplate=_hovertemplate_with_code(symbol, value_label="Equity", y_format=",.0f"),
+                    )
+                )
+
+            fig_cmp.update_layout(
+                height=460,
+                margin=dict(l=10, r=10, t=30, b=10),
+                template=str(palette["plot_template"]),
+                paper_bgcolor=str(palette["paper_bg"]),
+                plot_bgcolor=str(palette["plot_bg"]),
+                font=dict(color=str(palette["text_color"])),
             )
+            fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
+            fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
+            st.plotly_chart(fig_cmp, use_container_width=True)
 
-        fig_cmp.update_layout(
-            height=460,
-            margin=dict(l=10, r=10, t=30, b=10),
-            template=str(palette["plot_template"]),
-            paper_bgcolor=str(palette["paper_bg"]),
-            plot_bgcolor=str(palette["plot_bg"]),
-            font=dict(color=str(palette["text_color"])),
-        )
-        fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
-        fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
-        st.plotly_chart(fig_cmp, use_container_width=True)
-
-        summary_rows: list[dict[str, object]] = []
-        strategy_perf = _series_metrics_basic(strategy_equity)
-        summary_rows.append(
-            {
-                "Series": "Strategy Equity（主動式ETF等權）",
-                "Total Return %": round(strategy_perf["total_return"] * 100.0, 2),
-                "CAGR %": round(strategy_perf["cagr"] * 100.0, 2),
-                "MDD %": round(strategy_perf["max_drawdown"] * 100.0, 2),
-                "Sharpe": round(strategy_perf["sharpe"], 2),
-            }
-        )
-        if not benchmark_equity.empty:
-            benchmark_perf = _series_metrics_basic(benchmark_equity)
-            benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+            summary_rows: list[dict[str, object]] = []
+            strategy_perf = _series_metrics_basic(strategy_equity)
             summary_rows.append(
                 {
-                    "Series": f"Benchmark Equity（{benchmark_label}）",
-                    "Total Return %": round(benchmark_perf["total_return"] * 100.0, 2),
-                    "CAGR %": round(benchmark_perf["cagr"] * 100.0, 2),
-                    "MDD %": round(benchmark_perf["max_drawdown"] * 100.0, 2),
-                    "Sharpe": round(benchmark_perf["sharpe"], 2),
+                    "Series": "Strategy Equity（主動式ETF等權）",
+                    "Total Return %": round(strategy_perf["total_return"] * 100.0, 2),
+                    "CAGR %": round(strategy_perf["cagr"] * 100.0, 2),
+                    "MDD %": round(strategy_perf["max_drawdown"] * 100.0, 2),
+                    "Sharpe": round(strategy_perf["sharpe"], 2),
                 }
             )
+            if not benchmark_equity.empty:
+                benchmark_perf = _series_metrics_basic(benchmark_equity)
+                benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+                summary_rows.append(
+                    {
+                        "Series": f"Benchmark Equity（{benchmark_label}）",
+                        "Total Return %": round(benchmark_perf["total_return"] * 100.0, 2),
+                        "CAGR %": round(benchmark_perf["cagr"] * 100.0, 2),
+                        "MDD %": round(benchmark_perf["max_drawdown"] * 100.0, 2),
+                        "Sharpe": round(benchmark_perf["sharpe"], 2),
+                    }
+                )
 
-        for symbol in sorted(per_symbol_equity.keys()):
-            series = per_symbol_equity[symbol]
-            if not isinstance(series, pd.Series) or len(series) < 2:
-                continue
-            perf = _series_metrics_basic(series)
-            label_name = str(name_map.get(symbol, symbol)).strip()
-            series_name = f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
-            summary_rows.append(
-                {
-                    "Series": series_name,
-                    "Total Return %": round(perf["total_return"] * 100.0, 2),
-                    "CAGR %": round(perf["cagr"] * 100.0, 2),
-                    "MDD %": round(perf["max_drawdown"] * 100.0, 2),
-                    "Sharpe": round(perf["sharpe"], 2),
-                }
-            )
+            for symbol in sorted(per_symbol_equity.keys()):
+                series = per_symbol_equity[symbol]
+                if not isinstance(series, pd.Series) or len(series) < 2:
+                    continue
+                perf = _series_metrics_basic(series)
+                label_name = str(name_map.get(symbol, symbol)).strip()
+                series_name = (
+                    f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
+                )
+                summary_rows.append(
+                    {
+                        "Series": series_name,
+                        "Total Return %": round(perf["total_return"] * 100.0, 2),
+                        "CAGR %": round(perf["cagr"] * 100.0, 2),
+                        "MDD %": round(perf["max_drawdown"] * 100.0, 2),
+                        "Sharpe": round(perf["sharpe"], 2),
+                    }
+                )
 
-        if summary_rows:
-            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-        used_symbols = payload.get("used_symbols", [])
-        skipped_symbols = payload.get("skipped_symbols", [])
-        if isinstance(used_symbols, list) and isinstance(skipped_symbols, list):
-            st.caption(f"可用ETF：{len(used_symbols)} 檔 | 資料不足未納入：{len(skipped_symbols)} 檔")
+            if summary_rows:
+                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+            used_symbols = payload.get("used_symbols", [])
+            skipped_symbols = payload.get("skipped_symbols", [])
+            if isinstance(used_symbols, list) and isinstance(skipped_symbols, list):
+                st.caption(f"可用ETF：{len(used_symbols)} 檔 | 資料不足未納入：{len(skipped_symbols)} 檔")
+
+    _render_active_etf_benchmark_card(
+        card_title="Benchmark 對照卡",
+        period_caption=(
+            f"差異說明：上方表格的 `YTD報酬(%)` 採各檔在區間內首個可交易日起算；"
+            f"本對照卡曲線與下方 `Total Return %` 會以共同比較區間 `{start_used} -> {end_used}` 對齊，"
+            "因此同一檔數值可能略有差異。"
+        ),
+        date_start=start_used,
+        date_end=end_used,
+        key_prefix="active_etf_ytd",
+        spinner_text="計算主動式 ETF Benchmark 對照中...",
+    )
+    _render_active_etf_benchmark_card(
+        card_title="2025 全年 Benchmark 對照卡",
+        period_caption=(
+            f"差異說明：上方表格的 `2025績效(%)` 採各檔在 2025 區間首個可交易日起算；"
+            f"本對照卡曲線與下方 `Total Return %` 會以共同比較區間 `{hist_2025_start_used} -> {hist_2025_end_used}` 對齊，"
+            "因此同一檔數值可能略有差異。"
+        ),
+        date_start=hist_2025_start_used,
+        date_end=hist_2025_end_used,
+        key_prefix="active_etf_2025",
+        spinner_text="計算主動式 ETF 2025 Benchmark 對照中...",
+    )
 
 
 def _render_quality_bar(ctx, refresh_sec: int):
@@ -2768,6 +2960,196 @@ def _render_live_chart(ind: pd.DataFrame):
         font=dict(color=str(palette["text_color"])),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_indicator_panels(
+    ind: pd.DataFrame,
+    *,
+    chart_key: str,
+    height: int = 420,
+    x_range: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None,
+):
+    if not isinstance(ind, pd.DataFrame) or ind.empty or "close" not in ind.columns:
+        st.caption("指標副圖：資料不足。")
+        return
+
+    frame = ind.copy().sort_index()
+    for col in [
+        "close",
+        "bb_upper",
+        "bb_mid",
+        "bb_lower",
+        "sma_20",
+        "rsi_14",
+        "stoch_k",
+        "stoch_d",
+        "macd",
+        "macd_signal",
+        "macd_hist",
+    ]:
+        if col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+
+    palette = _ui_palette()
+    rsi_color = str(palette.get("rsi_line", palette["sma20"]))
+    kd_k_color = str(palette.get("kd_k", palette["signal_buy"]))
+    kd_d_color = str(palette.get("kd_d", palette["signal_sell"]))
+    macd_line_color = str(palette.get("macd_line", palette["equity"]))
+    macd_signal_color = str(palette.get("macd_signal", palette["buy_hold"]))
+    panel_height = max(280, min(int(height), 520))
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.36, 0.18, 0.18, 0.28],
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=frame.index,
+            y=frame["close"],
+            mode="lines",
+            name="Close",
+            line=dict(color=str(palette["text_muted"]), width=1.35),
+        ),
+        row=1,
+        col=1,
+    )
+    bb_mid_col = "bb_mid" if "bb_mid" in frame.columns else ("sma_20" if "sma_20" in frame.columns else "")
+    if bb_mid_col:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame[bb_mid_col],
+                mode="lines",
+                name="BB中軌",
+                line=dict(color=str(palette["sma20"]), width=1.0),
+            ),
+            row=1,
+            col=1,
+        )
+    if "bb_upper" in frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["bb_upper"],
+                mode="lines",
+                name="BB上軌",
+                line=dict(color=str(palette["bb_upper"]), width=1.0),
+            ),
+            row=1,
+            col=1,
+        )
+    if "bb_lower" in frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["bb_lower"],
+                mode="lines",
+                name="BB下軌",
+                line=dict(color=str(palette["bb_lower"]), width=1.0),
+            ),
+            row=1,
+            col=1,
+        )
+
+    if "rsi_14" in frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["rsi_14"],
+                mode="lines",
+                name="RSI14",
+                line=dict(color=rsi_color, width=1.2),
+            ),
+            row=2,
+            col=1,
+        )
+    fig.add_hline(y=70, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=2, col=1)
+    fig.add_hline(y=30, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=2, col=1)
+    fig.update_yaxes(range=[0, 100], row=2, col=1)
+
+    if "stoch_k" in frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["stoch_k"],
+                mode="lines",
+                name="KD-K",
+                line=dict(color=kd_k_color, width=1.2),
+            ),
+            row=3,
+            col=1,
+        )
+    if "stoch_d" in frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["stoch_d"],
+                mode="lines",
+                name="KD-D",
+                line=dict(color=kd_d_color, width=1.2),
+            ),
+            row=3,
+            col=1,
+        )
+    fig.add_hline(y=80, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=3, col=1)
+    fig.add_hline(y=20, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=3, col=1)
+    fig.update_yaxes(range=[0, 100], row=3, col=1)
+
+    if "macd_hist" in frame.columns:
+        hist_vals = pd.to_numeric(frame["macd_hist"], errors="coerce").fillna(0.0)
+        hist_colors = np.where(hist_vals >= 0, str(palette["volume_up"]), str(palette["volume_down"]))
+        fig.add_trace(
+            go.Bar(x=frame.index, y=hist_vals.values, name="MACD Hist", marker_color=hist_colors),
+            row=4,
+            col=1,
+        )
+    if "macd" in frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["macd"],
+                mode="lines",
+                name="MACD",
+                line=dict(color=macd_line_color, width=1.2),
+            ),
+            row=4,
+            col=1,
+        )
+    if "macd_signal" in frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["macd_signal"],
+                mode="lines",
+                name="MACD Signal",
+                line=dict(color=macd_signal_color, width=1.1),
+            ),
+            row=4,
+            col=1,
+        )
+    fig.add_hline(y=0, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=4, col=1)
+
+    if x_range is not None:
+        x0, x1 = x_range
+        for row in (1, 2, 3, 4):
+            fig.update_xaxes(range=[x0, x1], row=row, col=1)
+
+    fig.update_xaxes(gridcolor=str(palette["grid"]))
+    fig.update_yaxes(gridcolor=str(palette["grid"]))
+    fig.update_layout(
+        height=panel_height,
+        margin=dict(l=10, r=10, t=18, b=8),
+        template=str(palette["plot_template"]),
+        paper_bgcolor=str(palette["paper_bg"]),
+        plot_bgcolor=str(palette["plot_bg"]),
+        font=dict(color=str(palette["text_color"])),
+        legend_orientation="h",
+        legend_y=1.02,
+    )
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 
 def _render_live_view():
@@ -2970,6 +3352,27 @@ def _render_live_view():
             with st.container(border=True):
                 _render_card_section_header("即時趨勢卡", "主圖使用分K；下方補上日K長期視角。")
                 _render_live_chart(ind)
+                live_symbol_key = (stock_id if market == "台股(TWSE)" else (us_symbol or quote.symbol or "US")).strip().upper()
+                live_indicator_toggle_key = f"live_indicator_panel:{market}:{live_symbol_key}"
+                if live_indicator_toggle_key not in st.session_state:
+                    st.session_state[live_indicator_toggle_key] = True
+                st.checkbox(
+                    "顯示技術指標副圖（RSI / MACD / 布林 / KD）",
+                    key=live_indicator_toggle_key,
+                )
+                live_indicator_compact_key = f"live_indicator_compact:{market}:{live_symbol_key}"
+                if live_indicator_compact_key not in st.session_state:
+                    st.session_state[live_indicator_compact_key] = True
+                st.checkbox(
+                    "緊湊指標副圖（筆電建議）",
+                    key=live_indicator_compact_key,
+                )
+                if st.session_state.get(live_indicator_toggle_key):
+                    _render_indicator_panels(
+                        ind,
+                        chart_key=f"live_indicator_chart:{market}:{live_symbol_key}",
+                        height=340 if st.session_state.get(live_indicator_compact_key) else 430,
+                    )
                 if not daily_long.empty:
                     st.markdown("#### 長期視角（Daily）")
                     if daily_split_events:
@@ -3077,6 +3480,331 @@ def _metrics_to_rows(metrics) -> list[tuple[str, str]]:
     ]
 
 
+def _cache_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return float(default)
+        out = float(value)
+        if math.isnan(out):
+            return float(default)
+        return out
+    except Exception:
+        return float(default)
+
+
+def _cache_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _to_utc_timestamp(value: object) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _frame_to_split_payload(df: pd.DataFrame) -> dict[str, object]:
+    if not isinstance(df, pd.DataFrame):
+        return {}
+    try:
+        payload = json.loads(df.to_json(orient="split", date_format="iso"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _series_to_split_payload(series: pd.Series) -> dict[str, object]:
+    if not isinstance(series, pd.Series):
+        return {}
+    try:
+        payload = json.loads(series.to_json(orient="split", date_format="iso"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _frame_from_split_payload(payload: object, *, default_columns: Optional[list[str]] = None) -> pd.DataFrame:
+    defaults = default_columns or []
+    if not isinstance(payload, dict) or not payload:
+        return pd.DataFrame(columns=defaults)
+    try:
+        frame = pd.read_json(StringIO(json.dumps(payload, ensure_ascii=False)), orient="split")
+        idx = pd.to_datetime(frame.index, utc=True, errors="coerce")
+        if len(idx) and not idx.isna().all():
+            frame.index = idx
+        return frame
+    except Exception:
+        return pd.DataFrame(columns=defaults)
+
+
+def _series_from_split_payload(payload: object) -> pd.Series:
+    if not isinstance(payload, dict) or not payload:
+        return pd.Series(dtype=float)
+    try:
+        series = pd.read_json(
+            StringIO(json.dumps(payload, ensure_ascii=False)),
+            orient="split",
+            typ="series",
+        )
+        idx = pd.to_datetime(series.index, utc=True, errors="coerce")
+        if len(idx) and not idx.isna().all():
+            series.index = idx
+        return series
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _serialize_backtest_metrics(metrics: BacktestMetrics) -> dict[str, object]:
+    return {
+        "total_return": _cache_float(getattr(metrics, "total_return", 0.0)),
+        "cagr": _cache_float(getattr(metrics, "cagr", 0.0)),
+        "max_drawdown": _cache_float(getattr(metrics, "max_drawdown", 0.0)),
+        "sharpe": _cache_float(getattr(metrics, "sharpe", 0.0)),
+        "win_rate": _cache_float(getattr(metrics, "win_rate", 0.0)),
+        "avg_win": _cache_float(getattr(metrics, "avg_win", 0.0)),
+        "avg_loss": _cache_float(getattr(metrics, "avg_loss", 0.0)),
+        "trades": _cache_int(getattr(metrics, "trades", 0)),
+    }
+
+
+def _deserialize_backtest_metrics(payload: object) -> BacktestMetrics:
+    data = payload if isinstance(payload, dict) else {}
+    return BacktestMetrics(
+        total_return=_cache_float(data.get("total_return")),
+        cagr=_cache_float(data.get("cagr")),
+        max_drawdown=_cache_float(data.get("max_drawdown")),
+        sharpe=_cache_float(data.get("sharpe")),
+        win_rate=_cache_float(data.get("win_rate")),
+        avg_win=_cache_float(data.get("avg_win")),
+        avg_loss=_cache_float(data.get("avg_loss")),
+        trades=_cache_int(data.get("trades")),
+    )
+
+
+def _serialize_trade(trade: Trade) -> dict[str, object]:
+    return {
+        "entry_date": pd.Timestamp(trade.entry_date).isoformat(),
+        "entry_price": _cache_float(trade.entry_price),
+        "exit_date": pd.Timestamp(trade.exit_date).isoformat(),
+        "exit_price": _cache_float(trade.exit_price),
+        "qty": _cache_float(trade.qty),
+        "fee": _cache_float(trade.fee),
+        "tax": _cache_float(trade.tax),
+        "slippage": _cache_float(trade.slippage),
+        "pnl": _cache_float(trade.pnl),
+        "pnl_pct": _cache_float(trade.pnl_pct),
+    }
+
+
+def _deserialize_trade(payload: object) -> Optional[Trade]:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return Trade(
+            entry_date=_to_utc_timestamp(payload.get("entry_date")),
+            entry_price=_cache_float(payload.get("entry_price")),
+            exit_date=_to_utc_timestamp(payload.get("exit_date")),
+            exit_price=_cache_float(payload.get("exit_price")),
+            qty=_cache_float(payload.get("qty")),
+            fee=_cache_float(payload.get("fee")),
+            tax=_cache_float(payload.get("tax")),
+            slippage=_cache_float(payload.get("slippage")),
+            pnl=_cache_float(payload.get("pnl")),
+            pnl_pct=_cache_float(payload.get("pnl_pct")),
+        )
+    except Exception:
+        return None
+
+
+def _serialize_single_backtest_result(result: BacktestResult) -> dict[str, object]:
+    return {
+        "kind": "single",
+        "equity_curve": _frame_to_split_payload(result.equity_curve),
+        "trades": [_serialize_trade(t) for t in (result.trades or [])],
+        "metrics": _serialize_backtest_metrics(result.metrics),
+        "drawdown_series": _series_to_split_payload(result.drawdown_series),
+        "yearly_returns": {str(k): _cache_float(v) for k, v in (result.yearly_returns or {}).items()},
+        "signals": _series_to_split_payload(result.signals),
+    }
+
+
+def _deserialize_single_backtest_result(payload: object) -> Optional[BacktestResult]:
+    data = payload if isinstance(payload, dict) else {}
+    if not data:
+        return None
+    trades: list[Trade] = []
+    for item in data.get("trades", []) if isinstance(data.get("trades"), list) else []:
+        trade = _deserialize_trade(item)
+        if trade is not None:
+            trades.append(trade)
+    yearly_raw = data.get("yearly_returns", {})
+    yearly_returns = {}
+    if isinstance(yearly_raw, dict):
+        yearly_returns = {str(k): _cache_float(v) for k, v in yearly_raw.items()}
+    return BacktestResult(
+        equity_curve=_frame_from_split_payload(data.get("equity_curve"), default_columns=["equity"]),
+        trades=trades,
+        metrics=_deserialize_backtest_metrics(data.get("metrics")),
+        drawdown_series=_series_from_split_payload(data.get("drawdown_series")),
+        yearly_returns=yearly_returns,
+        signals=_series_from_split_payload(data.get("signals")).fillna(0).astype(int),
+    )
+
+
+def _serialize_portfolio_backtest_result(result: PortfolioBacktestResult) -> dict[str, object]:
+    return {
+        "kind": "portfolio",
+        "equity_curve": _frame_to_split_payload(result.equity_curve),
+        "metrics": _serialize_backtest_metrics(result.metrics),
+        "drawdown_series": _series_to_split_payload(result.drawdown_series),
+        "yearly_returns": {str(k): _cache_float(v) for k, v in (result.yearly_returns or {}).items()},
+        "trades": _frame_to_split_payload(result.trades),
+        "signals": _frame_to_split_payload(result.signals),
+        "component_results": {str(sym): _serialize_single_backtest_result(comp) for sym, comp in result.component_results.items()},
+    }
+
+
+def _deserialize_portfolio_backtest_result(payload: object) -> Optional[PortfolioBacktestResult]:
+    data = payload if isinstance(payload, dict) else {}
+    if not data:
+        return None
+    comp_raw = data.get("component_results", {})
+    component_results: dict[str, BacktestResult] = {}
+    if isinstance(comp_raw, dict):
+        for sym, comp_payload in comp_raw.items():
+            comp_result = _deserialize_single_backtest_result(comp_payload)
+            if comp_result is not None:
+                component_results[str(sym)] = comp_result
+    yearly_raw = data.get("yearly_returns", {})
+    yearly_returns = {}
+    if isinstance(yearly_raw, dict):
+        yearly_returns = {str(k): _cache_float(v) for k, v in yearly_raw.items()}
+    return PortfolioBacktestResult(
+        equity_curve=_frame_from_split_payload(data.get("equity_curve"), default_columns=["equity"]),
+        metrics=_deserialize_backtest_metrics(data.get("metrics")),
+        drawdown_series=_series_from_split_payload(data.get("drawdown_series")),
+        yearly_returns=yearly_returns,
+        trades=_frame_from_split_payload(data.get("trades")),
+        signals=_frame_from_split_payload(data.get("signals")),
+        component_results=component_results,
+    )
+
+
+def _serialize_backtest_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
+    mode = str(run_payload.get("mode", "")).strip()
+    serialized: dict[str, object] = {
+        "mode": mode,
+        "walk_forward": bool(run_payload.get("walk_forward")),
+        "initial_capital": _cache_float(run_payload.get("initial_capital"), default=1_000_000.0),
+    }
+    if mode == "single":
+        serialized["symbol"] = str(run_payload.get("symbol", "")).strip().upper()
+    else:
+        symbols_raw = run_payload.get("symbols", [])
+        if isinstance(symbols_raw, list):
+            serialized["symbols"] = [str(s).strip().upper() for s in symbols_raw if str(s).strip()]
+
+    bars_map = run_payload.get("bars_by_symbol", {})
+    serialized_bars: dict[str, object] = {}
+    if isinstance(bars_map, dict):
+        for symbol, bars in bars_map.items():
+            if isinstance(bars, pd.DataFrame):
+                serialized_bars[str(symbol).strip().upper()] = _frame_to_split_payload(bars)
+    serialized["bars_by_symbol"] = serialized_bars
+
+    result = run_payload.get("result")
+    if mode == "portfolio" and isinstance(result, PortfolioBacktestResult):
+        serialized["result"] = _serialize_portfolio_backtest_result(result)
+    elif mode == "single" and isinstance(result, BacktestResult):
+        serialized["result"] = _serialize_single_backtest_result(result)
+    else:
+        serialized["result"] = {}
+
+    if bool(run_payload.get("walk_forward")):
+        train = run_payload.get("train_result")
+        if mode == "portfolio" and isinstance(train, PortfolioBacktestResult):
+            serialized["train_result"] = _serialize_portfolio_backtest_result(train)
+        elif mode == "single" and isinstance(train, BacktestResult):
+            serialized["train_result"] = _serialize_single_backtest_result(train)
+        serialized["split_date"] = pd.Timestamp(run_payload.get("split_date")).isoformat() if run_payload.get("split_date") is not None else ""
+        best_params = run_payload.get("best_params", {})
+        serialized["best_params"] = best_params if isinstance(best_params, dict) else {}
+        candidates = run_payload.get("candidates", {})
+        if isinstance(candidates, (dict, int, float)):
+            serialized["candidates"] = candidates
+    return serialized
+
+
+def _deserialize_backtest_run_payload(payload: object) -> Optional[dict[str, object]]:
+    data = payload if isinstance(payload, dict) else {}
+    mode = str(data.get("mode", "")).strip()
+    if mode not in {"single", "portfolio"}:
+        return None
+
+    bars_map_raw = data.get("bars_by_symbol", {})
+    bars_by_symbol: dict[str, pd.DataFrame] = {}
+    if isinstance(bars_map_raw, dict):
+        for symbol, bars_payload in bars_map_raw.items():
+            bars_df = _frame_from_split_payload(bars_payload)
+            if not bars_df.empty:
+                bars_by_symbol[str(symbol).strip().upper()] = bars_df
+    if not bars_by_symbol:
+        return None
+
+    result_payload = data.get("result", {})
+    if mode == "portfolio":
+        result = _deserialize_portfolio_backtest_result(result_payload)
+    else:
+        result = _deserialize_single_backtest_result(result_payload)
+    if result is None:
+        return None
+    if mode == "portfolio" and isinstance(result, PortfolioBacktestResult):
+        if any(sym not in result.component_results for sym in bars_by_symbol.keys()):
+            return None
+
+    run_payload: dict[str, object] = {
+        "mode": mode,
+        "walk_forward": bool(data.get("walk_forward")),
+        "initial_capital": _cache_float(data.get("initial_capital"), default=1_000_000.0),
+        "bars_by_symbol": bars_by_symbol,
+        "result": result,
+    }
+    if mode == "single":
+        run_payload["symbol"] = str(data.get("symbol", "")).strip().upper() or next(iter(bars_by_symbol.keys()))
+    else:
+        raw_symbols = data.get("symbols", [])
+        if isinstance(raw_symbols, list):
+            symbols = [str(s).strip().upper() for s in raw_symbols if str(s).strip()]
+            run_payload["symbols"] = symbols or list(bars_by_symbol.keys())
+        else:
+            run_payload["symbols"] = list(bars_by_symbol.keys())
+
+    if run_payload["walk_forward"]:
+        train_payload = data.get("train_result", {})
+        if mode == "portfolio":
+            train_result = _deserialize_portfolio_backtest_result(train_payload)
+        else:
+            train_result = _deserialize_single_backtest_result(train_payload)
+        if train_result is not None:
+            run_payload["train_result"] = train_result
+        split_date_raw = str(data.get("split_date", "")).strip()
+        if split_date_raw:
+            try:
+                run_payload["split_date"] = _to_utc_timestamp(split_date_raw)
+            except Exception:
+                pass
+        best_params = data.get("best_params", {})
+        if isinstance(best_params, dict):
+            run_payload["best_params"] = best_params
+        candidates = data.get("candidates")
+        if isinstance(candidates, (dict, int, float)):
+            run_payload["candidates"] = candidates
+    return run_payload
+
+
 def _render_backtest_view():
     def _parse_symbols(text: str) -> list[str]:
         symbols = [s.strip().upper() for s in text.replace("，", ",").split(",")]
@@ -3154,7 +3882,10 @@ def _render_backtest_view():
             if bars.empty or "close" not in bars.columns:
                 continue
 
-            out = bars[["close"]].copy()
+            keep_cols = ["close"]
+            if "adj_close" in bars.columns:
+                keep_cols.append("adj_close")
+            out = bars[keep_cols].copy()
             source_text = ""
             if "source" in bars.columns:
                 source_vals = sorted(set(bars["source"].dropna().astype(str)))
@@ -3389,9 +4120,16 @@ def _render_backtest_view():
         index=0,
         help="Walk-Forward 會用這個指標在訓練區挑最佳參數。",
     )
-    adj1, adj2 = st.columns(2)
+    adj1, adj2, adj3 = st.columns(3)
     use_split_adjustment = adj1.checkbox("分割調整（復權）", value=True)
     auto_detect_split = adj2.checkbox("自動偵測分割事件", value=True)
+    use_total_return_adjustment = adj3.checkbox(
+        "還原權息計算（Adj Close）",
+        value=False,
+        help="有 `adj_close` 時，會將 OHLC 轉成還原權息價格。若已還原，會略過額外分割調整避免重複計算。",
+    )
+    if use_total_return_adjustment and use_split_adjustment:
+        st.caption("已啟用還原權息：若標的 `adj_close` 覆蓋率足夠，將優先使用還原權息並略過分割調整。")
     sp1, sp2, sp3 = st.columns(3)
     if invest_mode_key not in st.session_state:
         st.session_state[invest_mode_key] = "沿用回測起始日期"
@@ -3457,6 +4195,7 @@ def _render_backtest_view():
                     "- `buy_hold`：買進後持有到回測結束，適合快速檢查「近期投入」表現。",
                     "- `sma_trend_filter`：均線交叉 + 長期濾網，偏中期日K趨勢。",
                     "- `donchian_breakout`：日K通道突破追蹤，適合波段趨勢市場。",
+                    "- `還原權息計算（Adj Close）`：若資料含 `adj_close`，會把價格改為含配息/分割影響的還原序列。",
                     "- `實際投入起點`：決定本金從哪個時間點開始參與回測；",
                     "  `回放位置`只是看圖播放進度，不會改變回測結果。",
                     "- `買賣點顯示`可切換：",
@@ -3561,8 +4300,7 @@ def _render_backtest_view():
             st.dataframe(pd.DataFrame(sync_rows), use_container_width=True, hide_index=True)
         st.session_state[gapfill_key] = True
 
-    b1, b2 = st.columns(2)
-    if b1.button("同步歷史資料", use_container_width=True):
+    if st.button("同步歷史資料", use_container_width=True):
         reports, sync_issues = _sync_symbols_history(
             store,
             market=market,
@@ -3595,10 +4333,13 @@ def _render_backtest_view():
     for symbol in symbols:
         bars = store.load_daily_bars(symbol=symbol, market=market, start=sync_start, end=sync_end)
         if bars.empty:
-            availability_rows.append({"symbol": symbol, "rows": 0, "sources": "", "status": "EMPTY"})
+            availability_rows.append({"symbol": symbol, "rows": 0, "sources": "", "status": "EMPTY", "adj_mode": ""})
             continue
         bars = bars.sort_index()
-        if use_split_adjustment:
+        adj_info: dict[str, object] = {"applied": False}
+        if use_total_return_adjustment:
+            bars, adj_info = _apply_total_return_adjustment(bars)
+        if use_split_adjustment and not bool(adj_info.get("applied")):
             bars, split_events = apply_split_adjustment(
                 bars=bars,
                 symbol=symbol,
@@ -3608,6 +4349,13 @@ def _render_backtest_view():
             )
         else:
             split_events = []
+        if bool(adj_info.get("applied")):
+            adj_mode = f"ON ({adj_info.get('coverage_pct', 0)}%)"
+        elif use_total_return_adjustment:
+            reason = str(adj_info.get("reason", "") or "")
+            adj_mode = "OFF(no adj_close)" if reason == "no_adj_close" else "OFF(coverage low)"
+        else:
+            adj_mode = "OFF"
         bars_by_symbol[symbol] = bars
         availability_rows.append(
             {
@@ -3615,6 +4363,7 @@ def _render_backtest_view():
                 "rows": int(len(bars)),
                 "sources": ",".join(sorted(set(bars["source"].dropna().astype(str)))) if "source" in bars.columns else "",
                 "status": "OK",
+                "adj_mode": adj_mode,
                 "splits": ", ".join(
                     [f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}({ev.source})" for ev in split_events]
                 )
@@ -3662,95 +4411,133 @@ def _render_backtest_view():
     run_key = (
         f"bt_result:{market}:{','.join(symbols)}:{strategy}:{start_date}:{end_date}:"
         f"{int(enable_wf)}:{train_ratio}:{objective}:{int(initial_capital)}:"
+        f"{int(use_split_adjustment)}:{int(auto_detect_split)}:{int(use_total_return_adjustment)}:"
         f"{invest_start_mode}:{invest_start_date}:{invest_start_k}"
     )
-    if b2.button("執行回測", use_container_width=True):
+    with st.container(border=True):
+        _render_card_section_header("回測執行", "輸入完成後會自動回測；同條件會優先讀取 SQLite 快取。")
+
+    run_params = {
+        "market": market,
+        "mode": mode,
+        "symbols": list(symbols),
+        "strategy": strategy,
+        "start_date": str(start_date),
+        "end_date": str(end_date),
+        "enable_walk_forward": bool(enable_wf),
+        "train_ratio": float(train_ratio),
+        "objective": objective if enable_wf else "",
+        "initial_capital": float(initial_capital),
+        "fee_rate": float(fee_rate),
+        "sell_tax_rate": float(sell_tax),
+        "slippage_rate": float(slippage),
+        "use_split_adjustment": bool(use_split_adjustment),
+        "auto_detect_split": bool(auto_detect_split),
+        "use_total_return_adjustment": bool(use_total_return_adjustment),
+        "invest_start_mode": str(invest_start_mode),
+        "invest_start_date": str(invest_start_date) if invest_start_date is not None else "",
+        "invest_start_k": int(invest_start_k) if invest_start_k is not None else -1,
+    }
+
+    payload = st.session_state.get(run_key)
+    if payload is None:
+        cached_replay = store.load_latest_backtest_replay_run(run_key)
+        if cached_replay and isinstance(cached_replay.payload, dict):
+            restored = _deserialize_backtest_run_payload(cached_replay.payload)
+            if restored is not None:
+                payload = restored
+                st.session_state[run_key] = restored
+                st.caption("已載入同條件的 SQLite 快取回測結果。")
+
+    if payload is None:
         cost_model = CostModel(fee_rate=fee_rate, sell_tax_rate=sell_tax, slippage_rate=slippage)
         run_payload = {}
         try:
-            if enable_wf:
-                if mode == "單一標的":
-                    symbol = list(bars_by_symbol.keys())[0]
-                    wf_result = walk_forward_single(
-                        bars=bars_by_symbol[symbol],
-                        strategy_name=strategy,
-                        cost_model=cost_model,
-                        train_ratio=float(train_ratio),
-                        objective=objective,
-                        initial_capital=float(initial_capital),
-                    )
-                    run_payload = {
-                        "mode": "single",
-                        "walk_forward": True,
-                        "initial_capital": float(initial_capital),
-                        "symbol": symbol,
-                        "bars_by_symbol": bars_by_symbol,
-                        "result": wf_result.test_result,
-                        "train_result": wf_result.train_result,
-                        "split_date": wf_result.split_date,
-                        "best_params": wf_result.best_params,
-                        "candidates": wf_result.candidates,
-                    }
+            with st.spinner("回測計算中..."):
+                if enable_wf:
+                    if mode == "單一標的":
+                        symbol = list(bars_by_symbol.keys())[0]
+                        wf_result = walk_forward_single(
+                            bars=bars_by_symbol[symbol],
+                            strategy_name=strategy,
+                            cost_model=cost_model,
+                            train_ratio=float(train_ratio),
+                            objective=objective,
+                            initial_capital=float(initial_capital),
+                        )
+                        run_payload = {
+                            "mode": "single",
+                            "walk_forward": True,
+                            "initial_capital": float(initial_capital),
+                            "symbol": symbol,
+                            "bars_by_symbol": bars_by_symbol,
+                            "result": wf_result.test_result,
+                            "train_result": wf_result.train_result,
+                            "split_date": wf_result.split_date,
+                            "best_params": wf_result.best_params,
+                            "candidates": wf_result.candidates,
+                        }
+                    else:
+                        wf_portfolio = walk_forward_portfolio(
+                            bars_by_symbol=bars_by_symbol,
+                            strategy_name=strategy,
+                            cost_model=cost_model,
+                            train_ratio=float(train_ratio),
+                            objective=objective,
+                            initial_capital=float(initial_capital),
+                        )
+                        run_payload = {
+                            "mode": "portfolio",
+                            "walk_forward": True,
+                            "initial_capital": float(initial_capital),
+                            "symbols": list(bars_by_symbol.keys()),
+                            "bars_by_symbol": bars_by_symbol,
+                            "result": wf_portfolio.test_portfolio,
+                            "train_result": wf_portfolio.train_portfolio,
+                            "split_date": wf_portfolio.split_date,
+                            "best_params": {s: wf.best_params for s, wf in wf_portfolio.symbol_results.items()},
+                            "candidates": {s: wf.candidates for s, wf in wf_portfolio.symbol_results.items()},
+                        }
                 else:
-                    wf_portfolio = walk_forward_portfolio(
-                        bars_by_symbol=bars_by_symbol,
-                        strategy_name=strategy,
-                        cost_model=cost_model,
-                        train_ratio=float(train_ratio),
-                        objective=objective,
-                        initial_capital=float(initial_capital),
-                    )
-                    run_payload = {
-                        "mode": "portfolio",
-                        "walk_forward": True,
-                        "initial_capital": float(initial_capital),
-                        "symbols": list(bars_by_symbol.keys()),
-                        "bars_by_symbol": bars_by_symbol,
-                        "result": wf_portfolio.test_portfolio,
-                        "train_result": wf_portfolio.train_portfolio,
-                        "split_date": wf_portfolio.split_date,
-                        "best_params": {s: wf.best_params for s, wf in wf_portfolio.symbol_results.items()},
-                        "candidates": {s: wf.candidates for s, wf in wf_portfolio.symbol_results.items()},
-                    }
-            else:
-                if mode == "單一標的":
-                    symbol = list(bars_by_symbol.keys())[0]
-                    result = run_backtest(
-                        bars=bars_by_symbol[symbol],
-                        strategy_name=strategy,
-                        strategy_params=strategy_params,
-                        cost_model=cost_model,
-                        initial_capital=float(initial_capital),
-                    )
-                    run_payload = {
-                        "mode": "single",
-                        "walk_forward": False,
-                        "initial_capital": float(initial_capital),
-                        "symbol": symbol,
-                        "bars_by_symbol": bars_by_symbol,
-                        "result": result,
-                    }
-                else:
-                    result = run_portfolio_backtest(
-                        bars_by_symbol=bars_by_symbol,
-                        strategy_name=strategy,
-                        strategy_params=strategy_params,
-                        cost_model=cost_model,
-                        initial_capital=float(initial_capital),
-                    )
-                    run_payload = {
-                        "mode": "portfolio",
-                        "walk_forward": False,
-                        "initial_capital": float(initial_capital),
-                        "symbols": list(bars_by_symbol.keys()),
-                        "bars_by_symbol": bars_by_symbol,
-                        "result": result,
-                    }
+                    if mode == "單一標的":
+                        symbol = list(bars_by_symbol.keys())[0]
+                        result = run_backtest(
+                            bars=bars_by_symbol[symbol],
+                            strategy_name=strategy,
+                            strategy_params=strategy_params,
+                            cost_model=cost_model,
+                            initial_capital=float(initial_capital),
+                        )
+                        run_payload = {
+                            "mode": "single",
+                            "walk_forward": False,
+                            "initial_capital": float(initial_capital),
+                            "symbol": symbol,
+                            "bars_by_symbol": bars_by_symbol,
+                            "result": result,
+                        }
+                    else:
+                        result = run_portfolio_backtest(
+                            bars_by_symbol=bars_by_symbol,
+                            strategy_name=strategy,
+                            strategy_params=strategy_params,
+                            cost_model=cost_model,
+                            initial_capital=float(initial_capital),
+                        )
+                        run_payload = {
+                            "mode": "portfolio",
+                            "walk_forward": False,
+                            "initial_capital": float(initial_capital),
+                            "symbols": list(bars_by_symbol.keys()),
+                            "bars_by_symbol": bars_by_symbol,
+                            "result": result,
+                        }
         except Exception as exc:
             st.error(f"回測失敗：{exc}")
             return
 
         st.session_state[run_key] = run_payload
+        payload = run_payload
         primary = ",".join(symbols)
         summary_metrics = run_payload["result"].metrics.__dict__
         store.save_backtest_run(
@@ -3770,10 +4557,15 @@ def _render_backtest_view():
                 "objective": objective if enable_wf else None,
             },
         )
+        replay_payload = _serialize_backtest_run_payload(run_payload)
+        store.save_backtest_replay_run(
+            run_key=run_key,
+            params=run_params,
+            payload=replay_payload,
+        )
 
-    payload = st.session_state.get(run_key)
     if not payload:
-        st.info("按下「執行回測」後，會顯示績效與回放。")
+        st.info("尚未有可用回測結果。")
         return
 
     result = payload["result"]
@@ -3790,28 +4582,32 @@ def _render_backtest_view():
     benchmark_raw = _load_benchmark_from_store(market_code=market, start=sync_start, end=sync_end, choice=benchmark_choice)
     if benchmark_raw.empty:
         benchmark_raw = service.get_benchmark_series(market=market, start=sync_start, end=sync_end, benchmark=benchmark_choice)
+    benchmark_adj_info: dict[str, object] = {"applied": False}
+    if use_total_return_adjustment and not benchmark_raw.empty:
+        benchmark_raw, benchmark_adj_info = _apply_total_return_adjustment(benchmark_raw)
     benchmark_split_events = []
     if use_split_adjustment and not benchmark_raw.empty:
-        benchmark_symbol = str(benchmark_raw.attrs.get("symbol", "")).strip() if hasattr(benchmark_raw, "attrs") else ""
-        if not benchmark_symbol:
-            fallback_symbol_map_tw = {"twii": "^TWII", "0050": "0050", "006208": "006208"}
-            fallback_symbol_map_us = {"gspc": "^GSPC", "spy": "SPY", "qqq": "QQQ", "dia": "DIA"}
-            benchmark_symbol = (
-                fallback_symbol_map_tw.get(benchmark_choice, "^TWII")
-                if market == "TW"
-                else fallback_symbol_map_us.get(benchmark_choice, "^GSPC")
+        if not bool(benchmark_adj_info.get("applied")):
+            benchmark_symbol = str(benchmark_raw.attrs.get("symbol", "")).strip() if hasattr(benchmark_raw, "attrs") else ""
+            if not benchmark_symbol:
+                fallback_symbol_map_tw = {"twii": "^TWII", "0050": "0050", "006208": "006208"}
+                fallback_symbol_map_us = {"gspc": "^GSPC", "spy": "SPY", "qqq": "QQQ", "dia": "DIA"}
+                benchmark_symbol = (
+                    fallback_symbol_map_tw.get(benchmark_choice, "^TWII")
+                    if market == "TW"
+                    else fallback_symbol_map_us.get(benchmark_choice, "^GSPC")
+                )
+            adjusted, benchmark_split_events = apply_split_adjustment(
+                bars=benchmark_raw,
+                symbol=benchmark_symbol,
+                market=market,
+                use_known=True,
+                use_auto_detect=auto_detect_split,
             )
-        adjusted, benchmark_split_events = apply_split_adjustment(
-            bars=benchmark_raw,
-            symbol=benchmark_symbol,
-            market=market,
-            use_known=True,
-            use_auto_detect=auto_detect_split,
-        )
-        adjusted.attrs = dict(getattr(benchmark_raw, "attrs", {}))
-        if benchmark_symbol:
-            adjusted.attrs["symbol"] = benchmark_symbol
-        benchmark_raw = adjusted
+            adjusted.attrs = dict(getattr(benchmark_raw, "attrs", {}))
+            if benchmark_symbol:
+                adjusted.attrs["symbol"] = benchmark_symbol
+            benchmark_raw = adjusted
     benchmark_equity = pd.Series(dtype=float)
     if not benchmark_raw.empty and "close" in benchmark_raw.columns:
         bench = benchmark_raw["close"].reindex(strategy_equity.index).ffill()
@@ -3881,6 +4677,8 @@ def _render_backtest_view():
     display_mode_key = f"play_display_mode:{run_key}"
     marker_mode_key = f"play_marker_mode:{run_key}"
     fill_link_key = f"play_fill_link:{run_key}"
+    indicator_panel_key = f"play_indicator_panel:{run_key}"
+    indicator_compact_key = f"play_indicator_compact:{run_key}"
     viewport_mode_key = f"play_viewport_mode:{run_key}"
     viewport_window_key = f"play_viewport_window:{run_key}"
     viewport_anchor_key = f"play_viewport_anchor:{run_key}"
@@ -3895,8 +4693,12 @@ def _render_backtest_view():
         st.session_state[marker_mode_key] = "同時顯示（訊號+成交）"
     if fill_link_key not in st.session_state:
         st.session_state[fill_link_key] = True
+    if indicator_panel_key not in st.session_state:
+        st.session_state[indicator_panel_key] = True
+    if indicator_compact_key not in st.session_state:
+        st.session_state[indicator_compact_key] = True
     if viewport_mode_key not in st.session_state:
-        st.session_state[viewport_mode_key] = "固定視窗"
+        st.session_state[viewport_mode_key] = "完整區間"
     if viewport_anchor_key not in st.session_state:
         st.session_state[viewport_anchor_key] = 70
     if focus_key not in st.session_state:
@@ -3907,9 +4709,11 @@ def _render_backtest_view():
     if focus_bars.empty:
         st.warning(f"{focus_symbol} 沒有可回放的有效K線資料。")
         return
+    focus_ind = add_indicators(focus_bars)
     focus_result = result.component_results[focus_symbol] if is_portfolio else result
     max_play_idx = len(focus_bars) - 1
-    default_play_idx = min(20, max_play_idx)
+    default_play_idx = max_play_idx
+    replay_reset_idx = 0
     if idx_key not in st.session_state:
         st.session_state[idx_key] = default_play_idx
     else:
@@ -3934,7 +4738,7 @@ def _render_backtest_view():
             st.session_state[play_key] = False
         if c3.button("Reset", use_container_width=True):
             st.session_state[play_key] = False
-            st.session_state[idx_key] = default_play_idx
+            st.session_state[idx_key] = replay_reset_idx
         c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
         c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
         c6.selectbox(
@@ -3966,8 +4770,19 @@ def _render_backtest_view():
             key=fill_link_key,
             help="在 Buy/Sell Fill 的時間點畫垂直細線，幫助對照價格與資產變化。",
         )
+        st.checkbox(
+            "顯示技術指標副圖（RSI / MACD / 布林 / KD）",
+            key=indicator_panel_key,
+        )
+        st.checkbox(
+            "緊湊指標副圖（筆電建議）",
+            key=indicator_compact_key,
+        )
         st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
-        st.caption(f"回放預設起點：第 {default_play_idx} 根K（建議先有基本形態再播放）。")
+        st.caption(
+            f"回放預設位置：第 {default_play_idx} 根K（完整區間末端）。"
+            f"若要重播動畫可按 Reset 回到第 {replay_reset_idx} 根。"
+        )
 
     speed_steps = {"0.5x": 1, "1x": 2, "2x": 4, "5x": 8, "10x": 16}
 
@@ -4009,10 +4824,12 @@ def _render_backtest_view():
 
         idx = st.session_state[idx_key]
         bars_now = focus_bars.iloc[: idx + 1]
+        ind_now = focus_ind.reindex(bars_now.index)
         equity_now = result.equity_curve.iloc[: min(idx + 1, len(result.equity_curve))]
         benchmark_now = benchmark_equity.reindex(equity_now.index).ffill() if not benchmark_equity.empty else pd.Series(dtype=float)
+        panel_x_range: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
 
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.72, 0.28])
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.018, row_heights=[0.68, 0.32])
         fig.add_trace(
             go.Candlestick(
                 x=bars_now.index,
@@ -4047,7 +4864,7 @@ def _render_backtest_view():
                     y=benchmark_now.values,
                     mode="lines",
                     name="Benchmark Equity",
-                    line=dict(color=str(palette["benchmark"]), width=1.9),
+                    line=_benchmark_line_style(palette, width=2.0),
                 ),
                 row=2,
                 col=1,
@@ -4194,11 +5011,14 @@ def _render_backtest_view():
             x_end = focus_bars.index[right_idx]
             fig.update_xaxes(range=[x_start, x_end], row=1, col=1)
             fig.update_xaxes(range=[x_start, x_end], row=2, col=1)
+            panel_x_range = (pd.Timestamp(x_start), pd.Timestamp(x_end))
+        elif len(bars_now.index) >= 2:
+            panel_x_range = (pd.Timestamp(bars_now.index[0]), pd.Timestamp(bars_now.index[-1]))
 
         fig.update_xaxes(gridcolor=str(palette["grid"]))
         fig.update_yaxes(gridcolor=str(palette["grid"]))
         fig.update_layout(
-            height=680,
+            height=560,
             xaxis_rangeslider_visible=False,
             margin=dict(l=10, r=10, t=30, b=10),
             uirevision=f"playback:{run_key}",
@@ -4209,6 +5029,13 @@ def _render_backtest_view():
             font=dict(color=str(palette["text_color"])),
         )
         st.plotly_chart(fig, use_container_width=True, key=f"playback_chart:{run_key}")
+        if st.session_state.get(indicator_panel_key):
+            _render_indicator_panels(
+                ind_now,
+                chart_key=f"play_indicator_chart:{run_key}:{focus_symbol}",
+                height=300 if st.session_state.get(indicator_compact_key) else 380,
+                x_range=panel_x_range,
+            )
         st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
 
     with st.container(border=True):
@@ -4239,6 +5066,8 @@ def _render_backtest_view():
     )
     if benchmark_choice != "off" and benchmark_symbol:
         st.caption(f"Benchmark 來源：{benchmark_symbol}（{benchmark_source or 'unknown'}）")
+    if bool(benchmark_adj_info.get("applied")):
+        st.caption(f"Benchmark 已套用還原權息（Adj Close 覆蓋率 {benchmark_adj_info.get('coverage_pct', 0)}%）。")
     if benchmark_split_events:
         split_text = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f} ({ev.source})" for ev in benchmark_split_events])
         st.caption(f"Benchmark split adjustment: {split_text}")
@@ -4364,7 +5193,7 @@ def _render_backtest_view():
                         y=norm["benchmark"],
                         mode="lines",
                         name="Benchmark Equity",
-                        line=dict(color=str(palette["benchmark"]), width=2.0),
+                        line=_benchmark_line_style(palette, width=2.0),
                         hovertemplate=(
                             _hovertemplate_with_code(benchmark_symbol or "BENCHMARK", value_label="Normalized", y_format=".4f")
                             if multi_symbol_compare
@@ -4471,24 +5300,25 @@ def _render_backtest_view():
     hold_label = "買進持有（等權投組）" if is_portfolio else f"買進持有（{selected_symbols[0]}）"
     st.caption("買進持有以回測標的收盤價計算；若為投組則採等權配置。")
 
-    overall_rows = [
+    comparison_rows = [
         {
+            "比較區間": "整段",
             "比較項目": "策略",
-            "區間起日": strategy_equity.index[0].strftime("%Y-%m-%d"),
-            "區間迄日": strategy_equity.index[-1].strftime("%Y-%m-%d"),
+            "起始交易日(實際)": strategy_equity.index[0].strftime("%Y-%m-%d"),
+            "結束交易日(實際)": strategy_equity.index[-1].strftime("%Y-%m-%d"),
             "報酬率%": round((strategy_equity.iloc[-1] / strategy_equity.iloc[0] - 1.0) * 100.0, 2),
         }
     ]
     if not buy_hold_equity.empty:
-        overall_rows.append(
+        comparison_rows.append(
             {
+                "比較區間": "整段",
                 "比較項目": hold_label,
-                "區間起日": buy_hold_equity.index[0].strftime("%Y-%m-%d"),
-                "區間迄日": buy_hold_equity.index[-1].strftime("%Y-%m-%d"),
+                "起始交易日(實際)": buy_hold_equity.index[0].strftime("%Y-%m-%d"),
+                "結束交易日(實際)": buy_hold_equity.index[-1].strftime("%Y-%m-%d"),
                 "報酬率%": round((buy_hold_equity.iloc[-1] / buy_hold_equity.iloc[0] - 1.0) * 100.0, 2),
             }
         )
-    st.dataframe(pd.DataFrame(overall_rows), use_container_width=True, hide_index=True)
 
     interval_start_key = f"interval_start:{run_key}"
     interval_end_key = f"interval_end:{run_key}"
@@ -4528,10 +5358,10 @@ def _render_backtest_view():
     else:
         strategy_interval = interval_return(strategy_equity, start_date=interval_start, end_date=interval_end)
         hold_interval = interval_return(buy_hold_equity, start_date=interval_start, end_date=interval_end)
-        interval_rows = []
         if strategy_interval.get("ok"):
-            interval_rows.append(
+            comparison_rows.append(
                 {
+                    "比較區間": "指定區間",
                     "比較項目": "策略",
                     "起始交易日(實際)": strategy_interval["start_used"].strftime("%Y-%m-%d"),
                     "結束交易日(實際)": strategy_interval["end_used"].strftime("%Y-%m-%d"),
@@ -4539,18 +5369,20 @@ def _render_backtest_view():
                 }
             )
         if hold_interval.get("ok"):
-            interval_rows.append(
+            comparison_rows.append(
                 {
+                    "比較區間": "指定區間",
                     "比較項目": hold_label,
                     "起始交易日(實際)": hold_interval["start_used"].strftime("%Y-%m-%d"),
                     "結束交易日(實際)": hold_interval["end_used"].strftime("%Y-%m-%d"),
                     "報酬率%": round(float(hold_interval["return"]) * 100.0, 2),
                 }
             )
-        if interval_rows:
-            st.dataframe(pd.DataFrame(interval_rows), use_container_width=True, hide_index=True)
-        else:
-            st.caption("指定區間內無可計算資料。")
+    if comparison_rows:
+        out_df = pd.DataFrame(comparison_rows)
+        st.dataframe(out_df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("目前沒有可計算的比較資料。")
 
     _render_card_section_header("逐年報酬卡")
     if result.yearly_returns:
@@ -4662,6 +5494,7 @@ def _render_tutorial_view():
         [
             {"項目": "歷史日K（含 Benchmark）", "位置": "SQLite（預設 iCloud，可由環境變數覆蓋）", "用途": "回測與比較主資料來源"},
             {"項目": "回測摘要", "位置": "SQLite `backtest_runs`", "用途": "保存回測重點結果"},
+            {"項目": "回測回放快取", "位置": "SQLite `backtest_replay_runs`", "用途": "同條件可直接載入完整回放結果"},
             {"項目": "熱力圖結果", "位置": "SQLite `heatmap_runs`", "用途": "熱力圖頁可先顯示上次結果"},
             {"項目": "ETF 輪動結果", "位置": "SQLite `rotation_runs`", "用途": "輪動頁可先顯示上次結果"},
             {"項目": "成分股清單", "位置": "SQLite `universe_snapshots`", "用途": "避免每次重抓成分股"},
@@ -4678,7 +5511,7 @@ def _render_tutorial_view():
             {"步驟": "C. 選策略", "說明": "新手先用 `buy_hold`。"},
             {"步驟": "D. 設成本", "說明": "手續費/稅/滑價都會改變結果。"},
             {"步驟": "E. 設實際投入起點", "說明": "這是會改績效的關鍵參數。"},
-            {"步驟": "F. 執行回測", "說明": "看績效卡、交易明細、Benchmark 比較。"},
+            {"步驟": "F. 自動回測", "說明": "條件輸入完成就會自動計算，並優先載入同條件快取。"},
             {"步驟": "G. 需要時再開 Walk-Forward", "說明": "用 Train/Test 檢查穩健性。"},
         ]
     )
@@ -4877,11 +5710,7 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         paper_bgcolor=str(palette["paper_bg"]),
         plot_bgcolor=str(palette["plot_bg"]),
         font=dict(color=str(palette["text_color"]), family="Noto Sans TC, Segoe UI, sans-serif"),
-        hoverlabel=dict(
-            bgcolor="rgba(255,255,255,0.94)",
-            bordercolor="rgba(15,23,42,0.16)",
-            font=dict(color="#0F172A"),
-        ),
+        hoverlabel=_plot_hoverlabel_style(palette),
     )
     st.plotly_chart(fig_heat, use_container_width=True)
 
@@ -5194,7 +6023,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     _render_etf_index_method_summary(etf_text)
 
     c1, c2, c3, c4 = st.columns(4)
-    start_date = c1.date_input("起始日期", value=date(date.today().year - 3, 1, 1), key=f"{page_key}_start")
+    start_date = c1.date_input("起始日期", value=date(date.today().year - 5, 1, 1), key=f"{page_key}_start")
     end_date = c2.date_input("結束日期", value=date.today(), key=f"{page_key}_end")
     benchmark_choice = c3.selectbox(
         "Benchmark",
@@ -5725,11 +6554,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         paper_bgcolor=str(palette["paper_bg"]),
         plot_bgcolor=str(palette["plot_bg"]),
         font=dict(color=str(palette["text_color"]), family="Noto Sans TC, Segoe UI, sans-serif"),
-        hoverlabel=dict(
-            bgcolor="rgba(255,255,255,0.94)",
-            bordercolor="rgba(15,23,42,0.16)",
-            font=dict(color="#0F172A"),
-        ),
+        hoverlabel=_plot_hoverlabel_style(palette),
     )
     st.plotly_chart(fig_heat, use_container_width=True)
 
@@ -6204,7 +7029,7 @@ def _render_tw_etf_rotation_view():
                 y=benchmark_series.values,
                 mode="lines",
                 name=f"Benchmark Equity ({payload.get('benchmark_symbol', 'Benchmark')})",
-                line=dict(color=str(palette["benchmark"]), width=2.0),
+                line=_benchmark_line_style(palette, width=2.0),
             )
         )
     if not buy_hold_series.empty:
