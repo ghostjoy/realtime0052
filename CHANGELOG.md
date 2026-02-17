@@ -67,8 +67,23 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated .gitignore, PROJECT_CONTEXT.md, README.md, app.py, market_data_types.py, tests/test_active_etf_page.py [id:7909c33419]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py, tests/test_history_store.py, ... (+1) [id:c89bc1cf9d]
 - Auto: updated README.md, app.py, tests/test_active_etf_page.py [id:4d84559a83]
+- 新增共用資料健康度顯示（`as_of / source / source chain / degraded / fallback_depth`）：
+  - 即時看盤資料品質欄位改用同一格式輸出
+  - `2025/2026 前十大 ETF` 與 `2026 主動式 ETF` 卡片新增快照健康度說明
+  - Benchmark 對照卡新增資料健康度說明，便於判讀是否有同步降級
+- 新增錯誤訊息分級 helper（error/warning/info）並套用於 ETF 排行與 Benchmark 對照卡，降低訊息語意不一致。
+- 回測回放快取載入新增相容性檢查：以 `schema_version + source_hash` 驗證快取參數簽章，不相容時自動重算。
+- 重構共用 helper 以降低重複邏輯：
+  - 抽出 `快照健康度` 計算與渲染（Top10/主動式共用）
+  - 抽出同步錯誤摘要顯示（熱力圖/輪動/Benchmark 共用）
+  - 抽出回測快取載入驗證流程（簽章比對與提示文案共用）
+- Benchmark 載入層重構：
+  - 抽出台股基準候選清單 helper（支援 `twii` 單一路徑或自動 fallback 模式）
+  - 抽出台股基準日K/收盤序列載入 helper（同步策略、split 調整、錯誤收集格式統一）
+  - 熱力圖、ETF 輪動與多標的 Benchmark 對照卡改為共用同一套載入流程
 - 新增可切換 `深色專業（Data Dark）` 主題，並同步調整深色模式下卡片、控制項、標籤與圖表 hover 可讀性。
 - Benchmark 視覺統一：各比較圖基準曲線改用一致樣式（主題基準色 + 虛線），提升策略線對照辨識度。
 - `回測工作台` 改為「輸入條件即自動回測」：

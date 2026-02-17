@@ -61,6 +61,17 @@ class DataQuality:
 
 
 @dataclass(frozen=True)
+class DataHealth:
+    as_of: Optional[str]
+    data_sources: list[str]
+    source_chain: list[str]
+    degraded: bool
+    fallback_depth: int
+    freshness_sec: Optional[int] = None
+    notes: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class LiveContext:
     quote: QuoteSnapshot
     intraday: pd.DataFrame

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -38,6 +39,7 @@ from backtest import (
 )
 from backtest.adjustments import known_split_events
 from indicators import add_indicators
+from market_data_types import DataHealth
 from providers import TwMisProvider
 from services import LiveOptions, MarketDataService
 from storage import HistoryStore
@@ -58,6 +60,9 @@ def _market_service() -> MarketDataService:
 @st.cache_resource
 def _history_store() -> HistoryStore:
     return HistoryStore(service=_market_service())
+
+
+BACKTEST_REPLAY_SCHEMA_VERSION = 2
 
 
 def _sync_symbols_history(
@@ -615,6 +620,144 @@ def _safe_float(value: object) -> Optional[float]:
     return fv
 
 
+def _format_as_of_token(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "N/A"
+    if re.fullmatch(r"\d{8}", text):
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return text
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts.strftime("%Y-%m-%d")
+
+
+def _build_data_health(
+    *,
+    as_of: object,
+    data_sources: list[str],
+    source_chain: Optional[list[str]] = None,
+    degraded: bool = False,
+    fallback_depth: int = 0,
+    freshness_sec: Optional[int] = None,
+    notes: str = "",
+) -> DataHealth:
+    sources = [str(item).strip() for item in data_sources if str(item).strip()]
+    chain_items = source_chain if isinstance(source_chain, list) else []
+    chain = [str(item).strip() for item in chain_items if str(item).strip()]
+    return DataHealth(
+        as_of=_format_as_of_token(as_of),
+        data_sources=sources,
+        source_chain=chain,
+        degraded=bool(degraded),
+        fallback_depth=max(0, int(fallback_depth)),
+        freshness_sec=freshness_sec,
+        notes=str(notes).strip() or None,
+    )
+
+
+def _render_data_health_caption(title: str, health: DataHealth):
+    source_text = ",".join(health.data_sources) if health.data_sources else "unknown"
+    chain_text = " -> ".join(health.source_chain) if health.source_chain else "—"
+    freshness = f"{health.freshness_sec}s" if health.freshness_sec is not None else "—"
+    note = f" | note={health.notes}" if health.notes else ""
+    st.caption(
+        f"{title}：as_of={health.as_of or 'N/A'} | source={source_text} | "
+        f"chain={chain_text} | degraded={'yes' if health.degraded else 'no'} | "
+        f"fallback_depth={health.fallback_depth} | freshness={freshness}{note}"
+    )
+
+
+def _classify_issue_level(message: str) -> str:
+    text = str(message or "").strip()
+    lowered = text.lower()
+    if "部分" in text and ("失敗" in text or "錯誤" in text):
+        return "warning"
+    error_tokens = [
+        "traceback",
+        "arrowtypeerror",
+        "conversion failed",
+        "schema",
+        "parse",
+        "valueerror",
+        "keyerror",
+        "無法",
+        "fatal",
+    ]
+    warning_tokens = [
+        "timeout",
+        "timed out",
+        "connection",
+        "max retries",
+        "temporarily",
+        "rate limit",
+        "stale",
+        "fallback",
+        "同步失敗",
+    ]
+    if any(token in lowered for token in error_tokens) or ("失敗" in text and "部分" not in text):
+        return "error"
+    if any(token in lowered for token in warning_tokens) or "錯誤" in text:
+        return "warning"
+    return "info"
+
+
+def _emit_issue_message(message: str):
+    level = _classify_issue_level(message)
+    if level == "error":
+        st.error(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.info(message)
+
+
+def _render_sync_issues(prefix: str, issues: list[str], *, preview_limit: int = 3):
+    if not issues:
+        return
+    limit = max(1, int(preview_limit))
+    preview = [" ".join(str(item).split()) for item in issues[:limit]]
+    preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+    remain = len(issues) - len(preview)
+    remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
+    _emit_issue_message(f"{prefix}：{preview_text}{remain_text}")
+
+
+def _snapshot_fallback_depth(target_yyyymmdd: str, used_yyyymmdd: str) -> int:
+    try:
+        target_date = datetime.strptime(str(target_yyyymmdd), "%Y%m%d").date()
+        used_date = datetime.strptime(str(used_yyyymmdd), "%Y%m%d").date()
+        return max(0, (target_date - used_date).days)
+    except Exception:
+        return 0
+
+
+def _build_snapshot_health(*, start_used: str, end_used: str, target_yyyymmdd: str) -> DataHealth:
+    fallback_depth = _snapshot_fallback_depth(target_yyyymmdd=target_yyyymmdd, used_yyyymmdd=end_used)
+    return _build_data_health(
+        as_of=end_used,
+        data_sources=["twse_mi_index"],
+        source_chain=[f"start:{start_used}", f"end:{end_used}"],
+        degraded=fallback_depth > 0,
+        fallback_depth=fallback_depth,
+        notes=f"target={_format_as_of_token(target_yyyymmdd)}",
+    )
+
+
+def _stable_json_dumps(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _build_replay_source_hash(payload: dict[str, object]) -> str:
+    raw = _stable_json_dumps(payload)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
 def _resolve_live_change_metrics(
     quote,
     intraday: pd.DataFrame,
@@ -920,6 +1063,217 @@ def _build_symbol_line_styles(symbols: list[str]) -> dict[str, dict[str, str]]:
             "dash": ACTIVE_ETF_LINE_DASHES[(idx // color_count) % dash_count],
         }
     return out
+
+
+def _benchmark_candidates_tw(choice: str, *, allow_twii_fallback: bool = False) -> list[str]:
+    twii_candidates = ["^TWII", "0050", "006208"] if bool(allow_twii_fallback) else ["^TWII"]
+    mapping = {
+        "twii": twii_candidates,
+        "0050": ["0050"],
+        "006208": ["006208"],
+    }
+    raw = mapping.get(str(choice or "").strip().lower(), twii_candidates)
+    ordered: list[str] = []
+    for symbol in raw:
+        text = str(symbol or "").strip().upper()
+        if text and text not in ordered:
+            ordered.append(text)
+    return ordered
+
+
+def _load_tw_benchmark_bars(
+    *,
+    store: HistoryStore,
+    choice: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    sync_first: bool,
+    allow_twii_fallback: bool = False,
+    min_rows: int = 2,
+) -> tuple[pd.DataFrame, str, list[str]]:
+    sync_issues: list[str] = []
+    required_rows = max(1, int(min_rows))
+    for benchmark_symbol in _benchmark_candidates_tw(choice, allow_twii_fallback=allow_twii_fallback):
+        if sync_first:
+            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            if report.error:
+                sync_issues.append(f"{benchmark_symbol}: {report.error}")
+        bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
+        if bench_bars.empty and not sync_first:
+            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            if report.error:
+                sync_issues.append(f"{benchmark_symbol}: {report.error}")
+            bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
+        if bench_bars.empty:
+            continue
+        bench_bars, _ = apply_split_adjustment(
+            bars=bench_bars,
+            symbol=benchmark_symbol,
+            market="TW",
+            use_known=True,
+            use_auto_detect=True,
+        )
+        if len(bench_bars) >= required_rows:
+            return bench_bars, benchmark_symbol, sync_issues
+    return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]), "", sync_issues
+
+
+def _load_tw_benchmark_close(
+    *,
+    store: HistoryStore,
+    choice: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    sync_first: bool,
+    allow_twii_fallback: bool = False,
+) -> tuple[pd.Series, str, list[str]]:
+    bench_bars, benchmark_symbol, sync_issues = _load_tw_benchmark_bars(
+        store=store,
+        choice=choice,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        sync_first=sync_first,
+        allow_twii_fallback=allow_twii_fallback,
+        min_rows=2,
+    )
+    if bench_bars.empty or "close" not in bench_bars.columns:
+        return pd.Series(dtype=float), "", sync_issues
+    close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
+    if len(close) < 2:
+        return pd.Series(dtype=float), "", sync_issues
+    return close, benchmark_symbol, sync_issues
+
+
+def _compute_tw_equal_weight_compare_payload(
+    *,
+    symbols: list[str],
+    start_dt: datetime,
+    end_dt: datetime,
+    benchmark_choice: str,
+    sync_before_run: bool,
+    insufficient_msg: str,
+    initial_capital: float = 1_000_000.0,
+) -> dict[str, object]:
+    store = _history_store()
+    symbol_sync_issues: list[str] = []
+    benchmark_sync_issues: list[str] = []
+
+    if sync_before_run:
+        _, symbol_sync_issues = _sync_symbols_history(
+            store,
+            market="TW",
+            symbols=symbols,
+            start=start_dt,
+            end=end_dt,
+            parallel=True,
+        )
+
+    bars_by_symbol: dict[str, pd.DataFrame] = {}
+    skipped_symbols: list[str] = []
+    for symbol in symbols:
+        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+        if len(bars) < 2 and not sync_before_run:
+            report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            if report.error:
+                symbol_sync_issues.append(f"{symbol}: {report.error}")
+            bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+        if len(bars) < 2:
+            skipped_symbols.append(symbol)
+            continue
+        bars, _ = apply_split_adjustment(
+            bars=bars,
+            symbol=symbol,
+            market="TW",
+            use_known=True,
+            use_auto_detect=True,
+        )
+        if len(bars) < 2:
+            skipped_symbols.append(symbol)
+            continue
+        bars_by_symbol[symbol] = bars
+
+    if not bars_by_symbol:
+        return {
+            "error": insufficient_msg,
+            "symbol_sync_issues": symbol_sync_issues,
+            "benchmark_sync_issues": benchmark_sync_issues,
+            "used_symbols": [],
+            "skipped_symbols": sorted(skipped_symbols),
+        }
+
+    target_index = pd.DatetimeIndex([])
+    for bars in bars_by_symbol.values():
+        target_index = target_index.union(pd.DatetimeIndex(bars.index))
+    target_index = target_index.sort_values()
+
+    strategy_equity = build_buy_hold_equity(
+        bars_by_symbol=bars_by_symbol,
+        target_index=target_index,
+        initial_capital=float(initial_capital),
+    ).dropna()
+
+    per_symbol_equity: dict[str, pd.Series] = {}
+    for symbol, bars in bars_by_symbol.items():
+        eq_sym = build_buy_hold_equity(
+            bars_by_symbol={symbol: bars},
+            target_index=target_index,
+            initial_capital=float(initial_capital),
+        ).dropna()
+        if not eq_sym.empty:
+            per_symbol_equity[symbol] = eq_sym
+
+    bench_bars, benchmark_symbol_used, benchmark_sync_issues = _load_tw_benchmark_bars(
+        store=store,
+        choice=benchmark_choice,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        sync_first=sync_before_run,
+        allow_twii_fallback=False,
+        min_rows=2,
+    )
+    benchmark_equity = pd.Series(dtype=float)
+    if not bench_bars.empty and "close" in bench_bars.columns:
+        bench_close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
+        aligned = bench_close.reindex(target_index).ffill()
+        valid = aligned.dropna()
+        if len(valid) >= 2:
+            base_val = float(valid.iloc[0])
+            if math.isfinite(base_val) and base_val > 0:
+                benchmark_equity = (aligned.loc[valid.index[0] :] / base_val) * float(initial_capital)
+                benchmark_equity = benchmark_equity.dropna()
+
+    common_index = pd.DatetimeIndex(strategy_equity.index)
+    if not benchmark_equity.empty:
+        common_index = common_index.intersection(pd.DatetimeIndex(benchmark_equity.index))
+    common_index = common_index.sort_values()
+    if len(common_index) < 2:
+        return {
+            "error": "Strategy 與 Benchmark 缺少足夠重疊交易日，無法建立對照圖。",
+            "symbol_sync_issues": symbol_sync_issues,
+            "benchmark_sync_issues": benchmark_sync_issues,
+            "used_symbols": sorted(list(bars_by_symbol.keys())),
+            "skipped_symbols": sorted(skipped_symbols),
+        }
+
+    strategy_plot = strategy_equity.reindex(common_index).ffill().dropna()
+    benchmark_plot = benchmark_equity.reindex(common_index).ffill().dropna() if not benchmark_equity.empty else pd.Series(dtype=float)
+    per_symbol_plot: dict[str, pd.Series] = {}
+    for symbol, series in per_symbol_equity.items():
+        aligned = series.reindex(common_index).ffill().dropna()
+        if len(aligned) >= 2:
+            per_symbol_plot[symbol] = aligned
+
+    return {
+        "error": "",
+        "benchmark_symbol": benchmark_symbol_used,
+        "strategy_equity": strategy_plot,
+        "benchmark_equity": benchmark_plot,
+        "per_symbol_equity": per_symbol_plot,
+        "used_symbols": sorted(list(bars_by_symbol.keys())),
+        "skipped_symbols": sorted(skipped_symbols),
+        "symbol_sync_issues": symbol_sync_issues,
+        "benchmark_sync_issues": benchmark_sync_issues,
+    }
 
 
 def _palette_with(base: dict[str, object], **overrides: object) -> dict[str, object]:
@@ -1851,7 +2205,13 @@ def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str
         m2.metric("市值型", str(int((top10["類型"] == "市值型").sum())))
         m3.metric("股利型", str(int((top10["類型"] == "股利型").sum())))
         m4.metric("有復權事件", str(int((top10["復權事件"] != "—").sum())))
+        snapshot_health = _build_snapshot_health(
+            start_used=start_used,
+            end_used=end_used,
+            target_yyyymmdd=end_yyyymmdd,
+        )
         st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
+        _render_data_health_caption("快照資料健康度", snapshot_health)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
         st.caption("報酬計算：以復權期初（套用已知 split 事件）對比期末收盤。")
         st.dataframe(top10, use_container_width=True, hide_index=True)
@@ -1954,16 +2314,20 @@ def _render_top10_etf_2026_ytd_view():
         m2.metric("市值型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "市值型").sum())))
         m3.metric("股利型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "股利型").sum())))
         m4.metric("有復權事件", str(int((top10_etf_df["復權事件"] != "—").sum())))
+        snapshot_health = _build_snapshot_health(
+            start_used=start_used,
+            end_used=end_used,
+            target_yyyymmdd=end_target,
+        )
         st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
         st.caption(f"2025 對照區間（實際交易日）：{hist_2025_start_used} -> {hist_2025_end_used}")
+        _render_data_health_caption("快照資料健康度", snapshot_health)
         if market_return_pct is not None and market_symbol_used:
             st.caption(f"大盤對照：{market_symbol_used} 區間報酬 {market_return_pct:.2f}%（同 2026 YTD 區間）")
         else:
             st.caption("大盤對照：目前無法取得，`贏輸台股大盤(%)` 先顯示為空白。")
         if market_issues:
-            preview = [" ".join(str(item).split()) for item in market_issues[:2]]
-            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-            st.warning(f"更新大盤資料時有部分同步錯誤：{preview_text}")
+            _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
         st.caption("`2025績效(%)` 採各檔在 2025 區間內首個可交易日計算；若空白代表該檔 2025 區間無可用日K。")
         st.caption("報酬計算：`贏輸台股大盤(%) = YTD報酬 - 大盤報酬`。")
@@ -2032,181 +2396,33 @@ def _render_top10_etf_2026_ytd_view():
 
         should_recompute = force_refresh or payload.get("run_key") != run_key
         if should_recompute:
-            store = _history_store()
-            symbol_sync_issues: list[str] = []
-            benchmark_sync_issues: list[str] = []
-
-            def _benchmark_candidates_tw(choice: str) -> list[str]:
-                mapping = {
-                    "twii": ["^TWII"],
-                    "0050": ["0050"],
-                    "006208": ["006208"],
-                }
-                return mapping.get(str(choice or "").strip().lower(), ["^TWII"])
-
             with st.spinner("計算前十大 ETF Benchmark 對照中..."):
-                if sync_before_run:
-                    _, symbol_sync_issues = _sync_symbols_history(
-                        store,
-                        market="TW",
-                        symbols=symbols,
-                        start=start_dt,
-                        end=end_dt,
-                        parallel=True,
-                    )
-
-                bars_by_symbol: dict[str, pd.DataFrame] = {}
-                skipped_symbols: list[str] = []
-                for symbol in symbols:
-                    bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
-                    if len(bars) < 2 and not sync_before_run:
-                        report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-                        if report.error:
-                            symbol_sync_issues.append(f"{symbol}: {report.error}")
-                        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
-                    if len(bars) < 2:
-                        skipped_symbols.append(symbol)
-                        continue
-                    bars, _ = apply_split_adjustment(
-                        bars=bars,
-                        symbol=symbol,
-                        market="TW",
-                        use_known=True,
-                        use_auto_detect=True,
-                    )
-                    if len(bars) < 2:
-                        skipped_symbols.append(symbol)
-                        continue
-                    bars_by_symbol[symbol] = bars
-
-                if not bars_by_symbol:
-                    payload = {
-                        "run_key": run_key,
-                        "error": "可用前十大 ETF 歷史資料不足，無法建立對照圖。",
-                        "symbol_sync_issues": symbol_sync_issues,
-                        "benchmark_sync_issues": benchmark_sync_issues,
-                    }
-                    st.session_state[payload_key] = payload
-                else:
-                    target_index = pd.DatetimeIndex([])
-                    for bars in bars_by_symbol.values():
-                        target_index = target_index.union(pd.DatetimeIndex(bars.index))
-                    target_index = target_index.sort_values()
-
-                    initial_capital = 1_000_000.0
-                    strategy_equity = build_buy_hold_equity(
-                        bars_by_symbol=bars_by_symbol,
-                        target_index=target_index,
-                        initial_capital=initial_capital,
-                    ).dropna()
-
-                    per_symbol_equity: dict[str, pd.Series] = {}
-                    for symbol, bars in bars_by_symbol.items():
-                        eq_sym = build_buy_hold_equity(
-                            bars_by_symbol={symbol: bars},
-                            target_index=target_index,
-                            initial_capital=initial_capital,
-                        ).dropna()
-                        if not eq_sym.empty:
-                            per_symbol_equity[symbol] = eq_sym
-
-                    benchmark_symbol_used = ""
-                    benchmark_equity = pd.Series(dtype=float)
-                    for candidate in _benchmark_candidates_tw(benchmark_choice):
-                        if sync_before_run:
-                            report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                            if report.error:
-                                benchmark_sync_issues.append(f"{candidate}: {report.error}")
-                        bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt))
-                        if bench_bars.empty and not sync_before_run:
-                            report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                            if report.error:
-                                benchmark_sync_issues.append(f"{candidate}: {report.error}")
-                            bench_bars = _normalize_ohlcv_frame(
-                                store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                            )
-                        if bench_bars.empty:
-                            continue
-                        bench_bars, _ = apply_split_adjustment(
-                            bars=bench_bars,
-                            symbol=candidate,
-                            market="TW",
-                            use_known=True,
-                            use_auto_detect=True,
-                        )
-                        if bench_bars.empty or "close" not in bench_bars.columns:
-                            continue
-                        bench_close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
-                        if len(bench_close) < 2:
-                            continue
-                        aligned = bench_close.reindex(target_index).ffill()
-                        valid = aligned.dropna()
-                        if len(valid) < 2:
-                            continue
-                        base_val = float(valid.iloc[0])
-                        if not math.isfinite(base_val) or base_val <= 0:
-                            continue
-                        benchmark_equity = (aligned.loc[valid.index[0] :] / base_val) * initial_capital
-                        benchmark_equity = benchmark_equity.dropna()
-                        benchmark_symbol_used = candidate
-                        break
-
-                    common_index = pd.DatetimeIndex(strategy_equity.index)
-                    if not benchmark_equity.empty:
-                        common_index = common_index.intersection(pd.DatetimeIndex(benchmark_equity.index))
-                    common_index = common_index.sort_values()
-                    if len(common_index) < 2:
-                        payload = {
-                            "run_key": run_key,
-                            "error": "Strategy 與 Benchmark 缺少足夠重疊交易日，無法建立對照圖。",
-                            "symbol_sync_issues": symbol_sync_issues,
-                            "benchmark_sync_issues": benchmark_sync_issues,
-                        }
-                        st.session_state[payload_key] = payload
-                    else:
-                        strategy_plot = strategy_equity.reindex(common_index).ffill().dropna()
-                        benchmark_plot = benchmark_equity.reindex(common_index).ffill().dropna() if not benchmark_equity.empty else pd.Series(dtype=float)
-                        per_symbol_plot: dict[str, pd.Series] = {}
-                        for symbol, series in per_symbol_equity.items():
-                            aligned = series.reindex(common_index).ffill().dropna()
-                            if len(aligned) >= 2:
-                                per_symbol_plot[symbol] = aligned
-
-                        payload = {
-                            "run_key": run_key,
-                            "error": "",
-                            "benchmark_symbol": benchmark_symbol_used,
-                            "strategy_equity": strategy_plot,
-                            "benchmark_equity": benchmark_plot,
-                            "per_symbol_equity": per_symbol_plot,
-                            "used_symbols": sorted(list(bars_by_symbol.keys())),
-                            "skipped_symbols": sorted(skipped_symbols),
-                            "symbol_sync_issues": symbol_sync_issues,
-                            "benchmark_sync_issues": benchmark_sync_issues,
-                        }
-                        st.session_state[payload_key] = payload
+                payload = _compute_tw_equal_weight_compare_payload(
+                    symbols=symbols,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    benchmark_choice=benchmark_choice,
+                    sync_before_run=sync_before_run,
+                    insufficient_msg="可用前十大 ETF 歷史資料不足，無法建立對照圖。",
+                )
+            payload["run_key"] = run_key
+            st.session_state[payload_key] = payload
 
         payload = st.session_state.get(payload_key, {})
         if not isinstance(payload, dict):
             payload = {}
         error_text = str(payload.get("error", "")).strip()
         if error_text:
-            st.warning(error_text)
+            _emit_issue_message(error_text)
             return
 
         symbol_sync_issues = payload.get("symbol_sync_issues", [])
         if isinstance(symbol_sync_issues, list) and symbol_sync_issues:
-            preview = [" ".join(str(item).split()) for item in symbol_sync_issues[:3]]
-            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-            remain = len(symbol_sync_issues) - len(preview)
-            remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
-            st.warning(f"部分 ETF 同步失敗，已盡量使用本地可用資料：{preview_text}{remain_text}")
+            _render_sync_issues("部分 ETF 同步失敗，已盡量使用本地可用資料", symbol_sync_issues, preview_limit=3)
 
         benchmark_sync_issues = payload.get("benchmark_sync_issues", [])
         if isinstance(benchmark_sync_issues, list) and benchmark_sync_issues:
-            preview = [" ".join(str(item).split()) for item in benchmark_sync_issues[:2]]
-            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-            st.warning(f"Benchmark 同步有部分錯誤，已盡量使用本地可用資料：{preview_text}")
+            _render_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues, preview_limit=2)
 
         strategy_equity = payload.get("strategy_equity")
         benchmark_equity = payload.get("benchmark_equity")
@@ -2218,6 +2434,15 @@ def _render_top10_etf_2026_ytd_view():
             benchmark_equity = pd.Series(dtype=float)
         if not isinstance(per_symbol_equity, dict):
             per_symbol_equity = {}
+        compare_health = _build_data_health(
+            as_of=strategy_equity.index.max() if len(strategy_equity.index) else "",
+            data_sources=["sqlite:daily_bars"],
+            source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
+            degraded=bool(symbol_sync_issues or benchmark_sync_issues),
+            fallback_depth=len(symbol_sync_issues) + len(benchmark_sync_issues),
+            notes="部分標的同步失敗時會盡量使用本地資料",
+        )
+        _render_data_health_caption("Benchmark 對照資料健康度", compare_health)
 
         palette = _ui_palette()
         symbol_styles = _build_symbol_line_styles(list(per_symbol_equity.keys()))
@@ -2436,16 +2661,20 @@ def _render_active_etf_2026_ytd_view():
         m2.metric("正報酬檔數", str(int((etf_df["YTD報酬(%)"] > 0).sum())))
         m3.metric("負報酬檔數", str(int((etf_df["YTD報酬(%)"] < 0).sum())))
         m4.metric("有復權事件", str(int((etf_df["復權事件"] != "—").sum())))
+        snapshot_health = _build_snapshot_health(
+            start_used=start_used,
+            end_used=end_used,
+            target_yyyymmdd=end_target,
+        )
         st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
         st.caption(f"2025 對照區間（實際交易日）：{hist_2025_start_used} -> {hist_2025_end_used}")
+        _render_data_health_caption("快照資料健康度", snapshot_health)
         if market_return_pct is not None and market_symbol_used:
             st.caption(f"大盤對照：{market_symbol_used} 區間報酬 {market_return_pct:.2f}%（同 2026 YTD 區間）")
         else:
             st.caption("大盤對照：目前無法取得，`贏輸台股大盤(%)` 先顯示為空白。")
         if market_issues:
-            preview = [" ".join(str(item).split()) for item in market_issues[:2]]
-            preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-            st.warning(f"更新大盤資料時有部分同步錯誤：{preview_text}")
+            _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）。主動式規則：代碼結尾 A 且名稱含「主動」。")
         st.caption("`2025績效(%)` 採各檔在 2025 區間內首個可交易日計算；若空白代表該檔 2025 區間無可用日K。")
         st.caption("報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`贏輸台股大盤(%) = YTD報酬 - 大盤報酬`。")
@@ -2514,183 +2743,33 @@ def _render_active_etf_2026_ytd_view():
 
             should_recompute = force_refresh or payload.get("run_key") != run_key
             if should_recompute:
-                store = _history_store()
-                symbol_sync_issues: list[str] = []
-                benchmark_sync_issues: list[str] = []
-
-                def _benchmark_candidates_tw(choice: str) -> list[str]:
-                    mapping = {
-                        "twii": ["^TWII"],
-                        "0050": ["0050"],
-                        "006208": ["006208"],
-                    }
-                    return mapping.get(str(choice or "").strip().lower(), ["^TWII"])
-
                 with st.spinner(spinner_text):
-                    if sync_before_run:
-                        _, symbol_sync_issues = _sync_symbols_history(
-                            store,
-                            market="TW",
-                            symbols=symbols,
-                            start=start_dt,
-                            end=end_dt,
-                            parallel=True,
-                        )
-
-                    bars_by_symbol: dict[str, pd.DataFrame] = {}
-                    skipped_symbols: list[str] = []
-                    for symbol in symbols:
-                        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
-                        if len(bars) < 2 and not sync_before_run:
-                            report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-                            if report.error:
-                                symbol_sync_issues.append(f"{symbol}: {report.error}")
-                            bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
-                        if len(bars) < 2:
-                            skipped_symbols.append(symbol)
-                            continue
-                        bars, _ = apply_split_adjustment(
-                            bars=bars,
-                            symbol=symbol,
-                            market="TW",
-                            use_known=True,
-                            use_auto_detect=True,
-                        )
-                        if len(bars) < 2:
-                            skipped_symbols.append(symbol)
-                            continue
-                        bars_by_symbol[symbol] = bars
-
-                    if not bars_by_symbol:
-                        payload = {
-                            "run_key": run_key,
-                            "error": "可用主動式 ETF 歷史資料不足，無法建立對照圖。",
-                            "symbol_sync_issues": symbol_sync_issues,
-                            "benchmark_sync_issues": benchmark_sync_issues,
-                        }
-                        st.session_state[payload_key] = payload
-                    else:
-                        target_index = pd.DatetimeIndex([])
-                        for bars in bars_by_symbol.values():
-                            target_index = target_index.union(pd.DatetimeIndex(bars.index))
-                        target_index = target_index.sort_values()
-
-                        initial_capital = 1_000_000.0
-                        strategy_equity = build_buy_hold_equity(
-                            bars_by_symbol=bars_by_symbol,
-                            target_index=target_index,
-                            initial_capital=initial_capital,
-                        ).dropna()
-
-                        per_symbol_equity: dict[str, pd.Series] = {}
-                        for symbol, bars in bars_by_symbol.items():
-                            eq_sym = build_buy_hold_equity(
-                                bars_by_symbol={symbol: bars},
-                                target_index=target_index,
-                                initial_capital=initial_capital,
-                            ).dropna()
-                            if not eq_sym.empty:
-                                per_symbol_equity[symbol] = eq_sym
-
-                        benchmark_symbol_used = ""
-                        benchmark_equity = pd.Series(dtype=float)
-                        for candidate in _benchmark_candidates_tw(benchmark_choice):
-                            if sync_before_run:
-                                report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                                if report.error:
-                                    benchmark_sync_issues.append(f"{candidate}: {report.error}")
-                            bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt))
-                            if bench_bars.empty and not sync_before_run:
-                                report = store.sync_symbol_history(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                                if report.error:
-                                    benchmark_sync_issues.append(f"{candidate}: {report.error}")
-                                bench_bars = _normalize_ohlcv_frame(
-                                    store.load_daily_bars(symbol=candidate, market="TW", start=start_dt, end=end_dt)
-                                )
-                            if bench_bars.empty:
-                                continue
-                            bench_bars, _ = apply_split_adjustment(
-                                bars=bench_bars,
-                                symbol=candidate,
-                                market="TW",
-                                use_known=True,
-                                use_auto_detect=True,
-                            )
-                            if bench_bars.empty or "close" not in bench_bars.columns:
-                                continue
-                            bench_close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna().sort_index()
-                            if len(bench_close) < 2:
-                                continue
-                            aligned = bench_close.reindex(target_index).ffill()
-                            valid = aligned.dropna()
-                            if len(valid) < 2:
-                                continue
-                            base_val = float(valid.iloc[0])
-                            if not math.isfinite(base_val) or base_val <= 0:
-                                continue
-                            benchmark_equity = (aligned.loc[valid.index[0] :] / base_val) * initial_capital
-                            benchmark_equity = benchmark_equity.dropna()
-                            benchmark_symbol_used = candidate
-                            break
-
-                        common_index = pd.DatetimeIndex(strategy_equity.index)
-                        if not benchmark_equity.empty:
-                            common_index = common_index.intersection(pd.DatetimeIndex(benchmark_equity.index))
-                        common_index = common_index.sort_values()
-                        if len(common_index) < 2:
-                            payload = {
-                                "run_key": run_key,
-                                "error": "Strategy 與 Benchmark 缺少足夠重疊交易日，無法建立對照圖。",
-                                "symbol_sync_issues": symbol_sync_issues,
-                                "benchmark_sync_issues": benchmark_sync_issues,
-                            }
-                            st.session_state[payload_key] = payload
-                        else:
-                            strategy_plot = strategy_equity.reindex(common_index).ffill().dropna()
-                            benchmark_plot = (
-                                benchmark_equity.reindex(common_index).ffill().dropna() if not benchmark_equity.empty else pd.Series(dtype=float)
-                            )
-                            per_symbol_plot: dict[str, pd.Series] = {}
-                            for symbol, series in per_symbol_equity.items():
-                                aligned = series.reindex(common_index).ffill().dropna()
-                                if len(aligned) >= 2:
-                                    per_symbol_plot[symbol] = aligned
-
-                            payload = {
-                                "run_key": run_key,
-                                "error": "",
-                                "benchmark_symbol": benchmark_symbol_used,
-                                "strategy_equity": strategy_plot,
-                                "benchmark_equity": benchmark_plot,
-                                "per_symbol_equity": per_symbol_plot,
-                                "used_symbols": sorted(list(bars_by_symbol.keys())),
-                                "skipped_symbols": sorted(skipped_symbols),
-                                "symbol_sync_issues": symbol_sync_issues,
-                                "benchmark_sync_issues": benchmark_sync_issues,
-                            }
-                            st.session_state[payload_key] = payload
+                    payload = _compute_tw_equal_weight_compare_payload(
+                        symbols=symbols,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        benchmark_choice=benchmark_choice,
+                        sync_before_run=sync_before_run,
+                        insufficient_msg="可用主動式 ETF 歷史資料不足，無法建立對照圖。",
+                    )
+                payload["run_key"] = run_key
+                st.session_state[payload_key] = payload
 
             payload = st.session_state.get(payload_key, {})
             if not isinstance(payload, dict):
                 payload = {}
             error_text = str(payload.get("error", "")).strip()
             if error_text:
-                st.warning(error_text)
+                _emit_issue_message(error_text)
                 return
 
             symbol_sync_issues = payload.get("symbol_sync_issues", [])
             if isinstance(symbol_sync_issues, list) and symbol_sync_issues:
-                preview = [" ".join(str(item).split()) for item in symbol_sync_issues[:3]]
-                preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-                remain = len(symbol_sync_issues) - len(preview)
-                remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
-                st.warning(f"部分 ETF 同步失敗，已盡量使用本地可用資料：{preview_text}{remain_text}")
+                _render_sync_issues("部分 ETF 同步失敗，已盡量使用本地可用資料", symbol_sync_issues, preview_limit=3)
 
             benchmark_sync_issues = payload.get("benchmark_sync_issues", [])
             if isinstance(benchmark_sync_issues, list) and benchmark_sync_issues:
-                preview = [" ".join(str(item).split()) for item in benchmark_sync_issues[:2]]
-                preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-                st.warning(f"Benchmark 同步有部分錯誤，已盡量使用本地可用資料：{preview_text}")
+                _render_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues, preview_limit=2)
 
             strategy_equity = payload.get("strategy_equity")
             benchmark_equity = payload.get("benchmark_equity")
@@ -2702,6 +2781,15 @@ def _render_active_etf_2026_ytd_view():
                 benchmark_equity = pd.Series(dtype=float)
             if not isinstance(per_symbol_equity, dict):
                 per_symbol_equity = {}
+            compare_health = _build_data_health(
+                as_of=strategy_equity.index.max() if len(strategy_equity.index) else "",
+                data_sources=["sqlite:daily_bars"],
+                source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
+                degraded=bool(symbol_sync_issues or benchmark_sync_issues),
+                fallback_depth=len(symbol_sync_issues) + len(benchmark_sync_issues),
+                notes="部分標的同步失敗時會盡量使用本地資料",
+            )
+            _render_data_health_caption("Benchmark 對照資料健康度", compare_health)
 
             palette = _ui_palette()
             symbol_styles = _build_symbol_line_styles(list(per_symbol_equity.keys()))
@@ -2892,11 +2980,16 @@ def _render_quality_bar(ctx, refresh_sec: int):
         intraday_bars = 0
     st.caption(f"即時走勢來源：{intraday_source} | K數={intraday_bars}")
 
-    freshness = "—" if quality.freshness_sec is None else f"{quality.freshness_sec}s"
-    st.caption(
-        f"資料品質：source={quote.source} | delayed={'yes' if quote.is_delayed else 'no'} | "
-        f"fallback_depth={quality.fallback_depth} | freshness={freshness} | refresh={refresh_sec}s"
+    health = _build_data_health(
+        as_of=getattr(quote, "ts", ""),
+        data_sources=[str(getattr(quote, "source", "") or "unknown")],
+        source_chain=source_chain,
+        degraded=bool(getattr(quality, "degraded", False)),
+        fallback_depth=int(getattr(quality, "fallback_depth", 0) or 0),
+        freshness_sec=int(getattr(quality, "freshness_sec", 0) or 0) if getattr(quality, "freshness_sec", None) is not None else None,
+        notes=f"refresh={refresh_sec}s | delayed={'yes' if quote.is_delayed else 'no'}",
     )
+    _render_data_health_caption("資料品質", health)
     st.caption(f"最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}（fragment 局部刷新）")
 
 
@@ -3805,6 +3898,27 @@ def _deserialize_backtest_run_payload(payload: object) -> Optional[dict[str, obj
     return run_payload
 
 
+def _load_cached_backtest_payload(
+    *,
+    store: HistoryStore,
+    run_key: str,
+    expected_schema: int,
+    expected_hash: str,
+) -> tuple[Optional[dict[str, object]], str]:
+    cached_replay = store.load_latest_backtest_replay_run(run_key)
+    if cached_replay is None or not isinstance(cached_replay.payload, dict):
+        return None, ""
+    cached_params = cached_replay.params if isinstance(cached_replay.params, dict) else {}
+    cached_schema = int(cached_params.get("schema_version", 0) or 0)
+    cached_hash = str(cached_params.get("source_hash", "")).strip()
+    if cached_schema != expected_schema or cached_hash != expected_hash:
+        return None, "偵測到舊版快取或參數簽章不一致，本次會重新計算回測。"
+    restored = _deserialize_backtest_run_payload(cached_replay.payload)
+    if restored is None:
+        return None, "偵測到快取內容不完整，本次會重新計算回測。"
+    return restored, "已載入同條件的 SQLite 快取回測結果。"
+
+
 def _render_backtest_view():
     def _parse_symbols(text: str) -> list[str]:
         symbols = [s.strip().upper() for s in text.replace("，", ",").split(",")]
@@ -4408,20 +4522,23 @@ def _render_backtest_view():
             )
         return
 
+    strategy_token = _stable_json_dumps(strategy_params if isinstance(strategy_params, dict) else {})
     run_key = (
         f"bt_result:{market}:{','.join(symbols)}:{strategy}:{start_date}:{end_date}:"
         f"{int(enable_wf)}:{train_ratio}:{objective}:{int(initial_capital)}:"
+        f"{strategy_token}:{fee_rate:.6f}:{sell_tax:.6f}:{slippage:.6f}:"
         f"{int(use_split_adjustment)}:{int(auto_detect_split)}:{int(use_total_return_adjustment)}:"
         f"{invest_start_mode}:{invest_start_date}:{invest_start_k}"
     )
     with st.container(border=True):
         _render_card_section_header("回測執行", "輸入完成後會自動回測；同條件會優先讀取 SQLite 快取。")
 
-    run_params = {
+    run_params_base = {
         "market": market,
         "mode": mode,
         "symbols": list(symbols),
         "strategy": strategy,
+        "strategy_params": strategy_params if isinstance(strategy_params, dict) else {},
         "start_date": str(start_date),
         "end_date": str(end_date),
         "enable_walk_forward": bool(enable_wf),
@@ -4438,16 +4555,26 @@ def _render_backtest_view():
         "invest_start_date": str(invest_start_date) if invest_start_date is not None else "",
         "invest_start_k": int(invest_start_k) if invest_start_k is not None else -1,
     }
+    run_params_hash = _build_replay_source_hash(run_params_base)
+    run_params = {
+        **run_params_base,
+        "schema_version": BACKTEST_REPLAY_SCHEMA_VERSION,
+        "source_hash": run_params_hash,
+    }
 
     payload = st.session_state.get(run_key)
     if payload is None:
-        cached_replay = store.load_latest_backtest_replay_run(run_key)
-        if cached_replay and isinstance(cached_replay.payload, dict):
-            restored = _deserialize_backtest_run_payload(cached_replay.payload)
-            if restored is not None:
-                payload = restored
-                st.session_state[run_key] = restored
-                st.caption("已載入同條件的 SQLite 快取回測結果。")
+        cached_payload, cache_message = _load_cached_backtest_payload(
+            store=store,
+            run_key=run_key,
+            expected_schema=BACKTEST_REPLAY_SCHEMA_VERSION,
+            expected_hash=run_params_hash,
+        )
+        if cache_message:
+            st.caption(cache_message)
+        if isinstance(cached_payload, dict):
+            payload = cached_payload
+            st.session_state[run_key] = cached_payload
 
     if payload is None:
         cost_model = CostModel(fee_rate=fee_rate, sell_tax_rate=sell_tax, slippage_rate=slippage)
@@ -5064,6 +5191,23 @@ def _render_backtest_view():
         if is_portfolio
         else f"Buy-and-Hold Equity ({selected_symbols[0]})"
     )
+    benchmark_as_of = result.equity_curve.index.max() if not result.equity_curve.empty else ""
+    if not benchmark.empty and len(benchmark.index):
+        benchmark_as_of = benchmark.index.max()
+    health_notes = []
+    if bool(benchmark_adj_info.get("applied")):
+        health_notes.append(f"adj_close={benchmark_adj_info.get('coverage_pct', 0)}%")
+    if benchmark_split_events:
+        health_notes.append(f"split_events={len(benchmark_split_events)}")
+    benchmark_health = _build_data_health(
+        as_of=benchmark_as_of,
+        data_sources=[benchmark_source or "benchmark_unknown"],
+        source_chain=[benchmark_symbol] if benchmark_symbol else [],
+        degraded=bool(benchmark_choice != "off" and benchmark.empty),
+        fallback_depth=1 if benchmark_choice != "off" and benchmark.empty else 0,
+        notes=" | ".join(health_notes),
+    )
+    _render_data_health_caption("Benchmark 資料健康度", benchmark_health)
     if benchmark_choice != "off" and benchmark_symbol:
         st.caption(f"Benchmark 來源：{benchmark_symbol}（{benchmark_source or 'unknown'}）")
     if bool(benchmark_adj_info.get("applied")):
@@ -6227,51 +6371,6 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         help="標的較多時通常更快；若網路不穩可關閉改逐檔同步。",
     )
 
-    def _show_sync_issues(prefix: str, issues: list[str]):
-        if not issues:
-            return
-        preview = [" ".join(str(item).split()) for item in issues[:3]]
-        preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-        remain = len(issues) - len(preview)
-        remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
-        st.warning(f"{prefix}：{preview_text}{remain_text}")
-
-    def _benchmark_candidates_tw(choice: str) -> list[str]:
-        mapping = {
-            "twii": ["^TWII"],
-            "0050": ["0050"],
-            "006208": ["006208"],
-        }
-        return mapping.get(choice, ["^TWII"])
-
-    def _load_benchmark_close(choice: str, *, sync_first: bool) -> tuple[pd.Series, str, list[str]]:
-        sync_issues: list[str] = []
-        for benchmark_symbol in _benchmark_candidates_tw(choice):
-            if sync_first:
-                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-                if report.error:
-                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
-            bench_bars = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            if bench_bars.empty and not sync_first:
-                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-                if report.error:
-                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
-                bench_bars = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            bench_bars = _normalize_ohlcv_frame(bench_bars)
-            if bench_bars.empty:
-                continue
-            bench_bars, _ = apply_split_adjustment(
-                bars=bench_bars,
-                symbol=benchmark_symbol,
-                market="TW",
-                use_known=True,
-                use_auto_detect=True,
-            )
-            close = pd.to_numeric(bench_bars["close"], errors="coerce").dropna()
-            if len(close) >= 2:
-                return close, benchmark_symbol, sync_issues
-        return pd.Series(dtype=float), "", sync_issues
-
     strategy_token = json.dumps(strategy_params, sort_keys=True, ensure_ascii=False)
     run_key = (
         f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
@@ -6342,11 +6441,15 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                 bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
                 bars_cache[symbol] = _normalize_ohlcv_frame(bars_local)
 
-        benchmark_close, benchmark_symbol, benchmark_sync_issues = _load_benchmark_close(
-            benchmark_choice,
+        benchmark_close, benchmark_symbol, benchmark_sync_issues = _load_tw_benchmark_close(
+            store=store,
+            choice=benchmark_choice,
+            start_dt=start_dt,
+            end_dt=end_dt,
             sync_first=sync_before_run,
+            allow_twii_fallback=False,
         )
-        _show_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
+        _render_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
         if benchmark_close.empty:
             st.error("Benchmark 取得失敗，請改選其他基準（0050 或 006208）後重試。")
             return
@@ -6418,7 +6521,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             progress.progress((idx + 1) / max(len(run_symbols), 1))
 
         progress.empty()
-        _show_sync_issues("部分成分股同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
+        _render_sync_issues("部分成分股同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
         payload = {
             "run_key": run_key,
             "rows": rows,
@@ -6440,6 +6543,15 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         return
     if payload.get("run_key") != run_key:
         st.caption("目前顯示的是上一次執行結果；若要套用目前設定，請重新按下執行。")
+    heatmap_health = _build_data_health(
+        as_of=payload.get("generated_at", ""),
+        data_sources=["sqlite:heatmap_runs"],
+        source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
+        degraded=payload.get("run_key") != run_key,
+        fallback_depth=1 if payload.get("run_key") != run_key else 0,
+        notes=f"selected={payload.get('selected_count', 0)}/{payload.get('universe_count', 0)}",
+    )
+    _render_data_health_caption("熱力圖資料健康度", heatmap_health)
 
     rows_df = pd.DataFrame(payload.get("rows", []))
     if rows_df.empty:
@@ -6687,50 +6799,6 @@ def _render_tw_etf_rotation_view():
         help="多檔 ETF 時通常更快；若網路不穩可關閉改逐檔同步。",
     )
 
-    def _show_sync_issues(prefix: str, issues: list[str]):
-        if not issues:
-            return
-        preview = [" ".join(str(item).split()) for item in issues[:3]]
-        preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
-        remain = len(issues) - len(preview)
-        remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
-        st.warning(f"{prefix}：{preview_text}{remain_text}")
-
-    def _benchmark_candidates_tw(choice: str) -> list[str]:
-        mapping = {
-            "twii": ["^TWII", "0050", "006208"],
-            "0050": ["0050"],
-            "006208": ["006208"],
-        }
-        return mapping.get(choice, ["^TWII", "0050", "006208"])
-
-    def _load_benchmark_bars(choice: str, *, sync_first: bool) -> tuple[pd.DataFrame, str, list[str]]:
-        sync_issues: list[str] = []
-        for benchmark_symbol in _benchmark_candidates_tw(choice):
-            if sync_first:
-                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-                if report.error:
-                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
-            bench = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            if bench.empty and not sync_first:
-                report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-                if report.error:
-                    sync_issues.append(f"{benchmark_symbol}: {report.error}")
-                bench = store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
-            bench = _normalize_ohlcv_frame(bench)
-            if bench.empty:
-                continue
-            bench, _ = apply_split_adjustment(
-                bars=bench,
-                symbol=benchmark_symbol,
-                market="TW",
-                use_known=True,
-                use_auto_detect=True,
-            )
-            if len(bench) >= 60:
-                return bench, benchmark_symbol, sync_issues
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]), "", sync_issues
-
     def _build_rotation_holding_rank(
         *,
         weights_df: Optional[pd.DataFrame],
@@ -6843,17 +6911,22 @@ def _render_tw_etf_rotation_view():
                 bars_by_symbol[symbol] = bars
             progress.progress((idx + 1) / len(ROTATION_DEFAULT_UNIVERSE))
         progress.empty()
-        _show_sync_issues("部分 ETF 同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
+        _render_sync_issues("部分 ETF 同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
 
         if not bars_by_symbol:
             st.error(f"可用資料不足（每檔至少需 {ROTATION_MIN_BARS} 根K），無法執行。")
             return
 
-        benchmark_bars, benchmark_symbol, benchmark_sync_issues = _load_benchmark_bars(
-            benchmark_choice,
+        benchmark_bars, benchmark_symbol, benchmark_sync_issues = _load_tw_benchmark_bars(
+            store=store,
+            choice=benchmark_choice,
+            start_dt=start_dt,
+            end_dt=end_dt,
             sync_first=sync_before_run,
+            allow_twii_fallback=True,
+            min_rows=60,
         )
-        _show_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
+        _render_sync_issues("Benchmark 同步有部分錯誤，已盡量使用本地可用資料", benchmark_sync_issues)
         if benchmark_bars.empty:
             st.error("Benchmark 取得失敗，請改選 0050 或 006208 後重試。")
             return
@@ -6966,6 +7039,15 @@ def _render_tw_etf_rotation_view():
         return
     if payload.get("run_key") != run_key:
         st.caption("目前顯示的是上一次執行結果；若要套用目前設定，請重新按下執行。")
+    rotation_health = _build_data_health(
+        as_of=payload.get("generated_at", ""),
+        data_sources=["sqlite:rotation_runs"],
+        source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
+        degraded=payload.get("run_key") != run_key,
+        fallback_depth=1 if payload.get("run_key") != run_key else 0,
+        notes=f"used={len(payload.get('used_symbols', []))}/{len(payload.get('universe_symbols', []))}",
+    )
+    _render_data_health_caption("輪動資料健康度", rotation_health)
 
     strategy_df = pd.DataFrame(payload.get("equity_curve", []))
     if strategy_df.empty or "date" not in strategy_df.columns or "equity" not in strategy_df.columns:

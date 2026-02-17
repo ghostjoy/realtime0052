@@ -61,6 +61,7 @@ git config --get core.hooksPath
 - 台股即時：`Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`（自動降級）
 - 台股日K：`Fugle Historical（日K） -> TW OpenAPI(TWSE) -> TPEx OpenAPI(上櫃最新日資料) -> Yahoo`（自動降級；需 Fugle API key 才會啟用第一段）
 - 每次顯示來源與資料品質（是否延遲、fallback depth、freshness）
+- 主要卡片補上資料健康度：`as_of / source / source chain / fallback depth`
 - 即時模式 UI：改為「即時總覽 / 即時走勢 / 側邊分析卡」版面，資訊密度更清楚
 - 台股即時資料可批次落地到 SQLite（`intraday_ticks`），供後續查詢與回放擴充
 - `Theme` 主題切換：可在側邊欄切換 `日光白` / `灰白專業` / `深色專業`
@@ -110,6 +111,7 @@ git config --get core.hooksPath
 - 分割調整（復權）：回測頁可開啟 `分割調整（復權）`，避免像 `0052` 分割後造成歷史曲線與報酬失真
 - 還原權息（Adj Close）：回測頁可開啟 `還原權息計算（Adj Close）`，若資料有 `adj_close` 會優先套用，並避免與分割調整重複計算
 - 回測頁可開啟 `回測前自動補資料缺口（推薦）`，僅同步缺口標的，降低「天數不足」機率
+- 回測回放快取加入 `schema_version + source_hash` 參數簽章，避免載入不相容舊快取
 
 ### 3.6) 00935 成分股熱力圖回測
 

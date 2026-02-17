@@ -10,6 +10,8 @@ __pycache__/
 # Local DB / runtime artifacts
 market_history.sqlite3
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # OS
 .DS_Store
