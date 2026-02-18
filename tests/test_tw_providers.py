@@ -212,6 +212,46 @@ class TwProvidersTests(unittest.TestCase):
         self.assertEqual(kwargs.get("params", {}).get("timeframe"), "D")
 
     @patch("requests.get")
+    def test_fugle_historical_supports_alphanumeric_tw_symbol(self, mock_get):
+        mock_get.return_value = _MockResponse(
+            {
+                "symbol": "00719B",
+                "data": [
+                    {
+                        "date": "2026-02-10T00:00:00.000Z",
+                        "open": 32.1,
+                        "high": 32.5,
+                        "low": 31.9,
+                        "close": 32.3,
+                        "volume": 100000,
+                    },
+                    {
+                        "date": "2026-02-11T00:00:00.000Z",
+                        "open": 32.2,
+                        "high": 32.6,
+                        "low": 32.0,
+                        "close": 32.4,
+                        "volume": 110000,
+                    },
+                ],
+            }
+        )
+        provider = TwFugleHistoricalProvider(api_key="fake-key")
+        snap = provider.ohlcv(
+            ProviderRequest(
+                symbol="00719B",
+                market="TW",
+                interval="1d",
+                start=datetime(2026, 2, 10, tzinfo=timezone.utc),
+                end=datetime(2026, 2, 11, tzinfo=timezone.utc),
+            )
+        )
+        self.assertEqual(snap.symbol, "00719B")
+        self.assertEqual(len(snap.df), 2)
+        called_url = str(mock_get.call_args.args[0])
+        self.assertIn("/00719B", called_url)
+
+    @patch("requests.get")
     def test_fugle_historical_ohlcv_chunks_long_range(self, mock_get):
         def _handler(*_args, **kwargs):
             params = kwargs.get("params", {})

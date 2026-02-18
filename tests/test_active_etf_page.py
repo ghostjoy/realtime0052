@@ -13,11 +13,13 @@ from app import (
     BACKTEST_REPLAY_SCHEMA_VERSION,
     _apply_unified_benchmark_hover,
     _benchmark_candidates_tw,
+    _fill_unresolved_tw_names,
     _decorate_tw_etf_top10_ytd_table,
     _build_data_health,
     _build_snapshot_health,
     _build_replay_source_hash,
     _build_symbol_line_styles,
+    _resolve_tw_symbol_names,
     _build_tw_active_etf_ytd_between,
     _classify_issue_level,
     _is_tw_active_etf,
@@ -28,6 +30,45 @@ from app import (
 
 
 class ActiveEtfPageTests(unittest.TestCase):
+    def test_resolve_tw_symbol_names_uses_full_rows_fallback(self):
+        class _FakeService:
+            def get_tw_symbol_names(self, symbols):
+                return {str(s): str(s) for s in symbols}
+
+        out = _resolve_tw_symbol_names(
+            service=_FakeService(),
+            symbols=["2330", "2454"],
+            full_rows=[
+                {"symbol": "2330.TW", "tw_code": "2330", "name": "台積電"},
+                {"symbol": "2454.TW", "tw_code": "2454", "name": "聯發科"},
+            ],
+        )
+        self.assertEqual(out.get("2330"), "台積電")
+        self.assertEqual(out.get("2454"), "聯發科")
+
+    def test_fill_unresolved_tw_names_rehydrates_cached_code_names(self):
+        class _FakeService:
+            def get_tw_symbol_names(self, symbols):
+                # Simulate unresolved upstream response.
+                return {str(s): str(s) for s in symbols}
+
+        frame = pd.DataFrame(
+            [
+                {"symbol": "2330", "name": "2330", "excess_pct": 1.2},
+                {"symbol": "2454", "name": "", "excess_pct": 0.8},
+            ]
+        )
+        out = _fill_unresolved_tw_names(
+            frame=frame,
+            service=_FakeService(),
+            full_rows=[
+                {"symbol": "2330.TW", "tw_code": "2330", "name": "台積電"},
+                {"symbol": "2454.TW", "tw_code": "2454", "name": "聯發科"},
+            ],
+        )
+        self.assertEqual(str(out.loc[0, "name"]), "台積電")
+        self.assertEqual(str(out.loc[1, "name"]), "聯發科")
+
     def test_benchmark_candidates_tw_modes(self):
         self.assertEqual(_benchmark_candidates_tw("twii"), ["^TWII"])
         self.assertEqual(_benchmark_candidates_tw("twii", allow_twii_fallback=True), ["^TWII", "0050", "006208"])

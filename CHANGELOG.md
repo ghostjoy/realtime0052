@@ -76,6 +76,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated PROJECT_CONTEXT.md, README.md, app.py, providers/tw_fugle_rest.py, services/market_data_service.py, tests/test_active_etf_page.py, ... (+1) [id:695a12c9e1]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, market_data_types.py, scripts/bootstrap_market_data.py, services/__init__.py, ... (+17) [id:54e33a04fe]
 - `MarketDataService.get_tw_symbol_names/get_tw_symbol_industries` 改為「SQLite 優先、API 補抓、結果回寫 SQLite」：
   - 命中本地 metadata 時可直接回傳，不再重複網路請求

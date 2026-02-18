@@ -160,7 +160,7 @@ class MarketDataService:
         if not text or "." in text:
             return text
         # TW individual stocks/ETFs are typically 4~6 digit codes on Yahoo.
-        if re.fullmatch(r"\d{4,6}", text):
+        if re.fullmatch(r"\d{4,6}[A-Z]?", text):
             return f"{text}.TW"
         return text
 

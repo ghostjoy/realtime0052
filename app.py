@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
 from datetime import date, datetime, timezone
@@ -76,6 +77,14 @@ def _history_store() -> HistoryStore:
 
 
 def _auto_run_daily_incremental_refresh(store: HistoryStore):
+    auto_enabled = str(os.getenv("REALTIME0052_AUTO_INCREMENTAL_ON_STARTUP", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not auto_enabled:
+        return
     today_token = date.today().isoformat()
     session_key = f"daily_incremental_done:{today_token}"
     if st.session_state.get(session_key):
@@ -353,6 +362,36 @@ ETF_INDEX_METHOD_SUMMARY: dict[str, dict[str, object]] = {
         ],
         "sources": [
             ("元大投信 0050 基本資訊（Index Profile / Index Methodology）", "https://www.yuantaetfs.com/product/detail/0050/Basic_information"),
+        ],
+    },
+    "0052": {
+        "title": "0052 指數編製標準（官方摘要）",
+        "index_name": "臺灣資訊科技指數（FTSE TWSE Taiwan Technology Index）",
+        "provider": "臺灣證券交易所與 FTSE Russell 合作編製",
+        "rules": [
+            "成分股母體來自 FTSE 臺灣 50 指數與 FTSE 臺灣中型 100 指數。",
+            "依 FTSE ICB 產業分類，納入資訊科技（Technology）產業群公司。",
+            "採自由流通市值加權，成分股檔數不固定（無固定上限）。",
+            "定期審核頻率為每年 3、6、9、12 月（季度調整）。",
+        ],
+        "sources": [
+            ("臺灣指數公司：FTSE TWSE Taiwan Technology Index（TWIT）", "https://taiwanindex.com.tw/en/indexes/TWIT"),
+            ("富邦投信 0052 專頁（追蹤指數與調整頻率）", "https://www.fubon.com/asset-management/ph/0052/index.html"),
+        ],
+    },
+    "00993A": {
+        "title": "00993A 編製/管理規則（官方摘要）",
+        "index_name": "主動式 ETF（非被動複製單一指數）",
+        "provider": "安聯投信（主動管理）；資訊揭露於 TWSE ETF e添富",
+        "rules": [
+            "00993A 屬主動式 ETF，由基金經理團隊主動選股與調整部位，不採被動複製追蹤方式。",
+            "TWSE 新上市資訊中，追蹤指數/編製機構/定審頻率欄位揭露為「-」，屬主動管理商品。",
+            "ETF e添富商品頁另揭露「標的指數：臺灣證券交易所發行量加權股價指數」，可作市場比較參考。",
+            "實際投資策略與持股調整仍以基金公開說明書與基金公司最新公告為準。",
+        ],
+        "sources": [
+            ("TWSE ETF e添富：00993A 新上市資訊", "https://www.twse.com.tw/zh/ETFortune/newsDetail/8fbe8fd8-53ec-11f0-b0e4-0242ac110003"),
+            ("TWSE ETF e添富：00993A 商品資訊", "https://www.twse.com.tw/zh/ETFortune/etfInfo/00993A"),
         ],
     },
     "00935": {
@@ -644,6 +683,100 @@ def _enrich_rows_with_tw_names(
     return out_rows
 
 
+def _is_unresolved_symbol_name(symbol: str, name: str) -> bool:
+    sym = str(symbol or "").strip().upper()
+    nm = str(name or "").strip().upper()
+    if not nm:
+        return True
+    return nm == sym
+
+
+def _build_tw_name_map_from_full_rows(rows: list[dict[str, object]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = _extract_tw_code_from_row(row)
+        if not code:
+            continue
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        if _is_unresolved_symbol_name(code, name):
+            continue
+        if code not in out:
+            out[code] = name
+    return out
+
+
+def _resolve_tw_symbol_names(
+    *,
+    service: MarketDataService,
+    symbols: list[str],
+    full_rows: Optional[list[dict[str, object]]] = None,
+) -> dict[str, str]:
+    ordered: list[str] = []
+    for symbol in symbols:
+        code = str(symbol or "").strip().upper()
+        if not re.fullmatch(r"\d{4}", code):
+            continue
+        if code not in ordered:
+            ordered.append(code)
+    if not ordered:
+        return {}
+
+    api_map = service.get_tw_symbol_names(ordered)
+    full_map = _build_tw_name_map_from_full_rows(full_rows or [])
+    out: dict[str, str] = {}
+    for code in ordered:
+        resolved = str(api_map.get(code, code)).strip() or code
+        if _is_unresolved_symbol_name(code, resolved):
+            from_full = str(full_map.get(code, "")).strip()
+            if from_full and not _is_unresolved_symbol_name(code, from_full):
+                resolved = from_full
+        out[code] = resolved
+    return out
+
+
+def _fill_unresolved_tw_names(
+    *,
+    frame: pd.DataFrame,
+    service: MarketDataService,
+    full_rows: Optional[list[dict[str, object]]] = None,
+    symbol_col: str = "symbol",
+    name_col: str = "name",
+) -> pd.DataFrame:
+    if frame is None or frame.empty or symbol_col not in frame.columns:
+        return frame
+    out = frame.copy()
+    if name_col not in out.columns:
+        out[name_col] = out[symbol_col].astype(str)
+    out[symbol_col] = out[symbol_col].astype(str).str.strip().str.upper()
+    out[name_col] = out[name_col].astype(str).str.strip()
+
+    tw_symbols: list[str] = []
+    for symbol in out[symbol_col].tolist():
+        code = str(symbol or "").strip().upper()
+        if re.fullmatch(r"\d{4}", code) and code not in tw_symbols:
+            tw_symbols.append(code)
+    if not tw_symbols:
+        return out
+
+    name_map = _resolve_tw_symbol_names(service=service, symbols=tw_symbols, full_rows=full_rows)
+    unresolved_mask = out.apply(
+        lambda row: _is_unresolved_symbol_name(str(row.get(symbol_col, "")), str(row.get(name_col, ""))),
+        axis=1,
+    )
+    for idx, is_unresolved in unresolved_mask.items():
+        if not bool(is_unresolved):
+            continue
+        code = str(out.at[idx, symbol_col] or "").strip().upper()
+        mapped = str(name_map.get(code, "")).strip()
+        if mapped and not _is_unresolved_symbol_name(code, mapped):
+            out.at[idx, name_col] = mapped
+    return out
+
+
 def _render_00910_constituent_intro_table(
     *,
     service: MarketDataService,
@@ -707,6 +840,7 @@ PAGE_CARDS = [
     {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
     {"key": "00993A 熱力圖", "desc": "00993A 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
+    {"key": "0052 熱力圖", "desc": "0052 成分股回測的相對大盤熱力圖。"},
     {"key": "資料庫檢視", "desc": "直接查看 SQLite 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
 ]
@@ -5802,8 +5936,9 @@ def _render_tutorial_view():
             {"分頁": "ETF 輪動策略", "你會看到什麼": "固定 ETF 池月調倉回測、調倉明細、持有最久排名", "什麼時候用": "看規則化輪動是否優於基準"},
             {"分頁": "00910 熱力圖", "你會看到什麼": "全球成分股 YTD 分組熱力圖 + 台股子集合進階回測", "什麼時候用": "同時看國內/海外成分股相對表現"},
             {"分頁": "00935 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 00935 內部強弱分布"},
-            {"分頁": "00993A 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖", "什麼時候用": "看 00993A 內部強弱分布"},
+            {"分頁": "00993A 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 00993A 內部強弱分布"},
             {"分頁": "0050 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介（依權重排序）", "什麼時候用": "看台灣 50 內部強弱"},
+            {"分頁": "0052 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 0052 內部強弱分布"},
             {"分頁": "資料庫檢視", "你會看到什麼": "SQLite 表格總覽、欄位、分頁資料", "什麼時候用": "確認資料是否有進 SQLite"},
             {"分頁": "新手教學", "你會看到什麼": "名詞解釋、快取邏輯、操作順序、常見誤解", "什麼時候用": "剛上手或看不懂數字時"},
         ]
@@ -5817,7 +5952,7 @@ def _render_tutorial_view():
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
                 "3. 再到 `2026 YTD 前十大 ETF` 或 `2026 YTD 主動式 ETF` 看橫向比較。",
-                "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00993A / 0050 熱力圖`。",
+                "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00993A / 0050 / 0052 熱力圖`。",
                 "5. 最後才用 `ETF 輪動策略` 做規則化比較。",
             ]
         )
@@ -6001,7 +6136,7 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
     tile_rows = int(math.ceil(len(frame) / tiles_per_row))
     z = np.full((tile_rows, tiles_per_row), np.nan)
     txt = np.full((tile_rows, tiles_per_row), "", dtype=object)
-    custom = np.empty((tile_rows, tiles_per_row, 6), dtype=object)
+    custom = np.empty((tile_rows, tiles_per_row, 7), dtype=object)
     custom[:, :, :] = None
 
     for i, row in frame.iterrows():
@@ -6009,13 +6144,18 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         c = i % tiles_per_row
         z[r, c] = float(row["excess_pct"])
         label = str(row["symbol"]).strip()
-        txt[r, c] = f"<b>{label}</b><br>{row['excess_pct']:+.2f}%"
+        name_text = str(row.get("name", "")).strip()
+        if name_text and not _is_unresolved_symbol_name(label, name_text):
+            txt[r, c] = f"<b>{label}</b><br>{name_text}<br>{row['excess_pct']:+.2f}%"
+        else:
+            txt[r, c] = f"<b>{label}</b><br>{row['excess_pct']:+.2f}%"
         custom[r, c, 0] = float(row["asset_return_pct"])
         custom[r, c, 1] = float(row["benchmark_return_pct"])
         custom[r, c, 2] = str(row.get("benchmark_symbol", ""))
         custom[r, c, 3] = int(row.get("bars", 0))
         custom[r, c, 4] = str(row.get("market_tag", ""))
         custom[r, c, 5] = str(row.get("weight_pct", ""))
+        custom[r, c, 6] = name_text
 
     max_abs = _heatmap_max_abs(z)
     fig_heat = go.Figure(
@@ -6035,6 +6175,7 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
                 hoverongaps=False,
                 colorbar=dict(title=colorbar_title, thickness=14, len=0.78),
                 hovertemplate=(
+                    "名稱：%{customdata[6]}<br>"
                     "標的報酬：%{customdata[0]:+.2f}%<br>"
                     "基準報酬：%{customdata[1]:+.2f}%<br>"
                     "超額：%{z:+.2f}%<br>"
@@ -6353,6 +6494,13 @@ def _render_00910_global_ytd_block(
     if rows_df.empty:
         st.warning("沒有可用結果（可能部分海外標的資料尚未覆蓋 YTD）。")
         return
+    rows_df = _fill_unresolved_tw_names(
+        frame=rows_df,
+        service=service,
+        full_rows=full_rows,
+        symbol_col="symbol",
+        name_col="name",
+    )
 
     tw_df = rows_df[rows_df["group"] == "TW"].copy()
     overseas_df = rows_df[rows_df["group"] == "OVERSEAS"].copy()
@@ -6453,6 +6601,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         st.session_state[payload_key] = initial_payload
 
     full_rows_00910: list[dict[str, object]] = []
+    full_rows_for_name_lookup: list[dict[str, object]] = []
     snapshot = store.load_universe_snapshot(universe_id)
     u1, u2 = st.columns([1, 4])
     refresh_constituents = u1.button(f"更新 {etf_text} 成分股", use_container_width=True)
@@ -6474,16 +6623,13 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             f"已載入成分股：{count_text}（{completeness}） | 來源：{snapshot.source} | "
             f"快取時間：{snapshot.fetched_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        with st.expander(f"查看全部成分股（{len(snapshot.symbols)}）", expanded=False):
-            name_map_all = service.get_tw_symbol_names(snapshot.symbols)
-            const_rows = [{"symbol": sym, "name": name_map_all.get(sym, sym)} for sym in snapshot.symbols]
-            st.dataframe(pd.DataFrame(const_rows), use_container_width=True, hide_index=True)
 
         if etf_text == "00910":
             full_rows, full_source = service.get_etf_constituents_full(
                 etf_text, limit=None, force_refresh=bool(refresh_constituents)
             )
             full_rows_00910 = _enrich_rows_with_tw_names(rows=list(full_rows), service=service)
+            full_rows_for_name_lookup = list(full_rows_00910)
             if full_rows:
                 full_df = pd.DataFrame(full_rows_00910)
                 tw_subset_count = int((full_df["tw_code"].astype(str) != "").sum()) if "tw_code" in full_df.columns else 0
@@ -6508,6 +6654,25 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                     st.dataframe(out_df, use_container_width=True, hide_index=True)
             else:
                 st.caption("00910 完整成分股（含海外）目前抓取失敗，請稍後按「更新 00910 成分股」重試。")
+        else:
+            try:
+                rows_full, _ = service.get_etf_constituents_full(
+                    etf_text,
+                    limit=None,
+                    force_refresh=bool(refresh_constituents),
+                )
+            except Exception:
+                rows_full = []
+            full_rows_for_name_lookup = _enrich_rows_with_tw_names(rows=list(rows_full), service=service)
+
+        with st.expander(f"查看全部成分股（{len(snapshot.symbols)}）", expanded=False):
+            name_map_all = _resolve_tw_symbol_names(
+                service=service,
+                symbols=snapshot.symbols,
+                full_rows=full_rows_for_name_lookup,
+            )
+            const_rows = [{"symbol": sym, "name": name_map_all.get(sym, sym)} for sym in snapshot.symbols]
+            st.dataframe(pd.DataFrame(const_rows), use_container_width=True, hide_index=True)
     else:
         u2.caption(f"尚未載入 {etf_text} 成分股快取。你仍可先查看上次回測結果，或按「更新 {etf_text} 成分股」後再重新回測。")
 
@@ -6531,14 +6696,14 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     if not current_pick:
         current_pick = symbol_options
     st.session_state[symbol_key] = current_pick
-    symbol_name_map_for_pick: dict[str, str] = {}
-    if etf_text == "00935":
-        symbol_name_map_for_pick = service.get_tw_symbol_names(symbol_options)
+    symbol_name_map_for_pick = _resolve_tw_symbol_names(
+        service=service,
+        symbols=symbol_options,
+        full_rows=full_rows_for_name_lookup,
+    )
 
     def _format_symbol_option(sym: str) -> str:
         code = str(sym)
-        if etf_text != "00935":
-            return code
         name = str(symbol_name_map_for_pick.get(code, code)).strip()
         if name and name != code:
             return f"{code} {name}"
@@ -6660,7 +6825,11 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         progress = st.progress(0.0)
         rows: list[dict[str, object]] = []
         cost_model = CostModel(fee_rate=float(fee_rate), sell_tax_rate=float(sell_tax), slippage_rate=float(slippage))
-        name_map = service.get_tw_symbol_names(run_symbols)
+        name_map = _resolve_tw_symbol_names(
+            service=service,
+            symbols=run_symbols,
+            full_rows=full_rows_for_name_lookup,
+        )
 
         for idx, symbol in enumerate(run_symbols):
             bars = bars_cache.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
@@ -6760,10 +6929,14 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     if rows_df.empty:
         st.warning("沒有可用回測結果（可能資料不足或期間太短）。")
         return
-    if "name" not in rows_df.columns:
-        name_map = service.get_tw_symbol_names(rows_df["symbol"].astype(str).tolist())
-        rows_df["name"] = rows_df["symbol"].map(name_map).fillna(rows_df["symbol"])
-    rows_df["name"] = rows_df["name"].astype(str)
+    rows_df = _fill_unresolved_tw_names(
+        frame=rows_df,
+        service=service,
+        full_rows=full_rows_for_name_lookup,
+        symbol_col="symbol",
+        name_col="name",
+    )
+    rows_df["name"] = rows_df["name"].astype(str).str.strip()
 
     rows_df = rows_df.sort_values("excess_pct", ascending=False).reset_index(drop=True)
     winners = int((rows_df["excess_pct"] > 0).sum())
@@ -6823,7 +6996,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         z[r, c] = float(row["excess_pct"])
         label = str(row["symbol"]).strip()
         name_text = str(row.get("name", "")).strip()
-        if etf_text == "00935" and name_text and name_text != label:
+        if name_text and not _is_unresolved_symbol_name(label, name_text):
             txt[r, c] = f"<b>{label}</b><br>{name_text}<br>{row['excess_pct']:+.2f}%"
         else:
             txt[r, c] = f"<b>{label}</b><br>{row['excess_pct']:+.2f}%"
@@ -6883,7 +7056,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         hide_index=True,
     )
 
-    if etf_text in {"00935", "00993A", "0050"} and snapshot and snapshot.symbols:
+    if etf_text in {"00935", "00993A", "0050", "0052"} and snapshot and snapshot.symbols:
         st.markdown("---")
         _render_tw_constituent_intro_table(
             etf_code=etf_text,
@@ -7435,6 +7608,10 @@ def _render_0050_heatmap_view():
     _render_tw_etf_heatmap_view("0050", page_desc="台灣50")
 
 
+def _render_0052_heatmap_view():
+    _render_tw_etf_heatmap_view("0052", page_desc="科技ETF")
+
+
 def _render_00993a_heatmap_view():
     _render_tw_etf_heatmap_view("00993A", page_desc="台股ETF")
 
@@ -7668,6 +7845,7 @@ def main():
         "00935 熱力圖": _render_00935_heatmap_view,
         "00993A 熱力圖": _render_00993a_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
+        "0052 熱力圖": _render_0052_heatmap_view,
         "資料庫檢視": _render_db_browser_view,
         "新手教學": _render_tutorial_view,
     }

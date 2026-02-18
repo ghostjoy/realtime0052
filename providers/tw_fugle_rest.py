@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 from typing import Any, Optional
 
 import pandas as pd
@@ -56,6 +57,21 @@ class TwFugleHistoricalProvider(MarketDataProvider):
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _normalize_tw_symbol(symbol: str) -> str:
+        token = str(symbol or "").strip().upper()
+        if not token:
+            raise ProviderError("tw_fugle_rest", ProviderErrorKind.PARSE, "missing symbol")
+        # Fugle historical endpoint supports TW/OTC ticker symbols like:
+        # 2330, 0050, 00719B, 00632R ...
+        if not re.fullmatch(r"[0-9A-Z]{4,10}", token):
+            raise ProviderError(
+                "tw_fugle_rest",
+                ProviderErrorKind.UNSUPPORTED,
+                f"unsupported TW symbol for Fugle: {token}",
+            )
+        return token
 
     def quote(self, request: ProviderRequest) -> QuoteSnapshot:
         raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Fugle historical provider does not provide quote")
@@ -129,11 +145,7 @@ class TwFugleHistoricalProvider(MarketDataProvider):
         if interval not in {"1d", "1m"}:
             raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Fugle historical provider supports 1d/1m interval")
 
-        symbol = str(request.symbol or "").strip().upper()
-        if not symbol:
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "missing symbol")
-        if not symbol.isdigit():
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, f"unsupported TW symbol for Fugle: {symbol}")
+        symbol = self._normalize_tw_symbol(request.symbol)
 
         end = request.end or datetime.now(tz=timezone.utc)
         if interval == "1d":
