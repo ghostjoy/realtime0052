@@ -1,56 +1,38 @@
 # Git / GitHub 新手快速筆記
 
-這份文件是針對你目前專案（`ghostjoy/realtime0052`）整理的可回看版本。
+這份文件提供本 repo 可重複使用的 Git 基本流程，避免綁定單次對話情境。
 
-## 1) 先理解三個東西
+## 1) 三個核心概念
 
-- `commit`：一次版本快照（可想成存檔點）
-- `branch`：指向某個 commit 的「指標名稱」（例如 `main`、`ui-layout-polish`）
-- `remote`：遠端倉庫（通常叫 `origin`，也就是 GitHub 上那份）
+- `commit`：一次版本快照（存檔點）
+- `branch`：指向某個 commit 的指標名稱（例如 `main`、`feature/<topic>`）
+- `remote`：遠端倉庫（通常是 `origin`）
 
-## 2) 你剛剛的實際狀態（範例）
-
-當時狀態大意是：
-
-- 本地 `ui-layout-polish` 指到新 commit（例如 `e215f5b`）
-- 遠端 `origin/main` 也被推到同一個 commit
-- 本地 `main` 還停在舊 commit（例如 `8c0e472`）
-
-所以 GitHub 上其實已經是最新，但你本機的 `main` 還沒跟上。
-
-## 3) `Fast-forward` 是什麼？
-
-`fast-forward` = 分支指標「直接往前移」，**不新增 merge commit**。
-
-重點：
-
-- 不是「只更新主功能，不更新 branch 功能」
-- 也不是「刪掉 branch 內容」
-- 它只是把某個分支（例如本地 `main`）移到較新的 commit
-
-## 4) 為什麼會想用 `fast-forward`？
-
-- 歷史更乾淨（沒有多餘 merge 節點）
-- 可讀性高（線性 history）
-- 在「main 沒分叉」的情況下最自然
-
-## 5) 常見指令對照（這次會用到）
+## 2) 常用檢查指令
 
 ```bash
-# 看目前在哪個分支
+# 目前分支
 git branch --show-current
 
-# 看本地分支與遠端追蹤狀態
+# 本地分支與遠端追蹤狀態
 git branch -vv
 
-# 看工作區有沒有未提交
+# 工作區是否乾淨
 git status --short
 
-# 把目前分支的 HEAD 推到遠端 main
-git push origin HEAD:main
+# 最近提交（簡版）
+git log --oneline -n 5
 ```
 
-## 6) 把本地 `main` 同步到遠端最新（Fast-forward）
+## 3) `fast-forward` 是什麼？
+
+`fast-forward` = 分支指標直接往前移，不新增 merge commit。
+
+適用情境：
+- `main` 沒有額外分叉
+- 只想把本地 `main` 對齊 `origin/main`
+
+## 4) 同步本地 `main`（安全版）
 
 ```bash
 git checkout main
@@ -58,23 +40,28 @@ git fetch origin
 git merge --ff-only origin/main
 ```
 
-如果成功，表示本地 `main` 直接移到 `origin/main` 最新點。
+若成功，表示本地 `main` 已線性對齊遠端最新版本。
 
-## 7) 一個好記的心智模型
+## 5) 推送當前分支到遠端 `main`（明確指定）
 
-- `main` / `ui-layout-polish`：只是「書籤名稱」
-- commit：實際內容
-- `push`：把你本地書籤指向的 commit，更新到遠端書籤
-- `fast-forward`：書籤往前移，不創造新節點
+```bash
+git push origin HEAD:main
+```
 
-## 8) 新手建議工作流（安全版）
+這個指令代表：把你「目前所在分支」的最新 commit，推到遠端 `main`。
 
-1. 在功能分支開發（例如 `ui-layout-polish`）
-2. `git status` 確認乾淨後 commit
-3. push 到 GitHub
-4. 確認遠端 `main` 是否已更新
-5. 最後把本地 `main` fast-forward 到最新
+## 6) 建議工作流（新手安全版）
 
----
+1. 從 `main` 切出功能分支：`feature/<topic>`
+2. 開發完成後先檢查：`git status`
+3. commit 並 push 功能分支
+4. 合併到遠端 `main`（PR 或你既有流程）
+5. 回到本地 `main` 做 `fast-forward` 同步
 
-如果你要，我可以再補一份「圖解版」（ASCII 圖）放在同檔案，幫你一眼看懂分支移動。
+## 7) 範例（占位符）
+
+- 分支：`feature/ui-layout-polish`
+- 新 commit：`<new-hash>`
+- 舊 `main`：`<old-hash>`
+
+只要遠端 `origin/main` 指到 `<new-hash>`，你本地 `main` 仍在 `<old-hash>`，就可以用 `merge --ff-only` 直接追上。

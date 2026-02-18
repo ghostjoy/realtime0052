@@ -8,7 +8,7 @@
 - `Fixed`：錯誤修正
 - `Docs`：文件更新
 
-## [Unreleased] - 2026-02-15
+## [Unreleased]
 
 ### Added
 - 新增 `symbol_metadata`（SQLite）：
@@ -76,101 +76,48 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated AGENTS.md, GIT_GITHUB_GUIDE.md, PROJECT_CONTEXT.md, PROMPT_TEMPLATES.md, README.md [id:c20efff0af]
+#### Manual Summary
+- `MarketDataService.get_tw_symbol_names/get_tw_symbol_industries` 改為「SQLite 優先、API 補抓、結果回寫 SQLite」，降低重複網路請求。
+- `資料庫檢視` 分頁新增「市場基礎資料預載」操作區，並支援顯示最近任務摘要/錯誤。
+- App 啟動後新增「每日一次」自動增量更新（有 seed symbols 時才執行），任務摘要回寫 `bootstrap_runs`。
+- 新增共用資料健康度顯示（`as_of/source/source chain/degraded/fallback_depth`）到即時看盤、ETF 排行與 Benchmark 對照卡。
+- 新增錯誤訊息分級 helper（error/warning/info），統一 ETF 排行與 Benchmark 卡片訊息語意。
+- 回測回放快取新增 `schema_version + source_hash` 相容性檢查，不相容時自動重算。
+- 抽出共用 helper：快照健康度、同步錯誤摘要、回測快取載入驗證流程。
+- Benchmark 載入層重構並抽出 `services/benchmark_loader.py`，熱力圖/輪動/Benchmark 比較卡共用同一流程。
+- 回測快取 key/簽章標準化：新增 `services/backtest_cache.py` 共用 `run_key` 與簽章組成。
+- 回測工作台 state key 集中到 `state_keys.py`，降低 widget/session key 衝突。
+- 回測回放 payload 升級為 `v3`（`meta/bars/results`），快取 schema 升級為 `3`，並維持舊版相容載入。
+- 新增 `services/sync_orchestrator.py`，統一 `all/backfill/min_rows` 同步流程。
+- 新增 `深色專業（Data Dark）` 主題，並統一 Benchmark 線條視覺樣式（主題色 + 虛線）。
+- `回測工作台` 改為「輸入條件即自動回測」：移除手動執行按鈕、先讀 SQLite 快取、回放預設停在最後一根。
+- `回測工作台` 新增 `還原權息計算（Adj Close）`，並避免與分割調整重複套用。
+- 回測工作台「策略 vs 買進持有」比較表整併，新增 `比較區間` 欄位避免重複資訊。
+- 熱力圖回測預設起始區間由 3 年調整為 5 年。
+- `2026 YTD 主動式 ETF` 與 `2026 YTD 前十大 ETF` 強化比較能力：新增 `2025績效`、`贏輸台股大盤`、`台股大盤固定列`、`更新最新市況` 與 Benchmark 對照圖補強。
+- 多標的比較圖的 Benchmark hover 顯示統一為代碼（例如 `00935`）。
+- `0050` 公司簡介表改為依 `權重(%)` 排序；`0050/00935/00910` 熱力圖預設策略改為 `buy_hold`。
+- `sync_symbol_history(...)` 補強增量判斷：若僅最新日尚未出新 K，改回報 `stale` 並不中斷流程。
+- 台股資料鏈路升級：即時 `Fugle WS -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`；日K同步新增 `TPEx OpenAPI` 後再回退 Yahoo。
+- UI 導覽改為卡片式並改為單頁渲染，減少切頁等待；並新增設計協作 `design-tokens.json` 下載。
+- 熱力圖/ETF 輪動新增「執行前同步最新日K」開關與多標的平行同步選項；回測頁啟動自動增量同步預設改為關閉。
+- SQLite 預設路徑改為「優先 iCloud Drive、否則本地」，並支援 `REALTIME0052_DB_PATH` 覆蓋。
+- `sync_symbol_history(...)` 起始日期邏輯補強：可正確回補更早區間資料，已覆蓋區間則維持增量同步。
+
+#### Auto Tracked Files
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, providers/tw_fugle_rest.py, services/market_data_service.py, tests/test_active_etf_page.py, ... (+1) [id:695a12c9e1]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, market_data_types.py, scripts/bootstrap_market_data.py, services/__init__.py, ... (+17) [id:54e33a04fe]
-- `MarketDataService.get_tw_symbol_names/get_tw_symbol_industries` 改為「SQLite 優先、API 補抓、結果回寫 SQLite」：
-  - 命中本地 metadata 時可直接回傳，不再重複網路請求
-  - API 命中後會自動 upsert 回 `symbol_metadata`
-- `資料庫檢視` 分頁新增「市場基礎資料預載」操作區：
-  - 支援手動啟動 `台股+美股核心` 預載（可設定歷史年數、平行工作數、台股上限）
-  - 支援手動執行一次增量更新，並顯示最近任務摘要/錯誤
-- App 啟動後新增「每日一次」自動增量更新（有 seed symbols 時才執行），同步回寫 `bootstrap_runs` 任務紀錄。
 - Auto: updated .gitignore, PROJECT_CONTEXT.md, README.md, app.py, market_data_types.py, tests/test_active_etf_page.py [id:7909c33419]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py, tests/test_history_store.py, ... (+1) [id:c89bc1cf9d]
 - Auto: updated README.md, app.py, tests/test_active_etf_page.py [id:4d84559a83]
-- 新增共用資料健康度顯示（`as_of / source / source chain / degraded / fallback_depth`）：
-  - 即時看盤資料品質欄位改用同一格式輸出
-  - `2025/2026 前十大 ETF` 與 `2026 主動式 ETF` 卡片新增快照健康度說明
-  - Benchmark 對照卡新增資料健康度說明，便於判讀是否有同步降級
-- 新增錯誤訊息分級 helper（error/warning/info）並套用於 ETF 排行與 Benchmark 對照卡，降低訊息語意不一致。
-- 回測回放快取載入新增相容性檢查：以 `schema_version + source_hash` 驗證快取參數簽章，不相容時自動重算。
-- 重構共用 helper 以降低重複邏輯：
-  - 抽出 `快照健康度` 計算與渲染（Top10/主動式共用）
-  - 抽出同步錯誤摘要顯示（熱力圖/輪動/Benchmark 共用）
-  - 抽出回測快取載入驗證流程（簽章比對與提示文案共用）
-- Benchmark 載入層重構：
-  - 抽出台股基準候選清單 helper（支援 `twii` 單一路徑或自動 fallback 模式）
-  - 抽出台股基準日K/收盤序列載入 helper（同步策略、split 調整、錯誤收集格式統一）
-  - 熱力圖、ETF 輪動與多標的 Benchmark 對照卡改為共用同一套載入流程
-- 新增共用模組 `services/benchmark_loader.py` 與資料型別 `BenchmarkLoadResult`，將基準載入流程從 `app.py` UI 邏輯中分離。
-- 回測快取 key/簽章標準化：
-  - 新增 `services/backtest_cache.py`（`run_key`、`params_base`、`source_hash` 共用產生器）
-  - 回測工作台改用共用函式產生 `run_key` 與 `schema_version/source_hash`，降低同參數 key 漂移風險
-- 回測工作台 state key 治理：
-  - 新增 `state_keys.py` 集中定義 `bt_*` widget/session key
-  - 回測頁切換為 `BT_KEYS` 常數，降低硬編字串與 key 衝突風險
-- 回測回放 payload 升級為 `v3` 分層格式（`meta / bars / results`），並保留 `v2` 載入相容。
-- 回測快取 schema 升級為 `3`，`_load_cached_backtest_payload` 可相容讀取 schema `2/3`（簽章一致時）。
-- 新增 `services/sync_orchestrator.py`，統一同步流程（`all/backfill/min_rows`）與回測頁同步行為。
-- 新增可切換 `深色專業（Data Dark）` 主題，並同步調整深色模式下卡片、控制項、標籤與圖表 hover 可讀性。
-- Benchmark 視覺統一：各比較圖基準曲線改用一致樣式（主題基準色 + 虛線），提升策略線對照辨識度。
-- `回測工作台` 改為「輸入條件即自動回測」：
-  - 移除手動「執行回測」按鈕
-  - 先讀 SQLite 回放快取，找不到才重算
-  - 回放預設改成 `完整區間 + 已跑到最後一根`，需要重播時再按 `Reset/Play`
-- `回測工作台` 新增 `還原權息計算（Adj Close）` 開關：
-  - 有 `adj_close` 時，回測前會將 OHLC 轉為還原權息價格序列
-  - 若已套用還原權息，會略過分割調整以避免重複計算
-  - Benchmark 比較也會同步套用（資料可用時）
-- 回測工作台「策略 vs 買進持有」比較區塊去重：
-  - 將整段與指定區間整併為單一表格（新增 `比較區間` 欄位）
-  - 避免重複顯示兩張看似相同的比較表
-- 熱力圖回測預設起始區間由 3 年統一為 5 年，與既有長區間 fallback 規劃一致。
-- `2026 YTD 主動式 ETF` 績效卡補強：
-  - 在 `YTD報酬(%)` 左側新增 `2025績效(%)` 對照欄位
-  - 右側新增 `贏輸台股大盤(%)`（`YTD報酬 - 大盤報酬`）欄位
-  - 新增頁首 `更新最新市況` 按鈕，可手動清快取並重抓最新資料
-  - `Benchmark 對照卡` 新增 `Strategy Equity（主動式ETF等權）` hover 說明提示
-  - 補上 `2025績效(%)` 空白判讀文案（2025 區間無可用日K）
-  - `00993A` 等晚掛牌標的改為可納入：績效計算改成「各檔在區間內首個可交易日起算」
-  - 排行表新增 `台股大盤` 固定第一列（不參與 ETF 排名編號）供直接對照
-  - 新增 `2025 全年 Benchmark 回測曲線` 卡片：同圖比較主動式ETF等權策略、Benchmark 與各ETF Buy-and-Hold（2025 全年區間）
-- `2026 YTD 前十大 ETF` 升級為進階比較頁：
-  - 新增 `更新最新市況` 按鈕，可手動清快取並重抓最新資料
-  - 排行表新增 `2025績效(%)`、`贏輸台股大盤(%)` 與 `台股大盤` 固定第一列
-  - 新增 `Benchmark 對照卡`：策略曲線（前十大ETF等權）、基準曲線、各ETF買進持有同圖比較
-- 多標的一起比較的 `Benchmark` 線圖 hover 顯示統一改為 `代碼`（例如 `00935`），不再顯示策略名稱
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, tests/test_active_etf_page.py [id:e2689afe76]
-- `0050` 熱力圖下方公司簡介表改為依 `權重(%)` 由大到小排序；無權重資料者自動排在後段。
-- `0050 / 00935 / 00910` 熱力圖回測策略預設值改為 `buy_hold`，降低首次執行門檻並與頁面文案一致。
-- `sync_symbol_history(...)` 補強增量同步判斷：若本地已有資料且本次僅遇到最新日尚未出新 K，改以 `stale` 狀態回報、不中斷流程。
 - Auto: updated app.py [id:13cce7fd07]
-- 台股資料鏈路升級：即時改為 `Fugle WebSocket -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`，日K同步新增 `TPEx OpenAPI`（短區間/最新日資料）後再回退 Yahoo。
-- UI 導覽改為卡片式（取代原先分頁列），並新增 `即時看盤/回測工作台` 卡片化區段（即時行情卡、即時趨勢卡、績效卡、回放控制卡、回放圖卡）。
-- 新增設計協作工具：可下載 `design-tokens.json`，方便與 Figma / Pencil 對齊色票與視覺 token。
-- 前十大 ETF 排行頁補充資訊密度：加入樣本統計、分類說明、實際交易日區間與來源註記。
-- 前十大 ETF 排行改為「復權後報酬」計算：區間報酬改用 `復權期初`（套用已知 split 事件）對比期末收盤。
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, storage/history_store.py [id:8cdb1d9956]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py [id:2531f53664]
 - Auto: updated README.md, app.py, services/market_data_service.py, tests/test_market_data_service.py [id:4b701c5149]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, backtest/rotation.py, backtest/types.py, ... (+3) [id:3bd6d76b10]
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
-- SQLite 預設路徑改為「優先 iCloud Drive、否則本地」：iCloud 可用時使用 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`，並支援 `REALTIME0052_DB_PATH` 覆蓋。
-- 主介面分頁調整為：`即時看盤 / 回測工作台 / 00935 熱力圖 / 新手教學`。
-- 主介面分頁調整為：`即時看盤 / 回測工作台 / 00935 熱力圖 / 0050 熱力圖 / 新手教學`。
-- 主介面分頁調整為：`即時看盤 / 回測工作台 / ETF輪動 / 00935 熱力圖 / 0050 熱力圖 / 新手教學`。
-- 新手教學中補充「成分股快取」資料儲存位置說明。
-- `00935 熱力圖` 回測結果新增公司名稱欄位（含熱力圖文字與 hover 顯示）。
-- 維護檢查紀錄：完成 `compileall`、`unittest(40)`、分頁冒煙測試、SQLite 快取一致性檢查與文件對齊檢查。
-- 熱力圖頁新增「結果怎麼看（越大/越小）」提示，補充 `勝負檔數/平均超額/最佳最差/Bars` 的判讀方式。
-- 主畫面改為「單頁渲染」：切換頁面時只執行目前頁面內容，避免所有分頁同時 rerun 造成等待。
-- 熱力圖/ETF 輪動新增「執行前同步最新日K（較慢）」開關（預設關閉），優先使用本地 SQLite。
-- 多標的同步改為可平行處理（可切換關閉），改善多檔同步等待時間。
-- 回測工作台「App 啟動時自動增量同步」預設改為關閉，並新增平行同步選項。
-- 主介面分頁名稱由 `ETF輪動` 調整為 `ETF 輪動策略`，並同步更新該分頁按鈕/提示文案。
-- `持有最久 ETF` 推薦由前兩名改為前三名（Top3）。
-- `sync_symbol_history(...)` 起始日期邏輯調整：若使用者指定起點早於本地最早資料，會正確回補舊資料；若請求區間已在本地覆蓋範圍內，則維持增量向前同步。
-- 台股歷史同步鏈路調整為：`Fugle Historical(日K) -> TW OpenAPI -> TPEx OpenAPI -> Yahoo`（有 key 時優先 Fugle），適用回測工作台與 00935/0050/ETF 輪動缺口補齊。
 
 ### Fixed
 - 修正 Fugle WebSocket 連線細節：改用官方 `.../stock/streaming` endpoint、`auth.data.apikey` 欄位，並修正微秒時間戳解析，避免 `year out of range` 導致即時報價失敗。
@@ -194,6 +141,12 @@
 - 熱力圖與 ETF 輪動分頁新增同步錯誤可見提示：若部分標的或 Benchmark 同步失敗，UI 會顯示摘要警示且仍盡量使用本地可用資料。
 
 ### Docs
+- 文件一致性整理：
+  - `README.md` 修正 repo 路徑 `realtime_0052 -> realtime0052`
+  - `AGENTS.md`、`PROJECT_CONTEXT.md` 同步完整分頁與功能範圍描述
+  - `CHANGELOG.md` 的 `Unreleased/Changed` 改為 `Manual Summary + Auto Tracked Files`
+  - `GIT_GITHUB_GUIDE.md` 改為可重複使用的通用模板
+  - `PROMPT_TEMPLATES.md` 改為中文主體（附英文關鍵詞）
 - 補齊 App 內 `新手教學`：新增完整分頁地圖、快取/更新按鈕邏輯、Top10/主動式/熱力圖/輪動判讀、常見誤解與建議上手順序。
 - `README.md` 新增 `新手快速上手（10 分鐘）`，提供最短操作路徑與各分頁使用時機。
 - 補充 `CHANGELOG` 維護說明：`Auto: updated ...` 條目只記錄 staged 檔案變動；本次已補登人工整理的功能摘要與行為說明（涵蓋 2026-02-15 前的遺漏項目）。

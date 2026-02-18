@@ -208,7 +208,7 @@ uv run python scripts/bootstrap_market_data.py --scope both --years 5 --max-work
 ### 用 uv（建議）
 
 ```bash
-cd /Users/ztw/codexapp/realtime_0052
+cd /Users/ztw/codexapp/realtime0052
 uv sync
 ```
 
@@ -275,14 +275,14 @@ export REALTIME0052_INTRADAY_RETAIN_DAYS="1095"
 ## 執行
 
 ```bash
-cd /Users/ztw/codexapp/realtime_0052
+cd /Users/ztw/codexapp/realtime0052
 uv run streamlit run app.py
 ```
 
 ## 測試
 
 ```bash
-cd /Users/ztw/codexapp/realtime_0052
+cd /Users/ztw/codexapp/realtime0052
 uv run python -m unittest discover -s tests -v
 ```
 

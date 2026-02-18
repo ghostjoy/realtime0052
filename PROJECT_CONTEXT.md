@@ -29,7 +29,7 @@
   - 多來源市場資料邏輯（含 fallback）
   - 台股即時來源：`Fugle WS -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`
   - 台股日K來源：`Fugle Historical -> TW OpenAPI -> TPEx OpenAPI -> Yahoo`
-  - Benchmark / 00935 成分股來源整合
+  - Benchmark / ETF 成分股來源整合（`00910 / 00935 / 00993A / 0050 / 0052`）
 - `services/benchmark_loader.py`
   - 台股 Benchmark 候選鏈、同步、split 調整與載入結果格式統一（熱力圖/輪動/比較卡共用）
 - `services/backtest_cache.py`
@@ -88,10 +88,11 @@
 - 前十大/主動式 ETF 卡片新增資料健康度欄位（`as_of/source/chain/fallback`）
 - 主題提供 `日光白 / 灰白專業 / 深色專業`，預設灰白
 - 新增 ETF 輪動分頁（固定 6 檔 ETF，月調倉）
-- 新增 00935 成分股熱力圖分頁
+- 新增/擴充 ETF 熱力圖分頁：`00910`（含全球成分股 YTD 分組）、`00935`、`00993A`、`0050`、`0052`
 - 成分股清單改為 SQLite 快取，避免反覆抓取
 - 回測工作台新增「回測前自動補資料缺口」，可針對缺口標的增量回補
 - 新增兩個 ETF 排行卡片頁：`2025 前十大 ETF` 與 `2026 YTD 前十大 ETF`（TWSE 快照區間報酬）
+- 新增 `資料庫檢視` 分頁可執行基礎資料預載與每日增量更新
 
 ## 7) 常見故障點（已踩過）
 
