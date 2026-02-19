@@ -65,6 +65,10 @@
   - 以 `共識代表 ETF` 作為核心檔，搭配前10 ETF 中「低重疊 + 高 YTD」衛星檔
   - 支援海外成分納入開關與重疊門檻（Jaccard）設定
   - 若原始門檻無候選，會自動放寬到 `20%`，再不行才回退為最高 YTD
+- 回測工作台新增 `DCA 比較卡`：
+  - 支援 `期初投入 + 每月定期定額`（每月首個交易日收盤）
+  - 多標的採等權投入，並套用手續費/滑價成本
+  - 可同時比較 `DCA 策略` 與 `Benchmark DCA` 的期末淨值與超額報酬
 - 新增 `00910 熱力圖` 獨立卡片頁：
   - 可列出全部成分股清單
   - 可執行與 `00935` 同級的成分股熱力圖回測
@@ -84,8 +88,14 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated PROJECT_CONTEXT.md, README.md, app.py, services/__init__.py, services/backtest_runner.py, services/heatmap_runner.py, ... (+8) [id:93beeba92f]
 - Auto: updated AGENTS.md, GIT_GITHUB_GUIDE.md, PROJECT_CONTEXT.md, PROMPT_TEMPLATES.md, README.md [id:c20efff0af]
 #### Manual Summary
+- Phase-1 重構落地（效能優先）：
+  - 新增 `services/backtest_runner.py`、`services/heatmap_runner.py`、`services/rotation_runner.py`，抽出回測/熱力圖/輪動的資料準備與執行流程。
+  - `app.py` 三大熱點頁面改為呼叫 runner，減少重複同步/載入/計算邏輯。
+  - 新增 `ui/shared/perf.py`（`REALTIME0052_PERF_DEBUG=1` 可顯示頁面分段耗時）與 `ui/shared/session_utils.py`（集中預設 key 初始化）。
+  - 新增測試：`test_backtest_runner.py`、`test_heatmap_runner.py`、`test_rotation_runner.py`。
 - `MarketDataService.get_tw_symbol_names/get_tw_symbol_industries` 改為「SQLite 優先、API 補抓、結果回寫 SQLite」，降低重複網路請求。
 - `資料庫檢視` 分頁新增「市場基礎資料預載」操作區，並支援顯示最近任務摘要/錯誤。
 - App 啟動後新增「每日一次」自動增量更新（有 seed symbols 時才執行），任務摘要回寫 `bootstrap_runs`。
@@ -129,6 +139,9 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正回測工作台 `bt_fee_rate / bt_sell_tax / bt_slippage` widget 初始化方式：
+  - 避免同時使用 `Session State API` 指定值與 `number_input(..., value=..., key=...)` 造成 `StreamlitAPIException`
+  - 改為先正規化 `session_state` 浮點值，再由 widget 透過 `key` 讀取
 - 修正 Fugle WebSocket 連線細節：改用官方 `.../stock/streaming` endpoint、`auth.data.apikey` 欄位，並修正微秒時間戳解析，避免 `year out of range` 導致即時報價失敗。
 - 修正台股即時走勢來源覆蓋問題：當 Yahoo 1m 回傳空資料時，不再覆蓋 Fugle/MIS 即時 tick 聚合出的 K 線。
 - 修正即時看盤名稱欄位空白問題：名稱缺值時改為 `name -> full_name -> 台股代號查名 -> symbol` 多層 fallback。
@@ -149,6 +162,9 @@
 - 修正台股日K走 Yahoo fallback 時未正規化代碼問題：4~6 碼代號自動改為 `.TW`（如 `0050 -> 0050.TW`），指數代碼（如 `^TWII`）維持原樣。
 - 熱力圖與 ETF 輪動分頁新增同步錯誤可見提示：若部分標的或 Benchmark 同步失敗，UI 會顯示摘要警示且仍盡量使用本地可用資料。
 - 修正回測工作台 `bt_market` 自動切市場時序：改為在 widget 建立前預先推斷 + `bt_symbol` 的 `on_change` 回調更新，避免輸入 OTC 代碼時觸發 `StreamlitAPIException`。
+- 修正回測工作台「投組分項策略績效卡 / 交易明細卡」文字發糊體感：
+  - 新增清晰表格渲染樣式（CJK 字型與字體平滑）
+  - 兩張卡改用清晰表格呈現，保留大量資料時自動回退高效模式
 
 ### Docs
 - 文件一致性整理：

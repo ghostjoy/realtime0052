@@ -3,7 +3,7 @@
 這個專案目前主要分頁如下：
 
 - `即時看盤`：台股/美股即時與近即時走勢、技術指標、文字建議
-- `回測工作台`：日K歷史下載、本地資料庫同步、策略回測、播放式回放
+- `回測工作台`：日K歷史下載、本地資料庫同步、策略回測、播放式回放、DCA（期初+每月定投）績效比較
 - `2025 前十大 ETF`：以 2025 全年區間計算前十大台股 ETF（卡片頁）
 - `2026 YTD 前十大 ETF`：以 2026/01/01 至今區間計算前十大台股 ETF（卡片頁）
 - `共識代表 ETF`：以前10 ETF 成分股交集推導單一代表 ETF（附前3備選）
@@ -135,6 +135,8 @@ uv run python scripts/bootstrap_market_data.py --scope both --years 5 --max-work
 - 台股 Benchmark 載入鏈路改由共用 loader 處理（`services/benchmark_loader.py`），熱力圖/輪動/比較卡邏輯一致
 - 回測同步流程改由 `services/sync_orchestrator.py` 共用（all/backfill/min_rows）
 - 回測頁 widget/session key 改由 `state_keys.py` 管理，減少日後功能擴充時 key 衝突
+- 新增執行層 runner：`services/backtest_runner.py`、`services/heatmap_runner.py`、`services/rotation_runner.py`，將資料準備/執行流程從 `app.py` 抽離
+- 新增效能除錯開關：`REALTIME0052_PERF_DEBUG=1`（顯示頁面分段耗時）
 
 ### 3.6) 00935 成分股熱力圖回測
 

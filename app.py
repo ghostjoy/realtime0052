@@ -28,14 +28,15 @@ from backtest import (
     apply_start_to_bars_map,
     apply_split_adjustment,
     build_buy_hold_equity,
+    build_dca_benchmark_equity,
+    build_dca_contribution_plan,
+    build_dca_equity,
+    dca_summary_metrics,
     interval_return,
     run_tw_etf_rotation_backtest,
     run_backtest,
-    run_portfolio_backtest,
     get_strategy_min_bars,
     required_walkforward_bars,
-    walk_forward_portfolio,
-    walk_forward_single,
 )
 from backtest.adjustments import known_split_events
 from indicators import add_indicators
@@ -49,8 +50,23 @@ from services.backtest_cache import (
     build_source_hash,
     stable_json_dumps,
 )
+from services.backtest_runner import (
+    BacktestExecutionInput,
+    default_cost_params as runner_default_cost_params,
+    execute_backtest_run,
+    load_and_prepare_symbol_bars,
+    load_benchmark_from_store as runner_load_benchmark_from_store,
+    parse_symbols as runner_parse_symbols,
+    series_metrics as runner_series_metrics,
+)
 from services.benchmark_loader import benchmark_candidates_tw, load_tw_benchmark_bars, load_tw_benchmark_close
 from services.bootstrap_loader import run_incremental_refresh, run_market_data_bootstrap
+from services.heatmap_runner import compute_heatmap_rows, prepare_heatmap_bars
+from services.rotation_runner import (
+    build_rotation_holding_rank as runner_build_rotation_holding_rank,
+    build_rotation_payload as runner_build_rotation_payload,
+    prepare_rotation_bars,
+)
 from services.sync_orchestrator import (
     bars_need_backfill as orchestrated_bars_need_backfill,
     sync_symbols_history as orchestrated_sync_symbols_history,
@@ -58,6 +74,8 @@ from services.sync_orchestrator import (
 )
 from state_keys import BT_KEYS
 from storage import HistoryStore
+from ui.shared.perf import PerfTimer, perf_debug_enabled
+from ui.shared.session_utils import ensure_defaults
 
 try:
     from advice import Profile, render_advice, render_advice_scai_style
@@ -1697,6 +1715,7 @@ def _ui_palette() -> dict[str, object]:
 def _inject_ui_styles():
     palette = _ui_palette()
     background = str(palette["background"])
+    paper_bg = str(palette.get("paper_bg", background))
     sidebar_bg = str(palette["sidebar_bg"])
     text_color = str(palette["text_color"])
     text_muted = str(palette["text_muted"])
@@ -1875,12 +1894,58 @@ def _inject_ui_styles():
         .card-section-title {{
             font-size: 1.04rem;
             font-weight: 700;
+            font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Segoe UI", sans-serif;
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
             margin-bottom: 0.12rem;
         }}
         .card-section-sub {{
             font-size: 0.82rem;
             color: {text_muted};
+            font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Segoe UI", sans-serif;
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
             margin-bottom: 0.5rem;
+        }}
+        .crisp-table-wrap {{
+            border: 1px solid {card_border};
+            border-radius: 10px;
+            background: {control_bg};
+            overflow: auto;
+            max-height: 460px;
+        }}
+        .crisp-table-wrap table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Segoe UI", sans-serif;
+            font-size: 0.86rem;
+            line-height: 1.38;
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }}
+        .crisp-table-wrap thead th {{
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: {paper_bg};
+            color: {text_color};
+            text-align: left;
+            font-weight: 700;
+            padding: 8px 10px;
+            border-bottom: 1px solid {card_border};
+            white-space: nowrap;
+        }}
+        .crisp-table-wrap tbody td {{
+            color: {text_color};
+            padding: 7px 10px;
+            border-bottom: 1px solid {card_border};
+            white-space: nowrap;
+        }}
+        .crisp-table-wrap tbody tr:nth-child(2n) {{
+            background: {tab_bg};
         }}
         div[data-baseweb="tab-list"] {{
             gap: 8px;
@@ -1909,6 +1974,27 @@ def _render_card_section_header(title: str, subtitle: str = ""):
     st.markdown(f"<div class='card-section-title'>{title}</div>", unsafe_allow_html=True)
     if subtitle:
         st.markdown(f"<div class='card-section-sub'>{subtitle}</div>", unsafe_allow_html=True)
+
+
+def _render_crisp_table(
+    df: pd.DataFrame,
+    *,
+    max_height: int = 460,
+    max_html_rows: int = 1500,
+) -> None:
+    if df is None or df.empty:
+        st.caption("目前沒有可顯示的資料。")
+        return
+    if len(df) > max(50, int(max_html_rows)):
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.caption("資料筆數較多，已切換為高效表格模式。")
+        return
+    safe_height = max(220, int(max_height))
+    table_html = df.to_html(index=False, border=0)
+    st.markdown(
+        f"<div class='crisp-table-wrap' style='max-height:{safe_height}px'>{table_html}</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _design_tokens_payload() -> str:
@@ -5250,57 +5336,11 @@ def _load_cached_backtest_payload(
 
 
 def _render_backtest_view():
-    def _parse_symbols(text: str) -> list[str]:
-        symbols = [s.strip().upper() for s in text.replace("，", ",").split(",")]
-        out = []
-        for sym in symbols:
-            if sym and sym not in out:
-                out.append(sym)
-        return out
-
-    def _is_tw_etf(symbol: str) -> bool:
-        text = (symbol or "").strip().upper()
-        return len(text) == 4 and text.isdigit() and text.startswith("00")
-
-    def _default_cost_params(market_code: str, symbol_list: list[str]) -> tuple[float, float, float]:
-        if market_code == "US":
-            return 0.0005, 0.0, 0.0010
-        tw_tax = 0.001 if symbol_list and all(_is_tw_etf(s) for s in symbol_list) else 0.003
-        return 0.001425, tw_tax, 0.0005
-
-    def _series_metrics(series: pd.Series) -> dict[str, float]:
-        if series is None or series.empty:
-            return {"total_return": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "sharpe": 0.0}
-        returns = series.pct_change().fillna(0.0)
-        running_max = series.cummax()
-        drawdown = series / running_max - 1.0
-        years = max((series.index[-1] - series.index[0]).days / 365.25, 1 / 365.25)
-        total_return = series.iloc[-1] / series.iloc[0] - 1.0
-        cagr = (1.0 + total_return) ** (1.0 / years) - 1.0 if total_return > -1 else -1.0
-        sharpe = (returns.mean() / returns.std() * np.sqrt(252.0)) if returns.std() > 0 else 0.0
-        return {
-            "total_return": float(total_return),
-            "cagr": float(cagr),
-            "max_drawdown": float(drawdown.min()),
-            "sharpe": float(sharpe),
-        }
-
-    def _benchmark_candidates(market_code: str, choice: str) -> list[str]:
-        selected = (choice or "auto").strip().lower()
-        if selected == "off":
-            return []
-        if market_code == "TW":
-            if selected == "auto":
-                return benchmark_candidates_tw("twii", allow_twii_fallback=True)
-            return benchmark_candidates_tw(selected, allow_twii_fallback=False)
-        mapping = {
-            "auto": ["^GSPC", "SPY", "QQQ", "DIA"],
-            "gspc": ["^GSPC"],
-            "spy": ["SPY"],
-            "qqq": ["QQQ"],
-            "dia": ["DIA"],
-        }
-        return mapping.get(selected, ["^GSPC"])
+    perf_timer = PerfTimer(enabled=perf_debug_enabled())
+    _parse_symbols = runner_parse_symbols
+    _default_cost_params = runner_default_cost_params
+    store = _history_store()
+    service = _market_service()
 
     def _load_benchmark_from_store(
         market_code: str,
@@ -5308,37 +5348,13 @@ def _render_backtest_view():
         end: datetime,
         choice: str,
     ) -> pd.DataFrame:
-        candidates = _benchmark_candidates(market_code, choice)
-        if not candidates:
-            return pd.DataFrame(columns=["close"])
-
-        for bench_symbol in candidates:
-            bars = store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end)
-            end_ts = pd.Timestamp(end).tz_convert("UTC")
-            needs_sync = bars.empty or pd.Timestamp(bars.index.max()).tz_convert("UTC") < end_ts
-            if needs_sync:
-                store.sync_symbol_history(symbol=bench_symbol, market=market_code, start=start, end=end)
-                bars = store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end)
-            if bars.empty or "close" not in bars.columns:
-                continue
-
-            keep_cols = ["close"]
-            if "adj_close" in bars.columns:
-                keep_cols.append("adj_close")
-            out = bars[keep_cols].copy()
-            source_text = ""
-            if "source" in bars.columns:
-                source_vals = sorted(set(bars["source"].dropna().astype(str)))
-                if source_vals:
-                    source_text = ",".join(source_vals)
-            out.attrs["symbol"] = bench_symbol
-            out.attrs["source"] = f"sqlite:{source_text}" if source_text else "sqlite"
-            return out
-
-        return pd.DataFrame(columns=["close"])
-
-    store = _history_store()
-    service = _market_service()
+        return runner_load_benchmark_from_store(
+            store=store,
+            market_code=market_code,
+            start=start,
+            end=end,
+            choice=choice,
+        )
 
     market_auto_note_key = "bt_market_auto_inferred"
 
@@ -5541,13 +5557,22 @@ def _render_backtest_view():
     elif st.session_state.get(cost_profile_key) != current_cost_profile:
         st.session_state[cost_profile_key] = current_cost_profile
 
+    def _coerce_session_float(key: str, default: float):
+        try:
+            st.session_state[key] = float(st.session_state.get(key, default))
+        except Exception:
+            st.session_state[key] = float(default)
+
+    _coerce_session_float(fee_key, 0.001425)
+    _coerce_session_float(tax_key, 0.0 if market_code == "US" else 0.003)
+    _coerce_session_float(slip_key, 0.0005)
+
     st.markdown("#### 交易成本")
     cost1, cost2, cost3 = st.columns(3)
     fee_rate = cost1.number_input(
         "Fee Rate",
         min_value=0.0,
         max_value=0.01,
-        value=float(st.session_state.get(fee_key, 0.001425)),
         step=0.0001,
         format="%.6f",
         key=fee_key,
@@ -5557,7 +5582,6 @@ def _render_backtest_view():
         "Sell Tax",
         min_value=0.0,
         max_value=0.01,
-        value=float(st.session_state.get(tax_key, 0.0 if market_code == "US" else 0.003)),
         step=0.0001,
         format="%.6f",
         key=tax_key,
@@ -5567,7 +5591,6 @@ def _render_backtest_view():
         "Slippage",
         min_value=0.0,
         max_value=0.01,
-        value=float(st.session_state.get(slip_key, 0.0005)),
         step=0.0001,
         format="%.6f",
         key=slip_key,
@@ -5818,49 +5841,20 @@ def _render_backtest_view():
         st.info("已就緒。按下「執行回測」後才會開始載入資料並執行回測。")
         return
 
-    bars_by_symbol: dict[str, pd.DataFrame] = {}
-    availability_rows = []
-    for symbol in symbols:
-        bars = store.load_daily_bars(symbol=symbol, market=market_code, start=sync_start, end=sync_end)
-        if bars.empty:
-            availability_rows.append({"symbol": symbol, "rows": 0, "sources": "", "status": "EMPTY", "adj_mode": ""})
-            continue
-        bars = bars.sort_index()
-        adj_info: dict[str, object] = {"applied": False}
-        if use_total_return_adjustment:
-            bars, adj_info = _apply_total_return_adjustment(bars)
-        if use_split_adjustment and not bool(adj_info.get("applied")):
-            bars, split_events = apply_split_adjustment(
-                bars=bars,
-                symbol=symbol,
-                market=market_code,
-                use_known=True,
-                use_auto_detect=auto_detect_split,
-            )
-        else:
-            split_events = []
-        if bool(adj_info.get("applied")):
-            adj_mode = f"ON ({adj_info.get('coverage_pct', 0)}%)"
-        elif use_total_return_adjustment:
-            reason = str(adj_info.get("reason", "") or "")
-            adj_mode = "OFF(no adj_close)" if reason == "no_adj_close" else "OFF(coverage low)"
-        else:
-            adj_mode = "OFF"
-        bars_by_symbol[symbol] = bars
-        availability_rows.append(
-            {
-                "symbol": symbol,
-                "rows": int(len(bars)),
-                "sources": ",".join(sorted(set(bars["source"].dropna().astype(str)))) if "source" in bars.columns else "",
-                "status": "OK",
-                "adj_mode": adj_mode,
-                "splits": ", ".join(
-                    [f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}({ev.source})" for ev in split_events]
-                )
-                if split_events
-                else "",
-            }
-        )
+    prepared_bars = load_and_prepare_symbol_bars(
+        store=store,
+        market_code=market_code,
+        symbols=list(symbols),
+        start=sync_start,
+        end=sync_end,
+        use_total_return_adjustment=bool(use_total_return_adjustment),
+        use_split_adjustment=bool(use_split_adjustment),
+        auto_detect_split=bool(auto_detect_split),
+        apply_total_return_adjustment=_apply_total_return_adjustment,
+    )
+    bars_by_symbol = dict(prepared_bars.bars_by_symbol)
+    availability_rows = list(prepared_bars.availability_rows)
+    perf_timer.mark("bars_prepared")
     if availability_rows:
         st.dataframe(pd.DataFrame(availability_rows), use_container_width=True, hide_index=True)
     if not bars_by_symbol:
@@ -5941,87 +5935,22 @@ def _render_backtest_view():
 
     if payload is None:
         cost_model = CostModel(fee_rate=fee_rate, sell_tax_rate=sell_tax, slippage_rate=slippage)
-        run_payload = {}
         try:
             with st.spinner("回測計算中..."):
-                if enable_wf:
-                    if mode == "單一標的":
-                        symbol = list(bars_by_symbol.keys())[0]
-                        wf_result = walk_forward_single(
-                            bars=bars_by_symbol[symbol],
-                            strategy_name=strategy,
-                            cost_model=cost_model,
-                            train_ratio=float(train_ratio),
-                            objective=objective,
-                            initial_capital=float(initial_capital),
-                        )
-                        run_payload = {
-                            "mode": "single",
-                            "walk_forward": True,
-                            "initial_capital": float(initial_capital),
-                            "symbol": symbol,
-                            "bars_by_symbol": bars_by_symbol,
-                            "result": wf_result.test_result,
-                            "train_result": wf_result.train_result,
-                            "split_date": wf_result.split_date,
-                            "best_params": wf_result.best_params,
-                            "candidates": wf_result.candidates,
-                        }
-                    else:
-                        wf_portfolio = walk_forward_portfolio(
-                            bars_by_symbol=bars_by_symbol,
-                            strategy_name=strategy,
-                            cost_model=cost_model,
-                            train_ratio=float(train_ratio),
-                            objective=objective,
-                            initial_capital=float(initial_capital),
-                        )
-                        run_payload = {
-                            "mode": "portfolio",
-                            "walk_forward": True,
-                            "initial_capital": float(initial_capital),
-                            "symbols": list(bars_by_symbol.keys()),
-                            "bars_by_symbol": bars_by_symbol,
-                            "result": wf_portfolio.test_portfolio,
-                            "train_result": wf_portfolio.train_portfolio,
-                            "split_date": wf_portfolio.split_date,
-                            "best_params": {s: wf.best_params for s, wf in wf_portfolio.symbol_results.items()},
-                            "candidates": {s: wf.candidates for s, wf in wf_portfolio.symbol_results.items()},
-                        }
-                else:
-                    if mode == "單一標的":
-                        symbol = list(bars_by_symbol.keys())[0]
-                        result = run_backtest(
-                            bars=bars_by_symbol[symbol],
-                            strategy_name=strategy,
-                            strategy_params=strategy_params,
-                            cost_model=cost_model,
-                            initial_capital=float(initial_capital),
-                        )
-                        run_payload = {
-                            "mode": "single",
-                            "walk_forward": False,
-                            "initial_capital": float(initial_capital),
-                            "symbol": symbol,
-                            "bars_by_symbol": bars_by_symbol,
-                            "result": result,
-                        }
-                    else:
-                        result = run_portfolio_backtest(
-                            bars_by_symbol=bars_by_symbol,
-                            strategy_name=strategy,
-                            strategy_params=strategy_params,
-                            cost_model=cost_model,
-                            initial_capital=float(initial_capital),
-                        )
-                        run_payload = {
-                            "mode": "portfolio",
-                            "walk_forward": False,
-                            "initial_capital": float(initial_capital),
-                            "symbols": list(bars_by_symbol.keys()),
-                            "bars_by_symbol": bars_by_symbol,
-                            "result": result,
-                        }
+                run_payload = execute_backtest_run(
+                    bars_by_symbol=bars_by_symbol,
+                    config=BacktestExecutionInput(
+                        mode=mode,
+                        strategy=strategy,
+                        strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+                        enable_walk_forward=bool(enable_wf),
+                        train_ratio=float(train_ratio),
+                        objective=objective,
+                        initial_capital=float(initial_capital),
+                        cost_model=cost_model,
+                    ),
+                )
+                perf_timer.mark("backtest_executed")
         except Exception as exc:
             st.error(f"回測失敗：{exc}")
             return
@@ -6053,6 +5982,7 @@ def _render_backtest_view():
             params=run_params,
             payload=replay_payload,
         )
+        perf_timer.mark("backtest_cached")
 
     if not payload:
         st.info("尚未有可用回測結果。")
@@ -6072,6 +6002,7 @@ def _render_backtest_view():
     benchmark_raw = _load_benchmark_from_store(market_code=market_code, start=sync_start, end=sync_end, choice=benchmark_choice)
     if benchmark_raw.empty:
         benchmark_raw = service.get_benchmark_series(market=market_code, start=sync_start, end=sync_end, benchmark=benchmark_choice)
+    perf_timer.mark("benchmark_loaded")
     benchmark_adj_info: dict[str, object] = {"applied": False}
     if use_total_return_adjustment and not benchmark_raw.empty:
         benchmark_raw, benchmark_adj_info = _apply_total_return_adjustment(benchmark_raw)
@@ -6106,25 +6037,108 @@ def _render_backtest_view():
             benchmark_equity = (bench / bench.iloc[0]) * run_initial_capital
             benchmark_equity = benchmark_equity.reindex(strategy_equity.index).ffill()
 
-    with st.container(border=True):
-        _render_card_section_header("績效卡", "總報酬、CAGR、MDD 與相對大盤結果。")
-        metric_rows = _metrics_to_rows(result.metrics)
-        metric_cols = st.columns(4)
-        for idx, (label, val) in enumerate(metric_rows):
-            metric_cols[idx % 4].metric(label, val)
-        if benchmark_choice != "off" and not benchmark_equity.empty:
-            rel = pd.concat(
+    benchmark_rel = pd.DataFrame()
+    strategy_ret: Optional[float] = None
+    benchmark_ret: Optional[float] = None
+    diff_pct: Optional[float] = None
+    verdict = ""
+    if benchmark_choice != "off" and not benchmark_equity.empty:
+        benchmark_rel = pd.concat(
+            [
+                strategy_equity.rename("strategy"),
+                benchmark_equity.rename("benchmark"),
+            ],
+            axis=1,
+        ).dropna()
+        if len(benchmark_rel) >= 2:
+            strategy_ret = float(benchmark_rel["strategy"].iloc[-1] / benchmark_rel["strategy"].iloc[0] - 1.0)
+            benchmark_ret = float(benchmark_rel["benchmark"].iloc[-1] / benchmark_rel["benchmark"].iloc[0] - 1.0)
+            diff_pct = (strategy_ret - benchmark_ret) * 100.0
+            verdict = "贏過大盤" if diff_pct > 0 else ("輸給大盤" if diff_pct < 0 else "與大盤持平")
+
+    component_vs_benchmark_rows: list[dict[str, object]] = []
+    component_winner_count = 0
+    component_comparable_count = 0
+    if is_portfolio and benchmark_choice != "off" and not benchmark_equity.empty:
+        for symbol, comp in result.component_results.items():
+            symbol_equity = comp.equity_curve.get("equity", pd.Series(dtype=float))
+            if not isinstance(symbol_equity, pd.Series) or symbol_equity.empty:
+                component_vs_benchmark_rows.append(
+                    {
+                        "代碼": symbol,
+                        "策略總報酬(%)": np.nan,
+                        "Benchmark總報酬(%)": np.nan,
+                        "相對Benchmark(%)": np.nan,
+                        "結論": "資料不足",
+                    }
+                )
+                continue
+            rel_sym = pd.concat(
                 [
-                    strategy_equity.rename("strategy"),
-                    benchmark_equity.rename("benchmark"),
+                    symbol_equity.rename("strategy"),
+                    benchmark_equity.reindex(symbol_equity.index).ffill().rename("benchmark"),
                 ],
                 axis=1,
             ).dropna()
-            if len(rel) >= 2:
-                strategy_ret = float(rel["strategy"].iloc[-1] / rel["strategy"].iloc[0] - 1.0)
-                benchmark_ret = float(rel["benchmark"].iloc[-1] / rel["benchmark"].iloc[0] - 1.0)
-                diff_pct = (strategy_ret - benchmark_ret) * 100.0
-                verdict = "贏過大盤" if diff_pct > 0 else ("輸給大盤" if diff_pct < 0 else "與大盤持平")
+            if len(rel_sym) < 2:
+                component_vs_benchmark_rows.append(
+                    {
+                        "代碼": symbol,
+                        "策略總報酬(%)": np.nan,
+                        "Benchmark總報酬(%)": np.nan,
+                        "相對Benchmark(%)": np.nan,
+                        "結論": "資料不足",
+                    }
+                )
+                continue
+            symbol_ret = float(rel_sym["strategy"].iloc[-1] / rel_sym["strategy"].iloc[0] - 1.0)
+            symbol_bench_ret = float(rel_sym["benchmark"].iloc[-1] / rel_sym["benchmark"].iloc[0] - 1.0)
+            symbol_diff_pct = (symbol_ret - symbol_bench_ret) * 100.0
+            component_comparable_count += 1
+            if symbol_diff_pct > 0:
+                component_winner_count += 1
+            symbol_verdict = "勝過Benchmark" if symbol_diff_pct > 0 else ("輸給Benchmark" if symbol_diff_pct < 0 else "與Benchmark持平")
+            component_vs_benchmark_rows.append(
+                {
+                    "代碼": symbol,
+                    "策略總報酬(%)": round(symbol_ret * 100.0, 2),
+                    "Benchmark總報酬(%)": round(symbol_bench_ret * 100.0, 2),
+                    "相對Benchmark(%)": round(symbol_diff_pct, 2),
+                    "結論": symbol_verdict,
+                }
+            )
+
+    with st.container(border=True):
+        _render_card_section_header("績效卡", "總報酬、CAGR、MDD 與相對大盤結果。")
+        if is_portfolio:
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("投組總報酬", f"{result.metrics.total_return * 100:.2f}%")
+            k2.metric("Benchmark總報酬", "—" if benchmark_ret is None else f"{benchmark_ret * 100:.2f}%")
+            k3.metric("超額報酬", "—" if diff_pct is None else f"{diff_pct:+.2f}%")
+            winner_text = "—" if component_comparable_count <= 0 else f"{component_winner_count}/{component_comparable_count}"
+            k4.metric("勝過Benchmark檔數", winner_text)
+
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("投組CAGR", f"{result.metrics.cagr * 100:.2f}%")
+            s2.metric("投組MDD", f"{result.metrics.max_drawdown * 100:.2f}%")
+            s3.metric("投組Sharpe", f"{result.metrics.sharpe:.2f}")
+            s4.metric("交易次數", str(int(result.metrics.trades)))
+
+            if diff_pct is not None and strategy_ret is not None and benchmark_ret is not None:
+                st.caption(
+                    "計算基準：同一重疊區間的 Total Return；"
+                    f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%（{verdict}）"
+                )
+            elif benchmark_choice != "off" and benchmark_equity.empty:
+                st.caption("目前沒有可用的 Benchmark 資料，無法計算超額報酬。")
+            elif benchmark_choice != "off":
+                st.caption("Benchmark 可用資料不足，暫時無法判斷投組是否勝過大盤。")
+        else:
+            metric_rows = _metrics_to_rows(result.metrics)
+            metric_cols = st.columns(4)
+            for idx, (label, val) in enumerate(metric_rows):
+                metric_cols[idx % 4].metric(label, val)
+            if diff_pct is not None and strategy_ret is not None and benchmark_ret is not None:
                 r1, r2 = st.columns(2)
                 r1.metric("相對大盤結果", verdict)
                 r2.metric("贏/輸大盤（百分比）", f"{diff_pct:+.2f}%")
@@ -6132,10 +6146,23 @@ def _render_backtest_view():
                     "計算基準：同一重疊區間的 Total Return；"
                     f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%"
                 )
-            else:
+            elif benchmark_choice != "off" and benchmark_equity.empty:
+                st.caption("目前沒有可用的 Benchmark 資料，無法計算是否贏過大盤。")
+            elif benchmark_choice != "off":
                 st.caption("Benchmark 可用資料不足，暫時無法判斷是否贏過大盤。")
-        elif benchmark_choice != "off":
-            st.caption("目前沒有可用的 Benchmark 資料，無法計算是否贏過大盤。")
+
+    if is_portfolio:
+        with st.container(border=True):
+            _render_card_section_header("投組分項相對Benchmark", "多標的時優先看這張：每檔相對基準的超額報酬。")
+            if component_vs_benchmark_rows:
+                comp_rel_df = pd.DataFrame(component_vs_benchmark_rows).sort_values(
+                    ["相對Benchmark(%)", "代碼"],
+                    ascending=[False, True],
+                    na_position="last",
+                )
+                st.dataframe(comp_rel_df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("目前沒有可顯示的分項相對 Benchmark 資料。")
 
     if payload.get("walk_forward"):
         with st.container(border=True):
@@ -6173,26 +6200,21 @@ def _render_backtest_view():
     viewport_window_key = f"play_viewport_window:{run_key}"
     viewport_anchor_key = f"play_viewport_anchor:{run_key}"
     focus_key = f"play_focus:{run_key}"
-    if speed_key not in st.session_state:
-        st.session_state[speed_key] = "1x"
-    if play_key not in st.session_state:
-        st.session_state[play_key] = False
-    if display_mode_key not in st.session_state:
-        st.session_state[display_mode_key] = "K棒"
-    if marker_mode_key not in st.session_state:
-        st.session_state[marker_mode_key] = "同時顯示（訊號+成交）"
-    if fill_link_key not in st.session_state:
-        st.session_state[fill_link_key] = True
-    if indicator_panel_key not in st.session_state:
-        st.session_state[indicator_panel_key] = True
-    if indicator_compact_key not in st.session_state:
-        st.session_state[indicator_compact_key] = True
-    if viewport_mode_key not in st.session_state:
-        st.session_state[viewport_mode_key] = "完整區間"
-    if viewport_anchor_key not in st.session_state:
-        st.session_state[viewport_anchor_key] = 70
-    if focus_key not in st.session_state:
-        st.session_state[focus_key] = selected_symbols[0]
+    ensure_defaults(
+        st.session_state,
+        {
+            speed_key: "1x",
+            play_key: False,
+            display_mode_key: "K棒",
+            marker_mode_key: "同時顯示（訊號+成交）",
+            fill_link_key: True,
+            indicator_panel_key: True,
+            indicator_compact_key: True,
+            viewport_mode_key: "完整區間",
+            viewport_anchor_key: 70,
+            focus_key: selected_symbols[0],
+        },
+    )
     focus_symbol = st.selectbox("回放焦點標的", options=selected_symbols, key=focus_key)
 
     focus_bars = bars_by_symbol[focus_symbol].sort_index().dropna(subset=["open", "high", "low", "close"], how="any")
@@ -6749,8 +6771,8 @@ def _render_backtest_view():
                 _apply_unified_benchmark_hover(fig_cmp, palette)
                 st.plotly_chart(fig_cmp, use_container_width=True)
 
-                strategy_perf = _series_metrics(comp_view["strategy"])
-                bench_perf = _series_metrics(comp_view["benchmark"])
+                strategy_perf = runner_series_metrics(comp_view["strategy"])
+                bench_perf = runner_series_metrics(comp_view["benchmark"])
                 cmp_rows = pd.DataFrame(
                     [
                         {
@@ -6772,7 +6794,7 @@ def _render_backtest_view():
                     ]
                 )
                 if "buy_hold" in comp_view.columns and comp_view["buy_hold"].notna().any():
-                    hold_perf = _series_metrics(comp_view["buy_hold"])
+                    hold_perf = runner_series_metrics(comp_view["buy_hold"])
                     cmp_rows.loc[len(cmp_rows)] = {
                         "Series": buy_hold_label,
                         "Definition": "Buy-and-hold on backtest symbols",
@@ -6786,7 +6808,7 @@ def _render_backtest_view():
                     sym_series = pd.to_numeric(comp_view[col], errors="coerce").dropna()
                     if len(sym_series) < 2:
                         continue
-                    sym_perf = _series_metrics(sym_series)
+                    sym_perf = runner_series_metrics(sym_series)
                     cmp_rows.loc[len(cmp_rows)] = {
                         "Series": f"Buy-and-Hold Equity ({sym})",
                         "Definition": f"Buy-and-hold on symbol {sym}",
@@ -6885,6 +6907,134 @@ def _render_backtest_view():
     else:
         st.caption("目前沒有可計算的比較資料。")
 
+    with st.container(border=True):
+        _render_card_section_header("DCA 比較卡", "期初投入 + 每月定期定額（每月首個交易日收盤；等權分配）。")
+        dca_initial_key = f"dca_initial_lump:{run_key}"
+        dca_monthly_key = f"dca_monthly_contribution:{run_key}"
+        dca_c1, dca_c2 = st.columns(2)
+        dca_initial_lump = float(
+            dca_c1.number_input(
+                "期初投入金額",
+                min_value=0.0,
+                value=float(run_initial_capital),
+                step=10_000.0,
+                format="%.0f",
+                key=dca_initial_key,
+            )
+        )
+        dca_monthly_contribution = float(
+            dca_c2.number_input(
+                "每月定期定額金額",
+                min_value=0.0,
+                value=20_000.0,
+                step=1_000.0,
+                format="%.0f",
+                key=dca_monthly_key,
+            )
+        )
+
+        dca_target_index = pd.DatetimeIndex(strategy_equity.index)
+        dca_plan = build_dca_contribution_plan(dca_target_index)
+        monthly_dates_raw = dca_plan.get("monthly_dates", [])
+        monthly_dates = list(monthly_dates_raw) if isinstance(monthly_dates_raw, list) else []
+        monthly_contribution_count = int(len(monthly_dates))
+        total_dca_contribution = float(dca_initial_lump + dca_monthly_contribution * monthly_contribution_count)
+        dca_benchmark_label = ""
+        if hasattr(benchmark_raw, "attrs"):
+            dca_benchmark_label = str(benchmark_raw.attrs.get("symbol", "")).strip()
+        if not dca_benchmark_label:
+            fallback_symbol_map_tw = {"twii": "^TWII", "0050": "0050", "006208": "006208"}
+            fallback_symbol_map_us = {"gspc": "^GSPC", "spy": "SPY", "qqq": "QQQ", "dia": "DIA"}
+            dca_benchmark_label = (
+                fallback_symbol_map_tw.get(benchmark_choice, "^TWII")
+                if market_code == "TW"
+                else fallback_symbol_map_us.get(benchmark_choice, "^GSPC")
+            )
+
+        dca_equity = build_dca_equity(
+            bars_by_symbol=bars_by_symbol,
+            target_index=dca_target_index,
+            initial_lump_sum=dca_initial_lump,
+            monthly_contribution=dca_monthly_contribution,
+            fee_rate=float(fee_rate),
+            sell_tax_rate=float(sell_tax),
+            slippage_rate=float(slippage),
+        )
+        dca_metrics = dca_summary_metrics(
+            dca_equity,
+            total_contribution=total_dca_contribution,
+        )
+
+        dca_benchmark_metrics: dict[str, float] = {}
+        if benchmark_choice != "off" and not benchmark_raw.empty and "close" in benchmark_raw.columns:
+            bench_close_series = pd.to_numeric(benchmark_raw["close"], errors="coerce").dropna()
+            if not bench_close_series.empty:
+                dca_benchmark_equity = build_dca_benchmark_equity(
+                    benchmark_close=bench_close_series,
+                    target_index=dca_target_index,
+                    initial_lump_sum=dca_initial_lump,
+                    monthly_contribution=dca_monthly_contribution,
+                    fee_rate=float(fee_rate),
+                    sell_tax_rate=float(sell_tax),
+                    slippage_rate=float(slippage),
+                )
+                dca_benchmark_metrics = dca_summary_metrics(
+                    dca_benchmark_equity,
+                    total_contribution=total_dca_contribution,
+                )
+
+        dca_ret = _safe_float(dca_metrics.get("total_return"))
+        dca_bench_ret = _safe_float(dca_benchmark_metrics.get("total_return")) if dca_benchmark_metrics else None
+        dca_excess_pct = (float(dca_ret) - float(dca_bench_ret)) * 100.0 if dca_ret is not None and dca_bench_ret is not None else None
+
+        def _fmt_money(v: Optional[float]) -> str:
+            if v is None or not math.isfinite(float(v)):
+                return "—"
+            return f"{float(v):,.0f}"
+
+        def _fmt_pct(v: Optional[float], *, scale: float = 100.0) -> str:
+            if v is None or not math.isfinite(float(v)):
+                return "—"
+            return f"{float(v) * scale:+.2f}%"
+
+        dca_m1, dca_m2, dca_m3, dca_m4 = st.columns(4)
+        dca_m1.metric("DCA 期末淨值", _fmt_money(_safe_float(dca_metrics.get("end_value"))))
+        dca_m2.metric("DCA 總投入", _fmt_money(total_dca_contribution))
+        dca_m3.metric("DCA 報酬率", _fmt_pct(dca_ret, scale=100.0))
+        dca_m4.metric("相對 Benchmark DCA", "—" if dca_excess_pct is None else f"{dca_excess_pct:+.2f}%")
+
+        st.caption(
+            f"投入規則：期初投入 1 次；每月定投採每月首個交易日收盤，且從次月開始。"
+            f"本次每月投入次數：{monthly_contribution_count} 次。"
+        )
+
+        dca_rows = [
+            {
+                "比較項目": "DCA策略",
+                "總投入": _fmt_money(total_dca_contribution),
+                "期末淨值": _fmt_money(_safe_float(dca_metrics.get("end_value"))),
+                "損益": _fmt_money(_safe_float(dca_metrics.get("pnl"))),
+                "報酬率(%)": "—" if dca_ret is None else f"{dca_ret * 100.0:+.2f}%",
+            }
+        ]
+        if dca_benchmark_metrics:
+            dca_rows.append(
+                {
+                    "比較項目": f"Benchmark DCA（{dca_benchmark_label or 'Benchmark'}）",
+                    "總投入": _fmt_money(total_dca_contribution),
+                    "期末淨值": _fmt_money(_safe_float(dca_benchmark_metrics.get("end_value"))),
+                    "損益": _fmt_money(_safe_float(dca_benchmark_metrics.get("pnl"))),
+                    "報酬率(%)": "—"
+                    if dca_bench_ret is None
+                    else f"{dca_bench_ret * 100.0:+.2f}%",
+                }
+            )
+        st.dataframe(pd.DataFrame(dca_rows), use_container_width=True, hide_index=True)
+        if benchmark_choice == "off":
+            st.caption("你已關閉 Benchmark，因此本卡僅顯示 DCA策略結果。")
+        elif not dca_benchmark_metrics:
+            st.caption("Benchmark 可用資料不足，暫時無法建立 Benchmark DCA 比較。")
+
     _render_card_section_header("逐年報酬卡")
     if result.yearly_returns:
         yr = pd.DataFrame([{"年度": y, "報酬率%": round(v * 100.0, 2)} for y, v in result.yearly_returns.items()])
@@ -6893,7 +7043,7 @@ def _render_backtest_view():
         st.caption("樣本不足，無逐年報酬。")
 
     if is_portfolio:
-        _render_card_section_header("投組分項績效卡")
+        _render_card_section_header("投組分項策略績效卡", "此卡顯示各檔策略本身績效（不含相對Benchmark比較）。")
         rows = []
         for symbol, comp in result.component_results.items():
             rows.append(
@@ -6906,7 +7056,7 @@ def _render_backtest_view():
                     "trades": comp.metrics.trades,
                 }
             )
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        _render_crisp_table(pd.DataFrame(rows), max_height=360)
 
     _render_card_section_header("交易明細卡")
     if is_portfolio:
@@ -6915,7 +7065,7 @@ def _render_backtest_view():
             trades_df["entry_date"] = pd.to_datetime(trades_df["entry_date"]).dt.date.astype(str)
             trades_df["exit_date"] = pd.to_datetime(trades_df["exit_date"]).dt.date.astype(str)
             trades_df["pnl_pct%"] = (trades_df["pnl_pct"] * 100.0).round(2)
-            st.dataframe(trades_df.drop(columns=["pnl_pct"]), use_container_width=True, hide_index=True)
+            _render_crisp_table(trades_df.drop(columns=["pnl_pct"]), max_height=460)
         else:
             st.caption("沒有交易紀錄。")
     else:
@@ -6937,9 +7087,13 @@ def _render_backtest_view():
                     for t in result.trades
                 ]
             )
-            st.dataframe(trades_df, use_container_width=True, hide_index=True)
+            _render_crisp_table(trades_df, max_height=460)
         else:
             st.caption("沒有交易紀錄。")
+
+    perf_timer.mark("render_complete")
+    if perf_timer.enabled:
+        st.caption(perf_timer.summary_text(prefix="perf/backtest"))
 
 
 def _render_tutorial_view():
@@ -7535,6 +7689,7 @@ def _render_00910_global_ytd_block(
 def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     store = _history_store()
     service = _market_service()
+    perf_timer = PerfTimer(enabled=perf_debug_enabled())
     etf_text = str(etf_code).strip().upper()
     page_key = f"tw{etf_text.lower()}"
 
@@ -7797,42 +7952,21 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
             f"{fee_rate}:{sell_tax}:{slippage}:{','.join(run_symbols)}"
         )
-        symbol_sync_issues: list[str] = []
-        if sync_before_run:
-            with st.spinner("同步成分股日K中..."):
-                _, symbol_sync_issues = _sync_symbols_history(
-                    store,
-                    market="TW",
-                    symbols=run_symbols,
-                    start=start_dt,
-                    end=end_dt,
-                    parallel=parallel_sync,
-                )
-
-        bars_cache: dict[str, pd.DataFrame] = {}
         min_required = get_strategy_min_bars(strategy)
-        symbols_need_sync: list[str] = []
-        for symbol in run_symbols:
-            bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-            bars_local = _normalize_ohlcv_frame(bars_local)
-            bars_cache[symbol] = bars_local
-            if len(bars_local) < min_required:
-                symbols_need_sync.append(symbol)
-
-        if symbols_need_sync and not sync_before_run:
-            with st.spinner("本地資料不足，補同步中..."):
-                _, lazy_sync_issues = _sync_symbols_history(
-                    store,
-                    market="TW",
-                    symbols=symbols_need_sync,
-                    start=start_dt,
-                    end=end_dt,
-                    parallel=parallel_sync,
-                )
-                symbol_sync_issues.extend(lazy_sync_issues)
-            for symbol in symbols_need_sync:
-                bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-                bars_cache[symbol] = _normalize_ohlcv_frame(bars_local)
+        with st.spinner("整理成分股資料中..."):
+            prepared = prepare_heatmap_bars(
+                store=store,
+                symbols=run_symbols,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                min_required=min_required,
+                sync_before_run=bool(sync_before_run),
+                parallel_sync=bool(parallel_sync),
+                normalize_ohlcv_frame=_normalize_ohlcv_frame,
+            )
+        bars_cache = dict(prepared.bars_cache)
+        symbol_sync_issues = list(prepared.sync_issues)
+        perf_timer.mark("heatmap_bars_prepared")
 
         benchmark_close, benchmark_symbol, benchmark_sync_issues = _load_tw_benchmark_close(
             store=store,
@@ -7846,78 +7980,29 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         if benchmark_close.empty:
             st.error("Benchmark 取得失敗，請改選其他基準（0050 或 006208）後重試。")
             return
+        perf_timer.mark("heatmap_benchmark_loaded")
 
         progress = st.progress(0.0)
-        rows: list[dict[str, object]] = []
         cost_model = CostModel(fee_rate=float(fee_rate), sell_tax_rate=float(sell_tax), slippage_rate=float(slippage))
         name_map = _resolve_tw_symbol_names(
             service=service,
             symbols=run_symbols,
             full_rows=full_rows_for_name_lookup,
         )
-
-        for idx, symbol in enumerate(run_symbols):
-            bars = bars_cache.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
-            if len(bars) < min_required:
-                progress.progress((idx + 1) / max(len(run_symbols), 1))
-                continue
-
-            bars, _ = apply_split_adjustment(
-                bars=bars,
-                symbol=symbol,
-                market="TW",
-                use_known=True,
-                use_auto_detect=True,
-            )
-            if len(bars) < min_required:
-                progress.progress((idx + 1) / max(len(run_symbols), 1))
-                continue
-
-            try:
-                bt = run_backtest(
-                    bars=bars,
-                    strategy_name=strategy,
-                    strategy_params=strategy_params,
-                    cost_model=cost_model,
-                    initial_capital=1_000_000.0,
-                )
-            except Exception:
-                progress.progress((idx + 1) / max(len(run_symbols), 1))
-                continue
-
-            strategy_curve = pd.to_numeric(bt.equity_curve["equity"], errors="coerce").dropna()
-            if len(strategy_curve) < 2:
-                progress.progress((idx + 1) / max(len(run_symbols), 1))
-                continue
-
-            comp = pd.concat(
-                [
-                    strategy_curve.rename("strategy"),
-                    benchmark_close.reindex(strategy_curve.index).ffill().rename("benchmark"),
-                ],
-                axis=1,
-            ).dropna()
-            if len(comp) < 2:
-                progress.progress((idx + 1) / max(len(run_symbols), 1))
-                continue
-
-            strategy_ret = float(comp["strategy"].iloc[-1] / comp["strategy"].iloc[0] - 1.0)
-            benchmark_ret = float(comp["benchmark"].iloc[-1] / comp["benchmark"].iloc[0] - 1.0)
-            excess_pct = (strategy_ret - benchmark_ret) * 100.0
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "name": name_map.get(symbol, symbol),
-                    "strategy_return_pct": strategy_ret * 100.0,
-                    "benchmark_return_pct": benchmark_ret * 100.0,
-                    "excess_pct": excess_pct,
-                    "status": "WIN" if excess_pct > 0 else ("LOSE" if excess_pct < 0 else "TIE"),
-                    "bars": int(len(comp)),
-                }
-            )
-            progress.progress((idx + 1) / max(len(run_symbols), 1))
+        rows = compute_heatmap_rows(
+            run_symbols=run_symbols,
+            bars_cache=bars_cache,
+            benchmark_close=benchmark_close,
+            strategy=strategy,
+            strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+            cost_model=cost_model,
+            name_map=name_map,
+            min_required=min_required,
+            progress_callback=lambda ratio: progress.progress(float(ratio)),
+        )
 
         progress.empty()
+        perf_timer.mark("heatmap_rows_computed")
         _render_sync_issues("部分成分股同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
         payload = {
             "run_key": run_key,
@@ -8095,11 +8180,16 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             full_rows=full_rows_00910,
         )
 
+    perf_timer.mark("heatmap_render_complete")
+    if perf_timer.enabled:
+        st.caption(perf_timer.summary_text(prefix=f"perf/heatmap/{etf_text}"))
+
 
 def _render_tw_etf_rotation_view():
     store = _history_store()
     service = _market_service()
     palette = _ui_palette()
+    perf_timer = PerfTimer(enabled=perf_debug_enabled())
 
     universe_id = "TW:ROTATION:CORE6"
     payload_key = "tw_rotation_payload"
@@ -8200,50 +8290,6 @@ def _render_tw_etf_rotation_view():
         help="多檔 ETF 時通常更快；若網路不穩可關閉改逐檔同步。",
     )
 
-    def _build_rotation_holding_rank(
-        *,
-        weights_df: Optional[pd.DataFrame],
-        selected_symbol_lists: list[list[str]],
-    ) -> list[dict[str, object]]:
-        name_map = service.get_tw_symbol_names(list(ROTATION_DEFAULT_UNIVERSE))
-        selected_counts = {sym: 0 for sym in ROTATION_DEFAULT_UNIVERSE}
-        for symbols in selected_symbol_lists:
-            for sym in symbols:
-                if sym in selected_counts:
-                    selected_counts[sym] += 1
-
-        total_days = int(len(weights_df)) if isinstance(weights_df, pd.DataFrame) and not weights_df.empty else 0
-        total_signals = max(1, len(selected_symbol_lists))
-        rows: list[dict[str, object]] = []
-        for sym in ROTATION_DEFAULT_UNIVERSE:
-            hold_days = 0
-            if total_days > 0 and weights_df is not None and sym in weights_df.columns:
-                hold_days = int((pd.to_numeric(weights_df[sym], errors="coerce").fillna(0.0) > 1e-10).sum())
-            selected_months = int(selected_counts.get(sym, 0))
-            if hold_days <= 0 and selected_months <= 0:
-                continue
-            hold_ratio_pct = (hold_days / total_days * 100.0) if total_days > 0 else 0.0
-            selected_ratio_pct = selected_months / total_signals * 100.0
-            rows.append(
-                {
-                    "symbol": sym,
-                    "name": name_map.get(sym, sym),
-                    "hold_days": hold_days,
-                    "hold_ratio_pct": hold_ratio_pct,
-                    "selected_months": selected_months,
-                    "selected_ratio_pct": selected_ratio_pct,
-                }
-            )
-        rows.sort(
-            key=lambda r: (
-                int(r.get("hold_days", 0)),
-                int(r.get("selected_months", 0)),
-                str(r.get("symbol", "")),
-            ),
-            reverse=True,
-        )
-        return rows
-
     run_key = (
         f"tw_rotation:{start_date}:{end_date}:{benchmark_choice}:"
         f"{top_n}:{fee_rate}:{sell_tax}:{slippage}:{initial_capital}"
@@ -8254,64 +8300,24 @@ def _render_tw_etf_rotation_view():
             st.error("日期區間無效，請先修正起訖日期。")
             return
 
-        symbol_sync_issues: list[str] = []
-        if sync_before_run:
-            with st.spinner("同步 ETF 池日K中..."):
-                _, symbol_sync_issues = _sync_symbols_history(
-                    store,
-                    market="TW",
-                    symbols=list(ROTATION_DEFAULT_UNIVERSE),
-                    start=start_dt,
-                    end=end_dt,
-                    parallel=parallel_sync,
-                )
-
-        bars_cache: dict[str, pd.DataFrame] = {}
-        symbols_need_sync: list[str] = []
-        for symbol in ROTATION_DEFAULT_UNIVERSE:
-            bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-            bars_local = _normalize_ohlcv_frame(bars_local)
-            bars_cache[symbol] = bars_local
-            if len(bars_local) < ROTATION_MIN_BARS:
-                symbols_need_sync.append(symbol)
-
-        if symbols_need_sync and not sync_before_run:
-            with st.spinner("本地資料不足，補同步 ETF 日K中..."):
-                _, lazy_sync_issues = _sync_symbols_history(
-                    store,
-                    market="TW",
-                    symbols=symbols_need_sync,
-                    start=start_dt,
-                    end=end_dt,
-                    parallel=parallel_sync,
-                )
-                symbol_sync_issues.extend(lazy_sync_issues)
-            for symbol in symbols_need_sync:
-                bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-                bars_cache[symbol] = _normalize_ohlcv_frame(bars_local)
-
-        bars_by_symbol: dict[str, pd.DataFrame] = {}
-        skipped_symbols: list[str] = []
         progress = st.progress(0.0)
-        for idx, symbol in enumerate(ROTATION_DEFAULT_UNIVERSE):
-            bars = bars_cache.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
-            if bars.empty:
-                skipped_symbols.append(symbol)
-                progress.progress((idx + 1) / len(ROTATION_DEFAULT_UNIVERSE))
-                continue
-            bars, _ = apply_split_adjustment(
-                bars=bars,
-                symbol=symbol,
-                market="TW",
-                use_known=True,
-                use_auto_detect=True,
+        with st.spinner("整理 ETF 池資料中..."):
+            prepared = prepare_rotation_bars(
+                store=store,
+                symbols=list(ROTATION_DEFAULT_UNIVERSE),
+                start_dt=start_dt,
+                end_dt=end_dt,
+                sync_before_run=bool(sync_before_run),
+                parallel_sync=bool(parallel_sync),
+                normalize_ohlcv_frame=_normalize_ohlcv_frame,
+                min_required=ROTATION_MIN_BARS,
+                progress_callback=lambda ratio: progress.progress(float(ratio)),
             )
-            if len(bars) < ROTATION_MIN_BARS:
-                skipped_symbols.append(symbol)
-            else:
-                bars_by_symbol[symbol] = bars
-            progress.progress((idx + 1) / len(ROTATION_DEFAULT_UNIVERSE))
         progress.empty()
+        bars_by_symbol = dict(prepared.bars_by_symbol)
+        skipped_symbols = list(prepared.skipped_symbols)
+        symbol_sync_issues = list(prepared.sync_issues)
+        perf_timer.mark("rotation_bars_prepared")
         _render_sync_issues("部分 ETF 同步失敗，已盡量使用本地可用資料", symbol_sync_issues)
 
         if not bars_by_symbol:
@@ -8331,6 +8337,7 @@ def _render_tw_etf_rotation_view():
         if benchmark_bars.empty:
             st.error("Benchmark 取得失敗，請改選 0050 或 006208 後重試。")
             return
+        perf_timer.mark("rotation_benchmark_loaded")
 
         top_n_effective = min(int(top_n), len(bars_by_symbol))
         cost_model = CostModel(
@@ -8350,6 +8357,7 @@ def _render_tw_etf_rotation_view():
         except Exception as exc:
             st.error(f"輪動回測失敗：{exc}")
             return
+        perf_timer.mark("rotation_backtest_executed")
 
         eq_idx = result.equity_curve.index
         buy_hold_equity = build_buy_hold_equity(
@@ -8379,44 +8387,36 @@ def _render_tw_etf_rotation_view():
                 }
             )
 
-        holding_rank = _build_rotation_holding_rank(
+        name_map = service.get_tw_symbol_names(list(ROTATION_DEFAULT_UNIVERSE))
+        holding_rank = runner_build_rotation_holding_rank(
             weights_df=result.weights,
             selected_symbol_lists=selected_symbol_lists,
+            universe_symbols=list(ROTATION_DEFAULT_UNIVERSE),
+            name_map=name_map,
         )
 
         trades_df = result.trades.copy()
         if not trades_df.empty and "date" in trades_df.columns:
             trades_df["date"] = pd.to_datetime(trades_df["date"], utc=True, errors="coerce").dt.strftime("%Y-%m-%d")
 
-        payload = {
-            "run_key": run_key,
-            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
-            "strategy": "tw_etf_rotation_v1",
-            "benchmark_symbol": benchmark_symbol,
-            "universe_symbols": list(ROTATION_DEFAULT_UNIVERSE),
-            "used_symbols": sorted(list(bars_by_symbol.keys())),
-            "skipped_symbols": sorted(skipped_symbols),
-            "start_date": str(start_date),
-            "end_date": str(end_date),
-            "top_n": int(top_n_effective),
-            "initial_capital": float(initial_capital),
-            "metrics": result.metrics.__dict__,
-            "equity_curve": [
-                {"date": pd.Timestamp(idx).isoformat(), "equity": float(val)}
-                for idx, val in result.equity_curve["equity"].items()
-            ],
-            "benchmark_curve": [
-                {"date": pd.Timestamp(idx).isoformat(), "equity": float(val)}
-                for idx, val in benchmark_equity.dropna().items()
-            ],
-            "buy_hold_curve": [
-                {"date": pd.Timestamp(idx).isoformat(), "equity": float(val)}
-                for idx, val in buy_hold_equity.dropna().items()
-            ],
-            "rebalance_records": rebalance_rows,
-            "trades": trades_df.to_dict("records"),
-            "holding_rank": holding_rank,
-        }
+        payload = runner_build_rotation_payload(
+            run_key=run_key,
+            benchmark_symbol=benchmark_symbol,
+            universe_symbols=list(ROTATION_DEFAULT_UNIVERSE),
+            bars_by_symbol=bars_by_symbol,
+            skipped_symbols=skipped_symbols,
+            start_date=start_date,
+            end_date=end_date,
+            top_n=int(top_n_effective),
+            initial_capital=float(initial_capital),
+            metrics=result.metrics.__dict__,
+            equity_series=result.equity_curve["equity"],
+            benchmark_equity=benchmark_equity,
+            buy_hold_equity=buy_hold_equity,
+            rebalance_records=rebalance_rows,
+            trades_df=trades_df,
+            holding_rank=holding_rank,
+        )
         st.session_state[payload_key] = payload
         store.save_rotation_run(
             universe_id=universe_id,
@@ -8433,6 +8433,7 @@ def _render_tw_etf_rotation_view():
             },
             payload=payload,
         )
+        perf_timer.mark("rotation_run_cached")
 
     payload = st.session_state.get(payload_key)
     if not payload:
@@ -8570,7 +8571,13 @@ def _render_tw_etf_rotation_view():
                 symbols = item.get("selected_symbols")
                 if isinstance(symbols, list):
                     selected_symbol_lists.append([str(s) for s in symbols])
-        holding_rank = _build_rotation_holding_rank(weights_df=None, selected_symbol_lists=selected_symbol_lists)
+        name_map = service.get_tw_symbol_names(list(ROTATION_DEFAULT_UNIVERSE))
+        holding_rank = runner_build_rotation_holding_rank(
+            weights_df=None,
+            selected_symbol_lists=selected_symbol_lists,
+            universe_symbols=list(ROTATION_DEFAULT_UNIVERSE),
+            name_map=name_map,
+        )
 
     top3_rank = [row for row in holding_rank if isinstance(row, dict)][:3]
     if top3_rank:
@@ -8619,6 +8626,10 @@ def _render_tw_etf_rotation_view():
         st.markdown("#### 成交紀錄（前200筆）")
         show_cols = [c for c in ["date", "symbol", "side", "qty", "price", "notional", "fee", "tax", "slippage", "pnl", "target_weight"] if c in trades_df.columns]
         st.dataframe(trades_df[show_cols].head(200), use_container_width=True, hide_index=True)
+
+    perf_timer.mark("rotation_render_complete")
+    if perf_timer.enabled:
+        st.caption(perf_timer.summary_text(prefix="perf/rotation"))
 
 
 def _render_00935_heatmap_view():

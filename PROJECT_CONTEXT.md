@@ -6,7 +6,7 @@
 ## 1) 目前功能地圖
 
 - `即時看盤`：台股/美股即時資訊、技術指標、建議文字
-- `回測工作台`：歷史資料同步、本地回測、回放、Benchmark 比較
+- `回測工作台`：歷史資料同步、本地回測、回放、Benchmark 比較、DCA（期初+每月定投）績效比較
 - `2025 前十大 ETF`：2025 全年區間前十大台股 ETF（卡片頁）
 - `2026 YTD 前十大 ETF`：2026 年截至今日前十大台股 ETF（卡片頁）
 - `共識代表 ETF`：以前10 ETF 成分股交集推導最具代表性的單一 ETF（附前3備選）
@@ -34,6 +34,12 @@
   - Benchmark / ETF 成分股來源整合（`00910 / 00935 / 00993A / 0050 / 0052`）
 - `services/benchmark_loader.py`
   - 台股 Benchmark 候選鏈、同步、split 調整與載入結果格式統一（熱力圖/輪動/比較卡共用）
+- `services/backtest_runner.py`
+  - 回測工作台資料準備（symbol bars/調整）與執行流程封裝
+- `services/heatmap_runner.py`
+  - 熱力圖回測前同步/資料準備與批次回測流程封裝
+- `services/rotation_runner.py`
+  - ETF 輪動頁資料準備、持有排名計算與 payload 組裝封裝
 - `services/backtest_cache.py`
   - 回測 `run_key` 與回放簽章（`schema_version/source_hash`）共用產生器
 - `services/sync_orchestrator.py`
@@ -43,6 +49,10 @@
   - 台股代碼 metadata 擷取（TWSE/TPEx）
 - `state_keys.py`
   - 回測工作台 `session_state/widget key` 集中管理，降低 key 漂移與衝突
+- `ui/shared/perf.py`
+  - 頁面級分段耗時工具（`REALTIME0052_PERF_DEBUG=1`）
+- `ui/shared/session_utils.py`
+  - `session_state` 預設值初始化 helper
 - `storage/history_store.py`
   - SQLite schema 與歷史資料同步
   - 回測結果、成分股快取與台股即時 tick 持久化
@@ -84,6 +94,8 @@
 ## 6) 近期重點改動（摘要）
 
 - 新增相對大盤勝負與超額報酬顯示
+- 回測/熱力圖/輪動三條路徑新增 runner 模組，將資料準備與執行邏輯從 `app.py` 抽離
+- 回測/熱力圖/輪動頁新增可選效能分段資訊（`REALTIME0052_PERF_DEBUG=1`）
 - 回測工作台改為輸入完成後自動回測；同條件優先讀取 SQLite 快取
 - 回測回放快取新增 `schema_version/source_hash` 簽章，舊快取會自動重算避免相容性錯誤
 - 回放預設改為完整區間且定位最後一根，`Reset` 可重播
