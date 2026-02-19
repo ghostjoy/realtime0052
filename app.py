@@ -5,6 +5,7 @@ import math
 import os
 import re
 import sqlite3
+from collections import Counter
 from datetime import date, datetime, timezone
 from io import StringIO
 from typing import Optional
@@ -204,6 +205,19 @@ def _infer_tw_symbol_exchanges(symbols: list[str]) -> dict[str, str]:
             # Most Taiwan ETF codes are listed on TWSE.
             out[code] = "TW"
     return out
+
+
+def _infer_market_target_from_symbols(symbols: list[str]) -> Optional[str]:
+    if not symbols:
+        return None
+    tw_like_symbols = [sym for sym in symbols if _looks_like_tw_symbol(sym)]
+    if not tw_like_symbols or len(tw_like_symbols) != len(symbols):
+        return None
+    inferred_map = _infer_tw_symbol_exchanges(tw_like_symbols)
+    inferred_tags = [inferred_map.get(sym) for sym in tw_like_symbols if inferred_map.get(sym) in {"TW", "OTC"}]
+    if not inferred_tags:
+        return None
+    return "OTC" if all(tag == "OTC" for tag in inferred_tags) else "TW"
 
 
 def _persist_live_tick_buffer(
@@ -834,6 +848,8 @@ PAGE_CARDS = [
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
     {"key": "2025 前十大 ETF", "desc": "2025 年全年台股 ETF 報酬率前十名。"},
     {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
+    {"key": "共識代表 ETF", "desc": "以前10 ETF 成分股交集，找出最具代表性的單一 ETF。"},
+    {"key": "兩檔 ETF 推薦", "desc": "以共識代表+低重疊動能，收斂為兩檔建議組合。"},
     {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效。"},
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
@@ -2129,7 +2145,7 @@ def _split_factor_and_events_between(symbol: str, start_used: str, end_used: str
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple[pd.DataFrame, str, str]:
+def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple[pd.DataFrame, str, str, int]:
     start_used, start_df = _fetch_twse_snapshot_with_fallback(start_yyyymmdd)
     end_used, end_df = _fetch_twse_snapshot_with_fallback(end_yyyymmdd)
 
@@ -2137,7 +2153,7 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
     start_df = start_df[start_df.apply(lambda r: _is_tw_equity_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1)].copy()
     end_df = end_df[end_df.apply(lambda r: _is_tw_equity_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1)].copy()
     if start_df.empty or end_df.empty:
-        return pd.DataFrame(), start_used, end_used
+        return pd.DataFrame(), start_used, end_used, 0
 
     merged = end_df.merge(
         start_df[["code", "close"]].rename(columns={"close": "start_close"}),
@@ -2145,7 +2161,7 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
         how="inner",
     )
     if merged.empty:
-        return pd.DataFrame(), start_used, end_used
+        return pd.DataFrame(), start_used, end_used, 0
     merged = merged.rename(columns={"name": "name", "close": "end_close"})
     factor_info = merged["code"].map(lambda c: _split_factor_and_events_between(symbol=str(c), start_used=start_used, end_used=end_used))
     merged["split_factor"] = factor_info.map(lambda x: float(x[0]))
@@ -2154,7 +2170,8 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
     merged["return_pct"] = (pd.to_numeric(merged["end_close"], errors="coerce") / pd.to_numeric(merged["adj_start_close"], errors="coerce") - 1.0) * 100.0
     merged = merged.replace([np.inf, -np.inf], np.nan).dropna(subset=["return_pct", "start_close", "end_close", "adj_start_close"])
     if merged.empty:
-        return pd.DataFrame(), start_used, end_used
+        return pd.DataFrame(), start_used, end_used, 0
+    universe_count = int(len(merged))
 
     merged["type"] = merged["name"].map(_classify_tw_etf)
     merged = merged.sort_values("return_pct", ascending=False).head(10).copy()
@@ -2178,7 +2195,7 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
     out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
     out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
     out["復權事件"] = out["復權事件"].replace("", "—")
-    return out, start_used, end_used
+    return out, start_used, end_used, universe_count
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2425,12 +2442,689 @@ def _decorate_tw_etf_top10_ytd_table(
     return table_df[[col for col in columns_order if col in table_df.columns]]
 
 
+def _normalize_constituent_symbol(symbol: object, tw_code: object) -> str:
+    code_token = str(tw_code or "").strip().upper()
+    if re.fullmatch(r"\d{4,6}[A-Z]?", code_token):
+        return code_token
+    symbol_token = str(symbol or "").strip().upper()
+    if not symbol_token:
+        return ""
+    tw_match = re.fullmatch(r"(\d{4,6}[A-Z]?)\.TW", symbol_token, flags=re.IGNORECASE)
+    if tw_match:
+        return tw_match.group(1).upper()
+    return symbol_token
+
+
+def _safe_weight_pct(value: object) -> Optional[float]:
+    text = str(value or "").strip().replace(",", "").replace("%", "")
+    if not text:
+        return None
+    number = _safe_float(text)
+    if number is None or number < 0:
+        return None
+    return float(number)
+
+
+def _consensus_threshold_candidates(etf_count: int) -> list[int]:
+    n = max(0, int(etf_count))
+    if n <= 0:
+        return []
+    if n >= 10:
+        out = [n]
+        if 8 < n:
+            out.append(8)
+        if 7 < n:
+            out.append(7)
+        return out
+    out = [n]
+    if n - 1 >= 2:
+        out.append(n - 1)
+    if n - 2 >= 2:
+        out.append(n - 2)
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _build_consensus_representative_between(
+    *,
+    start_yyyymmdd: str,
+    end_yyyymmdd: str,
+    force_refresh_constituents: bool = False,
+) -> dict[str, object]:
+    top10_df, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+        start_yyyymmdd=start_yyyymmdd,
+        end_yyyymmdd=end_yyyymmdd,
+    )
+    if top10_df.empty:
+        return {
+            "error": "目前無法建立前10 ETF 清單，請稍後重試。",
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+        }
+
+    top10_codes = [str(x).strip().upper() for x in top10_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist() if str(x).strip()]
+    top10_names = {
+        str(row.get("代碼", "")).strip().upper(): str(row.get("ETF", "")).strip()
+        for _, row in top10_df.iterrows()
+        if str(row.get("代碼", "")).strip()
+    }
+    if not top10_codes:
+        return {
+            "error": "前10 ETF 代碼清單為空，無法計算共識代表。",
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+        }
+
+    service = _market_service()
+    issues: list[str] = []
+    holdings_by_etf: dict[str, dict[str, dict[str, object]]] = {}
+    source_map: dict[str, str] = {}
+
+    for etf_code in top10_codes:
+        rows_full, source = service.get_etf_constituents_full(
+            etf_code,
+            limit=None,
+            force_refresh=bool(force_refresh_constituents),
+        )
+        parsed_rows = list(rows_full) if isinstance(rows_full, list) else []
+
+        if not parsed_rows:
+            fallback_symbols, fallback_source = service.get_tw_etf_constituents(etf_code, limit=None)
+            if fallback_symbols:
+                parsed_rows = [
+                    {
+                        "symbol": f"{str(sym).strip().upper()}.TW",
+                        "tw_code": str(sym).strip().upper(),
+                        "name": str(sym).strip().upper(),
+                        "market": "TW",
+                        "weight_pct": None,
+                    }
+                    for sym in fallback_symbols
+                    if str(sym).strip()
+                ]
+                source = f"{fallback_source}:no_weight"
+
+        if not parsed_rows:
+            issues.append(f"{etf_code}: 無法取得成分股資料")
+            continue
+
+        holding_map: dict[str, dict[str, object]] = {}
+        for row in parsed_rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = _normalize_constituent_symbol(row.get("symbol"), row.get("tw_code"))
+            if not symbol:
+                continue
+            name = str(row.get("name", "")).strip()
+            weight_pct = _safe_weight_pct(row.get("weight_pct"))
+            existed = holding_map.get(symbol)
+            if existed is None:
+                holding_map[symbol] = {
+                    "name": name,
+                    "weight_pct": weight_pct,
+                }
+                continue
+            old_weight = existed.get("weight_pct")
+            if old_weight is None and weight_pct is not None:
+                existed["weight_pct"] = weight_pct
+            elif old_weight is not None and weight_pct is not None:
+                existed["weight_pct"] = max(float(old_weight), float(weight_pct))
+            if not str(existed.get("name", "")).strip() and name:
+                existed["name"] = name
+
+        if not holding_map:
+            issues.append(f"{etf_code}: 成分股欄位解析失敗")
+            continue
+        holdings_by_etf[etf_code] = holding_map
+        source_map[etf_code] = str(source or "unknown")
+
+    usable_codes = [code for code in top10_codes if code in holdings_by_etf]
+    if len(usable_codes) < 2:
+        return {
+            "error": "可用 ETF 成分股不足（少於 2 檔），無法建立共識代表。",
+            "issues": issues,
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+            "top10_count": int(len(top10_codes)),
+            "usable_count": int(len(usable_codes)),
+        }
+
+    symbol_presence: Counter[str] = Counter()
+    for etf_code in usable_codes:
+        symbol_presence.update(holdings_by_etf[etf_code].keys())
+
+    threshold_used = 0
+    consensus_symbols: list[str] = []
+    threshold_candidates = _consensus_threshold_candidates(len(usable_codes))
+    for threshold in threshold_candidates:
+        picked = [sym for sym, cnt in symbol_presence.items() if int(cnt) >= int(threshold)]
+        if picked:
+            threshold_used = int(threshold)
+            consensus_symbols = sorted(picked)
+            break
+
+    if not consensus_symbols:
+        return {
+            "error": "目前無法形成穩定交集（含降級門檻），請改期或重抓成分股後再試。",
+            "issues": issues,
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+            "top10_count": int(len(top10_codes)),
+            "usable_count": int(len(usable_codes)),
+        }
+
+    consensus_rows: list[dict[str, object]] = []
+    for symbol in consensus_symbols:
+        held_codes: list[str] = []
+        names: list[str] = []
+        weights: list[float] = []
+        for etf_code in usable_codes:
+            rec = holdings_by_etf[etf_code].get(symbol)
+            if rec is None:
+                continue
+            held_codes.append(etf_code)
+            name_text = str(rec.get("name", "")).strip()
+            if name_text:
+                names.append(name_text)
+            weight = rec.get("weight_pct")
+            if weight is not None:
+                weights.append(float(weight))
+        picked_name = Counter(names).most_common(1)[0][0] if names else symbol
+        avg_weight = float(np.mean(weights)) if weights else np.nan
+        std_weight = float(np.std(weights, ddof=0)) if len(weights) >= 2 else 0.0 if len(weights) == 1 else np.nan
+        consensus_rows.append(
+            {
+                "代號": symbol,
+                "名稱": picked_name,
+                "被持有檔數": int(len(held_codes)),
+                "平均權重(%)": round(avg_weight, 3) if math.isfinite(avg_weight) else np.nan,
+                "權重離散度(%)": round(std_weight, 3) if math.isfinite(std_weight) else np.nan,
+                "持有ETF": " / ".join(held_codes),
+            }
+        )
+    consensus_df = pd.DataFrame(consensus_rows)
+    if not consensus_df.empty:
+        consensus_df = consensus_df.sort_values(
+            ["被持有檔數", "平均權重(%)", "代號"],
+            ascending=[False, False, True],
+            na_position="last",
+        )
+
+    representative_rows: list[dict[str, object]] = []
+    for etf_code in usable_codes:
+        holding_map = holdings_by_etf[etf_code]
+        total_weight_available = float(
+            sum(float(v.get("weight_pct")) for v in holding_map.values() if v.get("weight_pct") is not None)
+        )
+        intersection_count = 0
+        intersection_weight_sum = 0.0
+        for symbol in consensus_symbols:
+            rec = holding_map.get(symbol)
+            if rec is None:
+                continue
+            intersection_count += 1
+            weight = rec.get("weight_pct")
+            if weight is not None:
+                intersection_weight_sum += float(weight)
+        coverage_pct = np.nan
+        if total_weight_available > 0:
+            coverage_pct = (intersection_weight_sum / total_weight_available) * 100.0
+        representative_rows.append(
+            {
+                "ETF代碼": etf_code,
+                "ETF名稱": str(top10_names.get(etf_code, etf_code)),
+                "交集股數": int(intersection_count),
+                "交集權重總和(%)": round(float(intersection_weight_sum), 3),
+                "可用權重總和(%)": round(float(total_weight_available), 3),
+                "代表性分數(覆蓋率%)": round(float(coverage_pct), 3) if math.isfinite(float(coverage_pct)) else np.nan,
+                "資料來源": source_map.get(etf_code, "unknown"),
+            }
+        )
+    representative_df = pd.DataFrame(representative_rows)
+    if representative_df.empty:
+        return {
+            "error": "無法建立代表性排名資料。",
+            "issues": issues,
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+            "top10_count": int(len(top10_codes)),
+            "usable_count": int(len(usable_codes)),
+        }
+    representative_df = representative_df.sort_values(
+        ["代表性分數(覆蓋率%)", "交集股數", "交集權重總和(%)", "ETF代碼"],
+        ascending=[False, False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    representative_df.insert(0, "排名", range(1, len(representative_df) + 1))
+
+    top_pick = representative_df.iloc[0].to_dict() if not representative_df.empty else {}
+    alt_rows = representative_df.head(3).copy()
+    fallback_applied = bool(threshold_used < len(usable_codes))
+
+    return {
+        "error": "",
+        "issues": issues,
+        "start_used": start_used,
+        "end_used": end_used,
+        "universe_count": int(universe_count),
+        "top10_count": int(len(top10_codes)),
+        "usable_count": int(len(usable_codes)),
+        "threshold_used": int(threshold_used),
+        "threshold_label": f">={threshold_used}/{len(usable_codes)}",
+        "fallback_applied": fallback_applied,
+        "consensus_count": int(len(consensus_symbols)),
+        "consensus_df": consensus_df,
+        "representative_df": representative_df,
+        "top_pick": top_pick,
+        "alternatives_df": alt_rows,
+    }
+
+
+def _infer_constituent_market(*, symbol: object, tw_code: object, market: object) -> str:
+    market_token = str(market or "").strip().upper()
+    if market_token:
+        return market_token
+    code_token = str(tw_code or "").strip().upper()
+    if re.fullmatch(r"\d{4,6}[A-Z]?", code_token):
+        return "TW"
+    symbol_token = str(symbol or "").strip().upper()
+    if not symbol_token:
+        return ""
+    if re.fullmatch(r"\d{4,6}[A-Z]?", symbol_token):
+        return "TW"
+    if symbol_token.endswith(".TW"):
+        return "TW"
+    if "." in symbol_token:
+        suffix = symbol_token.rsplit(".", 1)[-1].strip().upper()
+        if suffix:
+            return suffix
+    return ""
+
+
+def _load_etf_constituents_rows(
+    *,
+    service: MarketDataService,
+    etf_code: str,
+    force_refresh_constituents: bool = False,
+) -> tuple[list[dict[str, object]], str, str]:
+    rows_full, source = service.get_etf_constituents_full(
+        etf_code,
+        limit=None,
+        force_refresh=bool(force_refresh_constituents),
+    )
+    parsed_rows = list(rows_full) if isinstance(rows_full, list) else []
+
+    if not parsed_rows:
+        fallback_symbols, fallback_source = service.get_tw_etf_constituents(etf_code, limit=None)
+        if fallback_symbols:
+            parsed_rows = [
+                {
+                    "symbol": f"{str(sym).strip().upper()}.TW",
+                    "tw_code": str(sym).strip().upper(),
+                    "name": str(sym).strip().upper(),
+                    "market": "TW",
+                    "weight_pct": None,
+                }
+                for sym in fallback_symbols
+                if str(sym).strip()
+            ]
+            source = f"{fallback_source}:no_weight"
+
+    if not parsed_rows:
+        return [], str(source or "unknown"), f"{etf_code}: 無法取得成分股資料"
+
+    dedup_rows: dict[str, dict[str, object]] = {}
+    for row in parsed_rows:
+        if not isinstance(row, dict):
+            continue
+        tw_code = str(row.get("tw_code", "")).strip().upper()
+        symbol = _normalize_constituent_symbol(row.get("symbol"), row.get("tw_code"))
+        if not symbol:
+            continue
+        name = str(row.get("name", "")).strip()
+        weight_pct = _safe_weight_pct(row.get("weight_pct"))
+        market_token = _infer_constituent_market(
+            symbol=symbol,
+            tw_code=tw_code,
+            market=row.get("market"),
+        )
+        rec = dedup_rows.get(symbol)
+        if rec is None:
+            dedup_rows[symbol] = {
+                "symbol": symbol,
+                "tw_code": tw_code,
+                "name": name,
+                "weight_pct": weight_pct,
+                "market": market_token,
+            }
+            continue
+        old_weight = rec.get("weight_pct")
+        if old_weight is None and weight_pct is not None:
+            rec["weight_pct"] = weight_pct
+        elif old_weight is not None and weight_pct is not None:
+            rec["weight_pct"] = max(float(old_weight), float(weight_pct))
+        if not str(rec.get("name", "")).strip() and name:
+            rec["name"] = name
+        if not str(rec.get("market", "")).strip() and market_token:
+            rec["market"] = market_token
+        if not str(rec.get("tw_code", "")).strip() and tw_code:
+            rec["tw_code"] = tw_code
+
+    if not dedup_rows:
+        return [], str(source or "unknown"), f"{etf_code}: 成分股欄位解析失敗"
+
+    out_rows = list(dedup_rows.values())
+    return out_rows, str(source or "unknown"), ""
+
+
+def _build_etf_constituent_sets(
+    *,
+    etf_codes: list[str],
+    force_refresh_constituents: bool = False,
+) -> tuple[dict[str, set[str]], dict[str, list[dict[str, object]]], dict[str, str], list[str]]:
+    service = _market_service()
+    constituent_sets: dict[str, set[str]] = {}
+    rows_by_etf: dict[str, list[dict[str, object]]] = {}
+    source_map: dict[str, str] = {}
+    issues: list[str] = []
+
+    for etf_code in etf_codes:
+        rows, source, issue = _load_etf_constituents_rows(
+            service=service,
+            etf_code=etf_code,
+            force_refresh_constituents=bool(force_refresh_constituents),
+        )
+        if issue:
+            issues.append(issue)
+            continue
+        symbol_set = {str(row.get("symbol", "")).strip().upper() for row in rows if str(row.get("symbol", "")).strip()}
+        if not symbol_set:
+            issues.append(f"{etf_code}: 成分股清單為空")
+            continue
+        rows_by_etf[etf_code] = rows
+        constituent_sets[etf_code] = symbol_set
+        source_map[etf_code] = source
+    return constituent_sets, rows_by_etf, source_map, issues
+
+
+def _compute_jaccard_pct(a: set[str], b: set[str]) -> float:
+    union = set(a) | set(b)
+    if not union:
+        return 0.0
+    intersection = set(a) & set(b)
+    return (len(intersection) / len(union)) * 100.0
+
+
+def _is_overseas_tilt(etf_code: str, constituents_rows: list[dict[str, object]]) -> bool:
+    _ = etf_code
+    foreign_count = 0
+    for row in constituents_rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol", "")).strip().upper()
+        if not symbol:
+            continue
+        market_token = _infer_constituent_market(
+            symbol=symbol,
+            tw_code=row.get("tw_code"),
+            market=row.get("market"),
+        )
+        if market_token and market_token != "TW":
+            foreign_count += 1
+            continue
+        if not market_token:
+            if re.fullmatch(r"\d{4,6}[A-Z]?", symbol):
+                continue
+            if symbol.endswith(".TW"):
+                continue
+            if "." in symbol:
+                suffix = symbol.rsplit(".", 1)[-1].strip().upper()
+                if suffix and suffix != "TW":
+                    foreign_count += 1
+    return foreign_count > 0
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _build_two_etf_aggressive_picks(
+    *,
+    start_yyyymmdd: str,
+    end_yyyymmdd: str,
+    allow_overseas: bool = False,
+    overlap_cap_pct: float = 10.0,
+    force_refresh_constituents: bool = False,
+) -> dict[str, object]:
+    top10_df, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+        start_yyyymmdd=start_yyyymmdd,
+        end_yyyymmdd=end_yyyymmdd,
+    )
+    if top10_df.empty:
+        return {
+            "error": "目前無法建立前10 ETF 清單，請稍後重試。",
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+        }
+
+    top10_codes = [str(x).strip().upper() for x in top10_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist() if str(x).strip()]
+    if not top10_codes:
+        return {
+            "error": "前10 ETF 代碼清單為空，無法建立兩檔推薦。",
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+        }
+
+    top10_names = {
+        str(row.get("代碼", "")).strip().upper(): str(row.get("ETF", "")).strip() or str(row.get("代碼", "")).strip().upper()
+        for _, row in top10_df.iterrows()
+        if str(row.get("代碼", "")).strip()
+    }
+    ytd_map = {
+        str(row.get("代碼", "")).strip().upper(): _safe_float(row.get("區間報酬(%)"))
+        for _, row in top10_df.iterrows()
+        if str(row.get("代碼", "")).strip()
+    }
+    rank_map = {code: idx for idx, code in enumerate(top10_codes, start=1)}
+
+    consensus_payload = _build_consensus_representative_between(
+        start_yyyymmdd=start_yyyymmdd,
+        end_yyyymmdd=end_yyyymmdd,
+        force_refresh_constituents=bool(force_refresh_constituents),
+    )
+    consensus_error = str(consensus_payload.get("error", "")).strip() if isinstance(consensus_payload, dict) else ""
+    top_pick = consensus_payload.get("top_pick", {}) if isinstance(consensus_payload, dict) else {}
+    top_pick = top_pick if isinstance(top_pick, dict) else {}
+
+    pick_1_code = str(top_pick.get("ETF代碼", "")).strip().upper()
+    pick_1_reason = ""
+    consensus_score = _safe_float(top_pick.get("代表性分數(覆蓋率%)"))
+    if pick_1_code:
+        score_text = "—" if consensus_score is None else f"{consensus_score:.2f}%"
+        pick_1_reason = f"共識代表第一名（代表性分數 {score_text}）"
+    if consensus_error or not pick_1_code or pick_1_code not in top10_codes:
+        pick_1_code = top10_codes[0]
+        pick_1_reason = "共識代表資料不可用，回退為前十大報酬第1名。"
+
+    constituent_sets, rows_by_etf, source_map, constituent_issues = _build_etf_constituent_sets(
+        etf_codes=top10_codes,
+        force_refresh_constituents=bool(force_refresh_constituents),
+    )
+    issues: list[str] = []
+    if consensus_error:
+        issues.append(f"consensus: {consensus_error}")
+    issues.extend(constituent_issues)
+
+    if pick_1_code not in constituent_sets:
+        fallback_code = next((code for code in top10_codes if code in constituent_sets), "")
+        if fallback_code:
+            pick_1_code = fallback_code
+            pick_1_reason = "核心ETF成分股資料不足，回退為首檔可用成分股ETF。"
+
+    pick_1_set = constituent_sets.get(pick_1_code, set())
+    if not pick_1_set:
+        return {
+            "error": "核心ETF成分股資料不足，無法計算兩檔重疊度。",
+            "issues": issues,
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+            "top10_count": int(len(top10_codes)),
+        }
+
+    overlap_cap_value = max(0.0, float(overlap_cap_pct))
+    excluded_overseas_codes: list[str] = []
+    candidates_raw: list[dict[str, object]] = []
+
+    for code in top10_codes:
+        if code == pick_1_code:
+            continue
+        symbol_set = constituent_sets.get(code, set())
+        overlap_pct = _compute_jaccard_pct(pick_1_set, symbol_set)
+        is_overseas = _is_overseas_tilt(code, rows_by_etf.get(code, []))
+        includable = bool(symbol_set)
+        exclusion_reason = ""
+        if not symbol_set:
+            exclusion_reason = "成分股資料不足"
+        if not bool(allow_overseas) and is_overseas:
+            includable = False
+            exclusion_reason = "含海外成分，不納入本次候選"
+            excluded_overseas_codes.append(code)
+        candidates_raw.append(
+            {
+                "前10排名": int(rank_map.get(code, 0)),
+                "ETF代碼": code,
+                "ETF名稱": top10_names.get(code, code),
+                "YTD報酬(%)": ytd_map.get(code, np.nan),
+                "與核心重疊度(%)": round(float(overlap_pct), 2),
+                "成分股數": int(len(symbol_set)),
+                "是否海外成分": "是" if is_overseas else "否",
+                "可納入候選": "是" if includable else "否",
+                "排除原因": exclusion_reason or "—",
+                "資料來源": source_map.get(code, "unknown"),
+            }
+        )
+
+    def _candidate_sort_key(row: dict[str, object]) -> tuple[float, float, int]:
+        ytd_val = _safe_float(row.get("YTD報酬(%)"))
+        overlap_val = _safe_float(row.get("與核心重疊度(%)"))
+        rank_val = int(row.get("前10排名", 999) or 999)
+        return (-(ytd_val if ytd_val is not None else -1e9), overlap_val if overlap_val is not None else 1e9, rank_val)
+
+    eligible_rows = [row for row in candidates_raw if str(row.get("可納入候選", "")).strip() == "是"]
+    if not eligible_rows:
+        return {
+            "error": "在目前限制條件下沒有可用的第2檔候選 ETF。",
+            "issues": issues,
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+            "top10_count": int(len(top10_codes)),
+            "excluded_overseas_codes": excluded_overseas_codes,
+            "candidate_df": pd.DataFrame(candidates_raw),
+        }
+
+    strict_rows = [row for row in eligible_rows if (_safe_float(row.get("與核心重疊度(%)")) or 0.0) <= overlap_cap_value]
+    selected_row: Optional[dict[str, object]] = None
+    fallback_mode = "strict_overlap"
+    overlap_cap_used = overlap_cap_value
+    if strict_rows:
+        selected_row = sorted(strict_rows, key=_candidate_sort_key)[0]
+    else:
+        relaxed_cap = max(20.0, overlap_cap_value)
+        relaxed_rows = [row for row in eligible_rows if (_safe_float(row.get("與核心重疊度(%)")) or 0.0) <= relaxed_cap]
+        if relaxed_rows:
+            selected_row = sorted(relaxed_rows, key=_candidate_sort_key)[0]
+            fallback_mode = "relaxed_overlap_20"
+            overlap_cap_used = relaxed_cap
+        else:
+            selected_row = sorted(eligible_rows, key=_candidate_sort_key)[0]
+            fallback_mode = "top_return_fallback"
+            overlap_cap_used = relaxed_cap
+
+    pick_2_code = str(selected_row.get("ETF代碼", "")).strip().upper() if isinstance(selected_row, dict) else ""
+    if not pick_2_code:
+        return {
+            "error": "無法選出第2檔 ETF。",
+            "issues": issues,
+            "start_used": start_used,
+            "end_used": end_used,
+            "universe_count": int(universe_count),
+            "top10_count": int(len(top10_codes)),
+            "excluded_overseas_codes": excluded_overseas_codes,
+        }
+
+    pick_2_overlap = _safe_float(selected_row.get("與核心重疊度(%)")) if isinstance(selected_row, dict) else None
+    if fallback_mode == "strict_overlap":
+        pick_2_reason = f"在重疊門檻 <= {overlap_cap_value:.1f}% 下，YTD報酬最高。"
+    elif fallback_mode == "relaxed_overlap_20":
+        pick_2_reason = "原始重疊門檻無候選，放寬到 <= 20% 後選 YTD報酬最高。"
+    else:
+        pick_2_reason = "重疊門檻放寬後仍無候選，回退為可投資候選中 YTD報酬最高。"
+
+    recommendation_rows = [
+        {
+            "角色": "核心",
+            "ETF代碼": pick_1_code,
+            "ETF名稱": top10_names.get(pick_1_code, pick_1_code),
+            "YTD報酬(%)": ytd_map.get(pick_1_code, np.nan),
+            "與核心重疊度(%)": 100.0,
+            "說明": pick_1_reason,
+        },
+        {
+            "角色": "衛星",
+            "ETF代碼": pick_2_code,
+            "ETF名稱": top10_names.get(pick_2_code, pick_2_code),
+            "YTD報酬(%)": ytd_map.get(pick_2_code, np.nan),
+            "與核心重疊度(%)": pick_2_overlap if pick_2_overlap is not None else np.nan,
+            "說明": pick_2_reason,
+        },
+    ]
+    recommendation_df = pd.DataFrame(recommendation_rows)
+
+    candidate_df = pd.DataFrame(candidates_raw)
+    if not candidate_df.empty:
+        candidate_df["_includable_sort"] = candidate_df["可納入候選"].map(lambda v: 1 if str(v).strip() == "是" else 0)
+        candidate_df = candidate_df.sort_values(
+            ["_includable_sort", "YTD報酬(%)", "與核心重疊度(%)", "前10排名"],
+            ascending=[False, False, True, True],
+            na_position="last",
+        ).drop(columns=["_includable_sort"]).reset_index(drop=True)
+
+    return {
+        "error": "",
+        "issues": issues,
+        "start_used": start_used,
+        "end_used": end_used,
+        "universe_count": int(universe_count),
+        "top10_count": int(len(top10_codes)),
+        "allow_overseas": bool(allow_overseas),
+        "selection_style": "進攻型",
+        "rebalance_hint": "每月",
+        "overlap_cap_pct": round(float(overlap_cap_value), 2),
+        "overlap_cap_used": round(float(overlap_cap_used), 2),
+        "fallback_mode": fallback_mode,
+        "pick_1": recommendation_rows[0],
+        "pick_2": recommendation_rows[1],
+        "excluded_overseas_codes": excluded_overseas_codes,
+        "recommendation_df": recommendation_df,
+        "candidate_df": candidate_df,
+    }
+
+
 def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str):
     st.subheader(title)
     with st.container(border=True):
         _render_card_section_header("排行卡", "依 TWSE 全市場日收盤快照計算區間報酬率。")
         try:
-            top10, start_used, end_used = _build_tw_etf_top10_between(start_yyyymmdd=start_yyyymmdd, end_yyyymmdd=end_yyyymmdd)
+            top10, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+                start_yyyymmdd=start_yyyymmdd,
+                end_yyyymmdd=end_yyyymmdd,
+            )
         except Exception as exc:
             st.error(f"無法建立 ETF 排行：{exc}")
             return
@@ -2438,11 +3132,14 @@ def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str
             st.warning("目前沒有可顯示的 ETF 排行資料。")
             return
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("樣本數", str(len(top10)))
-        m2.metric("市值型", str(int((top10["類型"] == "市值型").sum())))
-        m3.metric("股利型", str(int((top10["類型"] == "股利型").sum())))
-        m4.metric("有復權事件", str(int((top10["復權事件"] != "—").sum())))
+        top10_ratio_text = "—" if universe_count <= 0 else f"{(len(top10) / universe_count) * 100.0:.1f}%"
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("前10檔數", str(len(top10)))
+        m2.metric("母體檔數（可比較）", str(universe_count))
+        m3.metric("前10占比", top10_ratio_text)
+        m4.metric("市值型", str(int((top10["類型"] == "市值型").sum())))
+        m5.metric("股利型", str(int((top10["類型"] == "股利型").sum())))
+        m6.metric("有復權事件", str(int((top10["復權事件"] != "—").sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
             end_used=end_used,
@@ -2451,6 +3148,7 @@ def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str
         st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
         _render_data_health_caption("快照資料健康度", snapshot_health)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
+        st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
         st.caption("報酬計算：以復權期初（套用已知 split 事件）對比期末收盤。")
         st.dataframe(top10, use_container_width=True, hide_index=True)
 
@@ -2493,7 +3191,10 @@ def _render_top10_etf_2026_ytd_view():
     with st.container(border=True):
         _render_card_section_header("排行卡", "依 TWSE 全市場日收盤快照計算區間報酬率。")
         try:
-            top10, start_used, end_used = _build_tw_etf_top10_between(start_yyyymmdd=start_target, end_yyyymmdd=end_target)
+            top10, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+                start_yyyymmdd=start_target,
+                end_yyyymmdd=end_target,
+            )
             if top10.empty:
                 st.warning("目前沒有可顯示的 ETF 排行資料。")
                 return
@@ -2547,11 +3248,14 @@ def _render_top10_etf_2026_ytd_view():
             end_used=end_used,
         )
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("樣本數", str(len(top10_etf_df)))
-        m2.metric("市值型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "市值型").sum())))
-        m3.metric("股利型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "股利型").sum())))
-        m4.metric("有復權事件", str(int((top10_etf_df["復權事件"] != "—").sum())))
+        top10_ratio_text = "—" if universe_count <= 0 else f"{(len(top10_etf_df) / universe_count) * 100.0:.1f}%"
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("前10檔數", str(len(top10_etf_df)))
+        m2.metric("母體檔數（可比較）", str(universe_count))
+        m3.metric("前10占比", top10_ratio_text)
+        m4.metric("市值型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "市值型").sum())))
+        m5.metric("股利型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "股利型").sum())))
+        m6.metric("有復權事件", str(int((top10_etf_df["復權事件"] != "—").sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
             end_used=end_used,
@@ -2567,6 +3271,7 @@ def _render_top10_etf_2026_ytd_view():
         if market_issues:
             _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
+        st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
         st.caption("`2025績效(%)` 採各檔在 2025 區間內首個可交易日計算；若空白代表該檔 2025 區間無可用日K。")
         st.caption("報酬計算：`贏輸台股大盤(%) = YTD報酬 - 大盤報酬`。")
         st.dataframe(table_df, use_container_width=True, hide_index=True)
@@ -2786,6 +3491,302 @@ def _render_top10_etf_2026_ytd_view():
         skipped_symbols = payload.get("skipped_symbols", [])
         if isinstance(used_symbols, list) and isinstance(skipped_symbols, list):
             st.caption(f"可用ETF：{len(used_symbols)} 檔 | 資料不足未納入：{len(skipped_symbols)} 檔")
+
+def _render_consensus_representative_etf_view():
+    title_col, refresh_col = st.columns([6, 1])
+    with title_col:
+        st.subheader("共識代表 ETF（前10交集）")
+    with refresh_col:
+        force_recompute = st.button(
+            "重新計算",
+            key="consensus_etf_refresh",
+            use_container_width=True,
+            type="primary",
+        )
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.caption("更新節奏建議：每月更新一次；若市場結構快速變化可手動重算。")
+    with c2:
+        force_refresh_constituents = st.checkbox(
+            "重抓成分股（較慢）",
+            value=False,
+            key="consensus_etf_force_refresh_constituents",
+        )
+
+    if force_recompute:
+        _build_consensus_representative_between.clear()
+        _build_tw_etf_top10_between.clear()
+        st.rerun()
+
+    start_target = "20251231"
+    end_target = datetime.now().strftime("%Y%m%d")
+
+    with st.container(border=True):
+        _render_card_section_header("共識代表卡", "由當期前10 ETF 成分股交集推導最具代表性的單一 ETF。")
+        try:
+            payload = _build_consensus_representative_between(
+                start_yyyymmdd=start_target,
+                end_yyyymmdd=end_target,
+                force_refresh_constituents=bool(force_refresh_constituents),
+            )
+        except Exception as exc:
+            st.error(f"無法建立共識代表 ETF：{exc}")
+            return
+
+        error_text = str(payload.get("error", "")).strip()
+        if error_text:
+            _emit_issue_message(error_text)
+            issues = payload.get("issues", [])
+            if isinstance(issues, list) and issues:
+                _render_sync_issues("成分股取得有部分錯誤", issues, preview_limit=3)
+            return
+
+        start_used = str(payload.get("start_used", "")).strip()
+        end_used = str(payload.get("end_used", "")).strip()
+        top_pick = payload.get("top_pick", {})
+        if not isinstance(top_pick, dict):
+            top_pick = {}
+        consensus_count = int(payload.get("consensus_count", 0) or 0)
+        top10_count = int(payload.get("top10_count", 0) or 0)
+        usable_count = int(payload.get("usable_count", 0) or 0)
+        threshold_used = int(payload.get("threshold_used", 0) or 0)
+        threshold_label = str(payload.get("threshold_label", "")).strip()
+        universe_count = int(payload.get("universe_count", 0) or 0)
+        fallback_applied = bool(payload.get("fallback_applied", False))
+
+        top_code = str(top_pick.get("ETF代碼", "—")).strip() or "—"
+        top_name = str(top_pick.get("ETF名稱", top_code)).strip() or top_code
+        top_score = _safe_float(top_pick.get("代表性分數(覆蓋率%)"))
+        top_score_text = "—" if top_score is None else f"{top_score:.2f}%"
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("建議 ETF", top_code)
+        m2.metric("代表性分數", top_score_text)
+        m3.metric("交集股票數", str(consensus_count))
+        m4.metric("交集門檻", threshold_label or "—")
+        m5.metric("可用 ETF 數", f"{usable_count}/{top10_count}")
+        m6.metric("前10母體（可比較）", str(universe_count))
+
+        st.caption(f"建議標的：{top_code} {top_name}")
+        st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
+        if fallback_applied:
+            st.caption(f"交集門檻說明：嚴格交集不足，已降級為「至少 {threshold_used}/{usable_count} 檔共持」。")
+        else:
+            st.caption(f"交集門檻說明：使用嚴格交集（{usable_count}/{usable_count} 檔共持）。")
+
+        snapshot_health = _build_snapshot_health(
+            start_used=start_used,
+            end_used=end_used,
+            target_yyyymmdd=end_target,
+        )
+        _render_data_health_caption("快照資料健康度", snapshot_health)
+
+        issues = payload.get("issues", [])
+        if isinstance(issues, list) and issues:
+            _render_sync_issues("部分 ETF 成分股抓取失敗，已用可用資料計算", issues, preview_limit=3)
+
+    alternatives_df = payload.get("alternatives_df")
+    if isinstance(alternatives_df, pd.DataFrame) and not alternatives_df.empty:
+        with st.container(border=True):
+            _render_card_section_header("代表性排名（建議 + 備選）", "以交集權重覆蓋率排序，前3檔可作為核心與備選。")
+            show_cols = [
+                col
+                for col in [
+                    "排名",
+                    "ETF代碼",
+                    "ETF名稱",
+                    "交集股數",
+                    "交集權重總和(%)",
+                    "可用權重總和(%)",
+                    "代表性分數(覆蓋率%)",
+                ]
+                if col in alternatives_df.columns
+            ]
+            st.dataframe(alternatives_df[show_cols], use_container_width=True, hide_index=True)
+
+    consensus_df = payload.get("consensus_df")
+    if isinstance(consensus_df, pd.DataFrame) and not consensus_df.empty:
+        with st.container(border=True):
+            _render_card_section_header("共識核心成分股", "顯示交集核心股票與其在前10 ETF 中的覆蓋情況。")
+            show_cols = [col for col in ["代號", "名稱", "被持有檔數", "平均權重(%)", "權重離散度(%)", "持有ETF"] if col in consensus_df.columns]
+            st.dataframe(
+                consensus_df[show_cols],
+                use_container_width=True,
+                hide_index=True,
+                height=_full_table_height(consensus_df),
+            )
+
+    representative_df = payload.get("representative_df")
+    if isinstance(representative_df, pd.DataFrame) and not representative_df.empty:
+        with st.container(border=True):
+            _render_card_section_header("完整代表性排名", "若前3檔分數接近，可在此比較完整名單。")
+            show_cols = [
+                col
+                for col in [
+                    "排名",
+                    "ETF代碼",
+                    "ETF名稱",
+                    "交集股數",
+                    "交集權重總和(%)",
+                    "可用權重總和(%)",
+                    "代表性分數(覆蓋率%)",
+                    "資料來源",
+                ]
+                if col in representative_df.columns
+            ]
+            st.dataframe(representative_df[show_cols], use_container_width=True, hide_index=True)
+            st.caption("註：代表性分數高，代表該 ETF 對共識交集股的權重覆蓋率更高；不等於未來報酬保證。")
+
+
+def _render_two_etf_pick_view():
+    title_col, refresh_col = st.columns([6, 1])
+    with title_col:
+        st.subheader("兩檔 ETF 推薦（進攻型）")
+    with refresh_col:
+        force_recompute = st.button(
+            "重新計算",
+            key="two_etf_pick_refresh",
+            use_container_width=True,
+            type="primary",
+        )
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        st.caption("策略定位：核心（共識代表）+ 衛星（低重疊動能），預設每月檢查一次。")
+    with c2:
+        allow_overseas = st.checkbox(
+            "允許海外成分",
+            value=False,
+            key="two_etf_pick_allow_overseas",
+        )
+    with c3:
+        force_refresh_constituents = st.checkbox(
+            "重抓成分股（較慢）",
+            value=False,
+            key="two_etf_pick_force_refresh_constituents",
+        )
+
+    overlap_cap_pct = st.slider(
+        "重疊門檻（Jaccard %）",
+        min_value=0.0,
+        max_value=30.0,
+        value=10.0,
+        step=1.0,
+        key="two_etf_pick_overlap_cap",
+        help="先用此門檻挑第2檔；若無候選會自動放寬到 20%，再不行才回退到最高YTD。",
+    )
+
+    if force_recompute:
+        _build_two_etf_aggressive_picks.clear()
+        _build_consensus_representative_between.clear()
+        _build_tw_etf_top10_between.clear()
+        st.rerun()
+
+    start_target = "20251231"
+    end_target = datetime.now().strftime("%Y%m%d")
+
+    with st.container(border=True):
+        _render_card_section_header("兩檔推薦卡", "以前10ETF + 共識代表 + 成分股重疊度，輸出核心/衛星兩檔建議。")
+        try:
+            payload = _build_two_etf_aggressive_picks(
+                start_yyyymmdd=start_target,
+                end_yyyymmdd=end_target,
+                allow_overseas=bool(allow_overseas),
+                overlap_cap_pct=float(overlap_cap_pct),
+                force_refresh_constituents=bool(force_refresh_constituents),
+            )
+        except Exception as exc:
+            st.error(f"無法建立兩檔 ETF 推薦：{exc}")
+            return
+
+        error_text = str(payload.get("error", "")).strip()
+        if error_text:
+            _emit_issue_message(error_text)
+            issues = payload.get("issues", [])
+            if isinstance(issues, list) and issues:
+                _render_sync_issues("成分股取得有部分錯誤", issues, preview_limit=3)
+            return
+
+        pick_1 = payload.get("pick_1", {})
+        pick_2 = payload.get("pick_2", {})
+        pick_1 = pick_1 if isinstance(pick_1, dict) else {}
+        pick_2 = pick_2 if isinstance(pick_2, dict) else {}
+        start_used = str(payload.get("start_used", "")).strip()
+        end_used = str(payload.get("end_used", "")).strip()
+        top10_count = int(payload.get("top10_count", 0) or 0)
+        universe_count = int(payload.get("universe_count", 0) or 0)
+        overlap_cap_used = _safe_float(payload.get("overlap_cap_used"))
+        overlap_pick_2 = _safe_float(pick_2.get("與核心重疊度(%)"))
+        fallback_mode = str(payload.get("fallback_mode", "")).strip()
+
+        pick_1_code = str(pick_1.get("ETF代碼", "—")).strip() or "—"
+        pick_2_code = str(pick_2.get("ETF代碼", "—")).strip() or "—"
+        overlap_text = "—" if overlap_pick_2 is None else f"{overlap_pick_2:.2f}%"
+        cap_text = "—" if overlap_cap_used is None else f"{overlap_cap_used:.1f}%"
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("核心 ETF", pick_1_code)
+        m2.metric("衛星 ETF", pick_2_code)
+        m3.metric("兩檔重疊度", overlap_text)
+        m4.metric("重疊門檻", cap_text)
+        m5.metric("前10母體（可比較）", str(universe_count))
+
+        st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
+        st.caption(
+            f"策略參數：風格=進攻型｜調整頻率=每月｜允許海外={'是' if bool(payload.get('allow_overseas', False)) else '否'}"
+            f"｜候選池=前10 ETF（共 {top10_count} 檔）"
+        )
+        if fallback_mode == "strict_overlap":
+            st.caption("第2檔選擇規則：在原始重疊門檻內，選 YTD 報酬最高的候選。")
+        elif fallback_mode == "relaxed_overlap_20":
+            st.caption("第2檔選擇規則：原始門檻無候選，已放寬到 20% 重疊門檻後選取。")
+        else:
+            st.caption("第2檔選擇規則：放寬門檻仍無候選，已回退為可投資候選中 YTD 最高。")
+
+        snapshot_health = _build_snapshot_health(
+            start_used=start_used,
+            end_used=end_used,
+            target_yyyymmdd=end_target,
+        )
+        _render_data_health_caption("快照資料健康度", snapshot_health)
+
+        issues = payload.get("issues", [])
+        if isinstance(issues, list) and issues:
+            _render_sync_issues("部分資料抓取失敗，已用可用資料計算", issues, preview_limit=3)
+        excluded_overseas = payload.get("excluded_overseas_codes", [])
+        if isinstance(excluded_overseas, list) and excluded_overseas:
+            st.caption(f"海外限制：已排除 {len(excluded_overseas)} 檔候選（{', '.join(excluded_overseas[:5])}）。")
+
+    recommendation_df = payload.get("recommendation_df")
+    if isinstance(recommendation_df, pd.DataFrame) and not recommendation_df.empty:
+        with st.container(border=True):
+            _render_card_section_header("推薦結果", "核心檔重代表性，衛星檔重低重疊動能。")
+            show_cols = [col for col in ["角色", "ETF代碼", "ETF名稱", "YTD報酬(%)", "與核心重疊度(%)", "說明"] if col in recommendation_df.columns]
+            st.dataframe(recommendation_df[show_cols], use_container_width=True, hide_index=True)
+
+    candidate_df = payload.get("candidate_df")
+    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
+        with st.container(border=True):
+            _render_card_section_header("候選比較", "顯示前10候選的報酬、重疊度與是否納入本次推薦。")
+            show_cols = [
+                col
+                for col in [
+                    "前10排名",
+                    "ETF代碼",
+                    "ETF名稱",
+                    "YTD報酬(%)",
+                    "與核心重疊度(%)",
+                    "成分股數",
+                    "是否海外成分",
+                    "可納入候選",
+                    "排除原因",
+                ]
+                if col in candidate_df.columns
+            ]
+            st.dataframe(candidate_df[show_cols], use_container_width=True, hide_index=True)
+            st.caption("註：此卡為選股規則透明化，非未來報酬保證；請搭配資金配置與風險控管。")
+
 
 def _render_active_etf_2026_ytd_view():
     title_col, refresh_col = st.columns([6, 1])
@@ -4339,6 +5340,29 @@ def _render_backtest_view():
     store = _history_store()
     service = _market_service()
 
+    market_auto_note_key = "bt_market_auto_inferred"
+
+    symbol_prefill_text = str(st.session_state.get(BT_KEYS.symbol, "")).strip().upper()
+    prefill_symbols = _parse_symbols(symbol_prefill_text)
+    prefill_target = _infer_market_target_from_symbols(prefill_symbols)
+    if prefill_target in {"TW", "OTC"} and st.session_state.get(BT_KEYS.market) != prefill_target:
+        st.session_state[BT_KEYS.market] = prefill_target
+    if prefill_target in {"TW", "OTC"}:
+        st.session_state[market_auto_note_key] = prefill_target
+    else:
+        st.session_state.pop(market_auto_note_key, None)
+
+    def _on_bt_symbol_change():
+        current_text = str(st.session_state.get(BT_KEYS.symbol, "")).strip().upper()
+        current_symbols = _parse_symbols(current_text)
+        inferred = _infer_market_target_from_symbols(current_symbols)
+        if inferred in {"TW", "OTC"}:
+            st.session_state[market_auto_note_key] = inferred
+            if st.session_state.get(BT_KEYS.market) != inferred:
+                st.session_state[BT_KEYS.market] = inferred
+        else:
+            st.session_state.pop(market_auto_note_key, None)
+
     _render_card_section_header("回測設定卡", "先設定基本條件，再調整策略/成本與進階回放選項。")
     st.markdown("#### 基本設定")
     c1, c2, c3, c4 = st.columns(4)
@@ -4359,6 +5383,7 @@ def _render_backtest_view():
         "代碼（投組用逗號分隔）",
         value=default_symbol if mode == "單一標的" else ("0052,2330" if market_selector == "TW" else ("8069,4123" if market_selector == "OTC" else "AAPL,MSFT,TSLA")),
         key=BT_KEYS.symbol,
+        on_change=_on_bt_symbol_change,
     ).strip().upper()
     strategy = c4.selectbox(
         "策略",
@@ -4373,20 +5398,16 @@ def _render_backtest_view():
     if not symbols:
         st.warning("請輸入至少一個代碼。")
         return
-    tw_like_symbols = [sym for sym in symbols if _looks_like_tw_symbol(sym)]
-    if tw_like_symbols and len(tw_like_symbols) == len(symbols):
-        inferred_map = _infer_tw_symbol_exchanges(tw_like_symbols)
-        inferred_tags = [inferred_map.get(sym) for sym in tw_like_symbols if inferred_map.get(sym) in {"TW", "OTC"}]
-        inferred_target: Optional[str] = None
-        if inferred_tags:
-            inferred_target = "OTC" if all(tag == "OTC" for tag in inferred_tags) else "TW"
-            if market_selector != inferred_target:
-                st.session_state[BT_KEYS.market] = inferred_target
-                st.rerun()
-        if inferred_target == "OTC":
-            st.caption("代碼已自動判斷為台股上櫃（OTC）。")
-        elif inferred_target == "TW":
-            st.caption("代碼已自動判斷為台股上市（TWSE）。")
+    inferred_target = _infer_market_target_from_symbols(symbols)
+    if inferred_target in {"TW", "OTC"}:
+        st.session_state[market_auto_note_key] = inferred_target
+    else:
+        st.session_state.pop(market_auto_note_key, None)
+    inferred_note = str(st.session_state.get(market_auto_note_key, "")).strip().upper()
+    if inferred_note == "OTC":
+        st.caption("代碼已自動判斷為台股上櫃（OTC）。")
+    elif inferred_note == "TW":
+        st.caption("代碼已自動判斷為台股上市（TWSE）。")
 
     auto_cost_key = BT_KEYS.auto_cost
     fee_key = BT_KEYS.fee_rate
@@ -5932,6 +6953,8 @@ def _render_tutorial_view():
             {"分頁": "回測工作台", "你會看到什麼": "單檔/投組回測、Walk-Forward、Benchmark 比較、回放", "什麼時候用": "驗證策略與參數"},
             {"分頁": "2025 前十大 ETF", "你會看到什麼": "2025 全年 Top10 報酬排行", "什麼時候用": "回顧去年全年度強弱"},
             {"分頁": "2026 YTD 前十大 ETF", "你會看到什麼": "2026 年迄今 Top10、2025 對照、大盤勝負、Benchmark 對照卡", "什麼時候用": "看今年領先 ETF"},
+            {"分頁": "共識代表 ETF", "你會看到什麼": "以前10 ETF 成分股交集推導建議ETF與備選", "什麼時候用": "想要從多檔收斂到單一核心ETF"},
+            {"分頁": "兩檔 ETF 推薦", "你會看到什麼": "核心+衛星兩檔建議（低重疊動能）", "什麼時候用": "想快速落地成可執行兩檔組合"},
             {"分頁": "2026 YTD 主動式 ETF", "你會看到什麼": "主動式 ETF 排行、2025 對照、大盤勝負、Benchmark 對照卡", "什麼時候用": "追蹤主動式 ETF 表現"},
             {"分頁": "ETF 輪動策略", "你會看到什麼": "固定 ETF 池月調倉回測、調倉明細、持有最久排名", "什麼時候用": "看規則化輪動是否優於基準"},
             {"分頁": "00910 熱力圖", "你會看到什麼": "全球成分股 YTD 分組熱力圖 + 台股子集合進階回測", "什麼時候用": "同時看國內/海外成分股相對表現"},
@@ -5951,9 +6974,9 @@ def _render_tutorial_view():
             [
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
-                "3. 再到 `2026 YTD 前十大 ETF` 或 `2026 YTD 主動式 ETF` 看橫向比較。",
+                "3. 再到 `2026 YTD 前十大 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
                 "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00993A / 0050 / 0052 熱力圖`。",
-                "5. 最後才用 `ETF 輪動策略` 做規則化比較。",
+                "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
             ]
         )
     )
@@ -5963,6 +6986,8 @@ def _render_tutorial_view():
     cache_df = pd.DataFrame(
         [
             {"項目": "更新最新市況（Top10/主動式）", "作用": "清除該頁快取並重抓最新快照", "不按會怎樣": "會先顯示上次可用結果"},
+            {"項目": "重新計算（共識代表 ETF）", "作用": "重算前10交集與代表性分數", "不按會怎樣": "沿用最近一次共識計算結果"},
+            {"項目": "重新計算（兩檔 ETF 推薦）", "作用": "重算核心/衛星推薦與重疊門檻", "不按會怎樣": "沿用最近一次兩檔推薦結果"},
             {"項目": "更新 成分股（熱力圖）", "作用": "重抓 ETF 成分股清單並更新快取", "不按會怎樣": "沿用 `universe_snapshots` 既有快取"},
             {"項目": "執行前同步最新日K（較慢）", "作用": "先補齊資料再跑", "不按會怎樣": "優先用本地 SQLite，不足才補同步"},
             {"項目": "重新計算（Benchmark 對照卡）", "作用": "在目前參數下重算曲線與績效表", "不按會怎樣": "沿用本頁已算過結果"},
@@ -6095,8 +7120,8 @@ def _render_tutorial_view():
             [
                 "1. 先在 `回測工作台` 用 `buy_hold` 跑單檔，確認資料與報表都正常。",
                 "2. 再改成 `sma_trend_filter` 或 `donchian_breakout`，比較是否優於 `buy_hold`。",
-                "3. 接著用 `2026 YTD 前十大 ETF` / `2026 YTD 主動式 ETF` 做橫向排名比較。",
-                "4. 最後才進 `ETF 輪動策略` 與各熱力圖做進階判讀。",
+                "3. 接著用 `2026 YTD 前十大 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合。",
+                "4. 最後才進 `ETF 輪動策略`、`2026 YTD 主動式 ETF` 與各熱力圖做進階判讀。",
             ]
         )
     )
@@ -7839,6 +8864,8 @@ def main():
         "回測工作台": _render_backtest_view,
         "2025 前十大 ETF": _render_top10_etf_2025_view,
         "2026 YTD 前十大 ETF": _render_top10_etf_2026_ytd_view,
+        "共識代表 ETF": _render_consensus_representative_etf_view,
+        "兩檔 ETF 推薦": _render_two_etf_pick_view,
         "2026 YTD 主動式 ETF": _render_active_etf_2026_ytd_view,
         "ETF 輪動策略": _render_tw_etf_rotation_view,
         "00910 熱力圖": _render_00910_heatmap_view,

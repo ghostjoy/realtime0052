@@ -17,6 +17,12 @@ from app import (
     _decorate_tw_etf_top10_ytd_table,
     _build_data_health,
     _build_snapshot_health,
+    _build_consensus_representative_between,
+    _build_two_etf_aggressive_picks,
+    _compute_jaccard_pct,
+    _infer_market_target_from_symbols,
+    _consensus_threshold_candidates,
+    _build_tw_etf_top10_between,
     _build_replay_source_hash,
     _build_symbol_line_styles,
     _resolve_tw_symbol_names,
@@ -75,6 +81,20 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(_benchmark_candidates_tw("0050"), ["0050"])
         self.assertEqual(_benchmark_candidates_tw("unknown"), ["^TWII"])
         self.assertEqual(_benchmark_candidates_tw("unknown", allow_twii_fallback=True), ["^TWII", "0050", "006208"])
+
+    def test_infer_market_target_from_symbols(self):
+        with patch("app._infer_tw_symbol_exchanges", return_value={"8069": "OTC", "4123": "OTC"}):
+            self.assertEqual(_infer_market_target_from_symbols(["8069", "4123"]), "OTC")
+
+        with patch("app._infer_tw_symbol_exchanges", return_value={"2330": "TW", "2454": "TW"}):
+            self.assertEqual(_infer_market_target_from_symbols(["2330", "2454"]), "TW")
+
+        with patch("app._infer_tw_symbol_exchanges", return_value={"8069": "OTC", "2330": "TW"}):
+            self.assertEqual(_infer_market_target_from_symbols(["8069", "2330"]), "TW")
+
+        self.assertIsNone(_infer_market_target_from_symbols(["AAPL", "MSFT"]))
+        self.assertIsNone(_infer_market_target_from_symbols(["8069", "AAPL"]))
+        self.assertIsNone(_infer_market_target_from_symbols([]))
 
     def test_load_tw_benchmark_bars_fallback_chain(self):
         idx = pd.to_datetime(["2026-01-02", "2026-01-03"], utc=True)
@@ -274,6 +294,414 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.iloc[1]["YTD報酬(%)"]), 20.0)
         self.assertEqual(float(out.iloc[2]["YTD報酬(%)"]), -10.0)
         self.assertNotIn("00935", list(out["代碼"]))
+
+    def test_build_tw_etf_top10_between_returns_universe_count(self):
+        _build_tw_etf_top10_between.clear()
+
+        start_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 100.0},
+                {"code": "0056", "name": "元大高股息", "close": 30.0},
+                {"code": "00935", "name": "野村台灣創新科技50", "close": 50.0},
+                {"code": "00632R", "name": "元大台灣50反1", "close": 5.0},
+                {"code": "00858", "name": "永豐美國500大", "close": 20.0},
+            ]
+        )
+        end_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 110.0},
+                {"code": "0056", "name": "元大高股息", "close": 33.0},
+                {"code": "00935", "name": "野村台灣創新科技50", "close": 55.0},
+                {"code": "0052", "name": "富邦科技", "close": 120.0},
+                {"code": "00632R", "name": "元大台灣50反1", "close": 4.0},
+            ]
+        )
+
+        with patch(
+            "app._fetch_twse_snapshot_with_fallback",
+            side_effect=[("20251231", start_df), ("20260214", end_df)],
+        ), patch("app.known_split_events", return_value=[]):
+            out, start_used, end_used, universe_count = _build_tw_etf_top10_between("20260101", "20260216")
+
+        self.assertEqual(start_used, "20251231")
+        self.assertEqual(end_used, "20260214")
+        self.assertEqual(universe_count, 3)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(list(out["代碼"]), ["0050", "0056", "00935"])
+
+    def test_build_tw_etf_top10_between_empty_intersection(self):
+        _build_tw_etf_top10_between.clear()
+
+        start_df = pd.DataFrame([{"code": "0050", "name": "元大台灣50", "close": 100.0}])
+        end_df = pd.DataFrame([{"code": "0056", "name": "元大高股息", "close": 30.0}])
+
+        with patch(
+            "app._fetch_twse_snapshot_with_fallback",
+            side_effect=[("20251231", start_df), ("20260214", end_df)],
+        ), patch("app.known_split_events", return_value=[]):
+            out, start_used, end_used, universe_count = _build_tw_etf_top10_between("20260101", "20260216")
+
+        self.assertEqual(start_used, "20251231")
+        self.assertEqual(end_used, "20260214")
+        self.assertTrue(out.empty)
+        self.assertEqual(universe_count, 0)
+
+    def test_consensus_threshold_candidates(self):
+        self.assertEqual(_consensus_threshold_candidates(10), [10, 8, 7])
+        self.assertEqual(_consensus_threshold_candidates(3), [3, 2])
+        self.assertEqual(_consensus_threshold_candidates(2), [2])
+        self.assertEqual(_consensus_threshold_candidates(1), [1])
+        self.assertEqual(_consensus_threshold_candidates(0), [])
+
+    def test_build_consensus_representative_between_strict_intersection(self):
+        _build_consensus_representative_between.clear()
+
+        top10_df = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50"},
+                {"排名": 2, "代碼": "0056", "ETF": "元大高股息"},
+                {"排名": 3, "代碼": "00935", "ETF": "野村台灣創新科技50"},
+            ]
+        )
+
+        class _FakeService:
+            def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
+                data = {
+                    "0050": [
+                        {"symbol": "A", "name": "A", "weight_pct": 40.0},
+                        {"symbol": "B", "name": "B", "weight_pct": 30.0},
+                        {"symbol": "C", "name": "C", "weight_pct": 30.0},
+                    ],
+                    "0056": [
+                        {"symbol": "A", "name": "A", "weight_pct": 20.0},
+                        {"symbol": "B", "name": "B", "weight_pct": 20.0},
+                        {"symbol": "D", "name": "D", "weight_pct": 60.0},
+                    ],
+                    "00935": [
+                        {"symbol": "A", "name": "A", "weight_pct": 10.0},
+                        {"symbol": "B", "name": "B", "weight_pct": 10.0},
+                        {"symbol": "E", "name": "E", "weight_pct": 80.0},
+                    ],
+                }
+                return data.get(str(etf_code), []), "mock_full"
+
+            def get_tw_etf_constituents(self, etf_code, limit=None):
+                return [], "mock_fallback"
+
+        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
+            "app._market_service", return_value=_FakeService()
+        ):
+            payload = _build_consensus_representative_between(
+                start_yyyymmdd="20251231",
+                end_yyyymmdd="20260214",
+                force_refresh_constituents=False,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        self.assertEqual(int(payload.get("threshold_used", 0)), 3)
+        self.assertEqual(int(payload.get("consensus_count", 0)), 2)
+        self.assertFalse(bool(payload.get("fallback_applied", True)))
+        top_pick = payload.get("top_pick", {})
+        self.assertEqual(str(top_pick.get("ETF代碼", "")), "0050")
+
+    def test_build_consensus_representative_between_fallback_threshold(self):
+        _build_consensus_representative_between.clear()
+
+        top10_df = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50"},
+                {"排名": 2, "代碼": "0056", "ETF": "元大高股息"},
+                {"排名": 3, "代碼": "00935", "ETF": "野村台灣創新科技50"},
+            ]
+        )
+
+        class _FakeService:
+            def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
+                data = {
+                    "0050": [
+                        {"symbol": "A", "name": "A", "weight_pct": 30.0},
+                        {"symbol": "B", "name": "B", "weight_pct": 30.0},
+                        {"symbol": "C", "name": "C", "weight_pct": 40.0},
+                    ],
+                    "0056": [
+                        {"symbol": "A", "name": "A", "weight_pct": 50.0},
+                        {"symbol": "D", "name": "D", "weight_pct": 30.0},
+                        {"symbol": "E", "name": "E", "weight_pct": 20.0},
+                    ],
+                    "00935": [
+                        {"symbol": "B", "name": "B", "weight_pct": 20.0},
+                        {"symbol": "D", "name": "D", "weight_pct": 20.0},
+                        {"symbol": "F", "name": "F", "weight_pct": 60.0},
+                    ],
+                }
+                return data.get(str(etf_code), []), "mock_full"
+
+            def get_tw_etf_constituents(self, etf_code, limit=None):
+                return [], "mock_fallback"
+
+        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
+            "app._market_service", return_value=_FakeService()
+        ):
+            payload = _build_consensus_representative_between(
+                start_yyyymmdd="20251231",
+                end_yyyymmdd="20260214",
+                force_refresh_constituents=False,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        self.assertEqual(int(payload.get("threshold_used", 0)), 2)
+        self.assertEqual(int(payload.get("consensus_count", 0)), 3)
+        self.assertTrue(bool(payload.get("fallback_applied", False)))
+        top_pick = payload.get("top_pick", {})
+        self.assertEqual(str(top_pick.get("ETF代碼", "")), "0056")
+
+    def test_compute_jaccard_pct(self):
+        self.assertAlmostEqual(_compute_jaccard_pct({"A", "B"}, {"B", "C"}), 33.3333333333, places=3)
+        self.assertEqual(_compute_jaccard_pct(set(), set()), 0.0)
+
+    def test_build_two_etf_aggressive_picks_normal(self):
+        _build_two_etf_aggressive_picks.clear()
+
+        top10_df = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50", "區間報酬(%)": 25.0},
+                {"排名": 2, "代碼": "0056", "ETF": "元大高股息", "區間報酬(%)": 22.0},
+                {"排名": 3, "代碼": "00935", "ETF": "野村臺灣新科技50", "區間報酬(%)": 20.0},
+                {"排名": 4, "代碼": "00878", "ETF": "國泰永續高股息", "區間報酬(%)": 19.0},
+            ]
+        )
+
+        consensus_payload = {
+            "error": "",
+            "top_pick": {"ETF代碼": "0050", "代表性分數(覆蓋率%)": 22.8},
+        }
+
+        class _FakeService:
+            def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
+                data = {
+                    "0050": [
+                        {"symbol": "A", "market": "TW"},
+                        {"symbol": "B", "market": "TW"},
+                        {"symbol": "C", "market": "TW"},
+                    ],
+                    "0056": [
+                        {"symbol": "A", "market": "TW"},
+                        {"symbol": "B", "market": "TW"},
+                        {"symbol": "D", "market": "TW"},
+                    ],
+                    "00935": [
+                        {"symbol": "X", "market": "TW"},
+                        {"symbol": "Y", "market": "TW"},
+                        {"symbol": "Z", "market": "TW"},
+                    ],
+                    "00878": [
+                        {"symbol": "A", "market": "TW"},
+                        {"symbol": "X", "market": "TW"},
+                        {"symbol": "Z", "market": "TW"},
+                    ],
+                }
+                return data.get(str(etf_code), []), "mock_full"
+
+            def get_tw_etf_constituents(self, etf_code, limit=None):
+                return [], "mock_fallback"
+
+        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
+            "app._build_consensus_representative_between", return_value=consensus_payload
+        ), patch("app._market_service", return_value=_FakeService()):
+            payload = _build_two_etf_aggressive_picks(
+                start_yyyymmdd="20251231",
+                end_yyyymmdd="20260214",
+                allow_overseas=False,
+                overlap_cap_pct=10.0,
+                force_refresh_constituents=False,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        self.assertEqual(str(payload.get("fallback_mode", "")), "strict_overlap")
+        pick_1 = payload.get("pick_1", {})
+        pick_2 = payload.get("pick_2", {})
+        self.assertEqual(str(pick_1.get("ETF代碼", "")), "0050")
+        self.assertEqual(str(pick_2.get("ETF代碼", "")), "00935")
+        self.assertAlmostEqual(float(pick_2.get("與核心重疊度(%)")), 0.0, places=2)
+
+    def test_build_two_etf_aggressive_picks_fallback_overlap_20(self):
+        _build_two_etf_aggressive_picks.clear()
+
+        top10_df = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50", "區間報酬(%)": 24.0},
+                {"排名": 2, "代碼": "0056", "ETF": "元大高股息", "區間報酬(%)": 22.0},
+                {"排名": 3, "代碼": "00935", "ETF": "野村臺灣新科技50", "區間報酬(%)": 21.0},
+                {"排名": 4, "代碼": "00878", "ETF": "國泰永續高股息", "區間報酬(%)": 20.5},
+            ]
+        )
+
+        consensus_payload = {
+            "error": "",
+            "top_pick": {"ETF代碼": "0050", "代表性分數(覆蓋率%)": 20.1},
+        }
+
+        class _FakeService:
+            def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
+                data = {
+                    "0050": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}, {"symbol": "D"}],
+                    "0056": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}, {"symbol": "E"}],
+                    "00935": [{"symbol": "A"}, {"symbol": "X"}, {"symbol": "Y"}, {"symbol": "Z"}],
+                    "00878": [{"symbol": "B"}, {"symbol": "C"}, {"symbol": "F"}, {"symbol": "G"}],
+                }
+                return data.get(str(etf_code), []), "mock_full"
+
+            def get_tw_etf_constituents(self, etf_code, limit=None):
+                return [], "mock_fallback"
+
+        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
+            "app._build_consensus_representative_between", return_value=consensus_payload
+        ), patch("app._market_service", return_value=_FakeService()):
+            payload = _build_two_etf_aggressive_picks(
+                start_yyyymmdd="20251231",
+                end_yyyymmdd="20260214",
+                allow_overseas=False,
+                overlap_cap_pct=10.0,
+                force_refresh_constituents=False,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        self.assertEqual(str(payload.get("fallback_mode", "")), "relaxed_overlap_20")
+        pick_2 = payload.get("pick_2", {})
+        self.assertEqual(str(pick_2.get("ETF代碼", "")), "00935")
+        self.assertLessEqual(float(payload.get("overlap_cap_used", 0.0)), 20.0)
+
+    def test_build_two_etf_aggressive_picks_fallback_top_return(self):
+        _build_two_etf_aggressive_picks.clear()
+
+        top10_df = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50", "區間報酬(%)": 23.0},
+                {"排名": 2, "代碼": "0056", "ETF": "元大高股息", "區間報酬(%)": 21.0},
+                {"排名": 3, "代碼": "00935", "ETF": "野村臺灣新科技50", "區間報酬(%)": 19.0},
+            ]
+        )
+
+        consensus_payload = {
+            "error": "",
+            "top_pick": {"ETF代碼": "0050", "代表性分數(覆蓋率%)": 19.8},
+        }
+
+        class _FakeService:
+            def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
+                data = {
+                    "0050": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}],
+                    "0056": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}, {"symbol": "D"}],
+                    "00935": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}, {"symbol": "E"}],
+                }
+                return data.get(str(etf_code), []), "mock_full"
+
+            def get_tw_etf_constituents(self, etf_code, limit=None):
+                return [], "mock_fallback"
+
+        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
+            "app._build_consensus_representative_between", return_value=consensus_payload
+        ), patch("app._market_service", return_value=_FakeService()):
+            payload = _build_two_etf_aggressive_picks(
+                start_yyyymmdd="20251231",
+                end_yyyymmdd="20260214",
+                allow_overseas=False,
+                overlap_cap_pct=10.0,
+                force_refresh_constituents=False,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        self.assertEqual(str(payload.get("fallback_mode", "")), "top_return_fallback")
+        pick_2 = payload.get("pick_2", {})
+        self.assertEqual(str(pick_2.get("ETF代碼", "")), "0056")
+
+    def test_build_two_etf_aggressive_picks_exclude_overseas(self):
+        _build_two_etf_aggressive_picks.clear()
+
+        top10_df = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50", "區間報酬(%)": 25.0},
+                {"排名": 2, "代碼": "00910", "ETF": "第一金太空衛星", "區間報酬(%)": 24.5},
+                {"排名": 3, "代碼": "00941", "ETF": "中信上游半導體", "區間報酬(%)": 24.0},
+            ]
+        )
+
+        consensus_payload = {
+            "error": "",
+            "top_pick": {"ETF代碼": "0050", "代表性分數(覆蓋率%)": 21.2},
+        }
+
+        class _FakeService:
+            def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
+                data = {
+                    "0050": [{"symbol": "2330", "market": "TW"}, {"symbol": "2454", "market": "TW"}],
+                    "00910": [{"symbol": "AAPL.US", "market": "US"}, {"symbol": "GOOGL.US", "market": "US"}],
+                    "00941": [{"symbol": "3017", "market": "TW"}, {"symbol": "3661", "market": "TW"}],
+                }
+                return data.get(str(etf_code), []), "mock_full"
+
+            def get_tw_etf_constituents(self, etf_code, limit=None):
+                return [], "mock_fallback"
+
+        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
+            "app._build_consensus_representative_between", return_value=consensus_payload
+        ), patch("app._market_service", return_value=_FakeService()):
+            payload = _build_two_etf_aggressive_picks(
+                start_yyyymmdd="20251231",
+                end_yyyymmdd="20260214",
+                allow_overseas=False,
+                overlap_cap_pct=10.0,
+                force_refresh_constituents=False,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        pick_2 = payload.get("pick_2", {})
+        self.assertEqual(str(pick_2.get("ETF代碼", "")), "00941")
+        excluded = payload.get("excluded_overseas_codes", [])
+        self.assertIn("00910", list(excluded))
+
+    def test_build_two_etf_aggressive_picks_consensus_fail_fallback_top1(self):
+        _build_two_etf_aggressive_picks.clear()
+
+        top10_df = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50", "區間報酬(%)": 25.0},
+                {"排名": 2, "代碼": "0056", "ETF": "元大高股息", "區間報酬(%)": 22.0},
+                {"排名": 3, "代碼": "00935", "ETF": "野村臺灣新科技50", "區間報酬(%)": 20.0},
+            ]
+        )
+
+        consensus_payload = {"error": "consensus down", "top_pick": {}}
+
+        class _FakeService:
+            def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
+                data = {
+                    "0050": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}],
+                    "0056": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "D"}],
+                    "00935": [{"symbol": "X"}, {"symbol": "Y"}, {"symbol": "Z"}],
+                }
+                return data.get(str(etf_code), []), "mock_full"
+
+            def get_tw_etf_constituents(self, etf_code, limit=None):
+                return [], "mock_fallback"
+
+        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
+            "app._build_consensus_representative_between", return_value=consensus_payload
+        ), patch("app._market_service", return_value=_FakeService()):
+            payload = _build_two_etf_aggressive_picks(
+                start_yyyymmdd="20251231",
+                end_yyyymmdd="20260214",
+                allow_overseas=False,
+                overlap_cap_pct=10.0,
+                force_refresh_constituents=False,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        pick_1 = payload.get("pick_1", {})
+        self.assertEqual(str(pick_1.get("ETF代碼", "")), "0050")
+        self.assertIn("回退", str(pick_1.get("說明", "")))
+        issues = payload.get("issues", [])
+        self.assertTrue(any("consensus:" in str(item) for item in issues))
 
     def test_decorate_top10_ytd_table_with_benchmark_row(self):
         top10 = pd.DataFrame(
