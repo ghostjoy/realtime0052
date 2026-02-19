@@ -88,6 +88,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated backtest/__init__.py, backtest/comparison.py, tests/test_comparison.py [id:ee4e5fafdc]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, services/__init__.py, services/backtest_runner.py, services/heatmap_runner.py, ... (+8) [id:93beeba92f]
 - Auto: updated AGENTS.md, GIT_GITHUB_GUIDE.md, PROJECT_CONTEXT.md, PROMPT_TEMPLATES.md, README.md [id:c20efff0af]
 #### Manual Summary

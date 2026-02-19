@@ -1,5 +1,12 @@
 from backtest.adjustments import SplitEvent, apply_split_adjustment
-from backtest.comparison import build_buy_hold_equity, interval_return
+from backtest.comparison import (
+    build_buy_hold_equity,
+    build_dca_benchmark_equity,
+    build_dca_contribution_plan,
+    build_dca_equity,
+    dca_summary_metrics,
+    interval_return,
+)
 from backtest.engine import BacktestEngine, CostModel, run_backtest
 from backtest.portfolio import run_portfolio_backtest
 from backtest.rotation import ROTATION_DEFAULT_UNIVERSE, ROTATION_MIN_BARS, run_tw_etf_rotation_backtest
@@ -28,6 +35,10 @@ __all__ = [
     "SplitEvent",
     "apply_split_adjustment",
     "build_buy_hold_equity",
+    "build_dca_equity",
+    "build_dca_benchmark_equity",
+    "build_dca_contribution_plan",
+    "dca_summary_metrics",
     "interval_return",
     "apply_start_to_bars_map",
     "resolve_start_index",
