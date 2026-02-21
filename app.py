@@ -1075,7 +1075,7 @@ def _render_00910_constituent_intro_table(
 PAGE_CARDS = [
     {"key": "即時看盤", "desc": "台股/美股即時報價、即時走勢與技術快照。"},
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
-    {"key": "2025 前十大 ETF", "desc": "2025 年全年台股 ETF 報酬率前十名。"},
+    {"key": "2026 YTD 前十大股利型、配息型 ETF", "desc": "2026 年截至今日的台股股利/配息型 ETF 報酬率前十名。"},
     {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
     {"key": "共識代表 ETF", "desc": "以前10 ETF 成分股交集，找出最具代表性的單一 ETF。"},
     {"key": "兩檔 ETF 推薦", "desc": "以共識代表+低重疊動能，收斂為兩檔建議組合。"},
@@ -2468,7 +2468,7 @@ def _classify_tw_etf(name: str) -> str:
     text = str(name or "").strip()
     if not text:
         return "其他"
-    dividend_keywords = ("高股息", "股利", "股息", "收益", "月配", "季配", "年配")
+    dividend_keywords = ("高股息", "股利", "股息", "收益", "配息", "月配", "季配", "年配")
     market_cap_keywords = ("台灣50", "臺灣50", "台灣中型100", "臺灣中型100", "市值", "台灣領袖")
     if any(key in text for key in dividend_keywords):
         return "股利型"
@@ -2548,7 +2548,11 @@ def _split_factor_and_events_between(symbol: str, start_used: str, end_used: str
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple[pd.DataFrame, str, str, int]:
+def _build_tw_etf_top10_between(
+    start_yyyymmdd: str,
+    end_yyyymmdd: str,
+    type_filter: Optional[str] = None,
+) -> tuple[pd.DataFrame, str, str, int]:
     start_used, start_df = _fetch_twse_snapshot_with_fallback(start_yyyymmdd)
     end_used, end_df = _fetch_twse_snapshot_with_fallback(end_yyyymmdd)
 
@@ -2574,9 +2578,15 @@ def _build_tw_etf_top10_between(start_yyyymmdd: str, end_yyyymmdd: str) -> tuple
     merged = merged.replace([np.inf, -np.inf], np.nan).dropna(subset=["return_pct", "start_close", "end_close", "adj_start_close"])
     if merged.empty:
         return pd.DataFrame(), start_used, end_used, 0
-    universe_count = int(len(merged))
 
     merged["type"] = merged["name"].map(_classify_tw_etf)
+    type_filter_text = str(type_filter or "").strip()
+    if type_filter_text:
+        merged = merged[merged["type"] == type_filter_text].copy()
+    if merged.empty:
+        return pd.DataFrame(), start_used, end_used, 0
+    universe_count = int(len(merged))
+
     merged = merged.sort_values("return_pct", ascending=False).head(10).copy()
     merged["rank"] = range(1, len(merged) + 1)
     out = merged[["rank", "code", "name", "type", "start_close", "adj_start_close", "end_close", "split_events", "return_pct"]].copy()
@@ -3560,7 +3570,7 @@ def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str
                 "\n".join(
                     [
                         "- `市值型`：名稱含台灣50/中型100/市值等關鍵字。",
-                        "- `股利型`：名稱含高股息/股利/收益/月配/季配等關鍵字。",
+                        "- `股利型`：名稱含高股息/股利/股息/收益/配息/月配/季配/年配等關鍵字。",
                         "- `其他`：其餘主題型、產業型、槓反型、主動式等。",
                     ]
                 )
@@ -3568,26 +3578,46 @@ def _render_tw_etf_top10_page(title: str, start_yyyymmdd: str, end_yyyymmdd: str
 
 
 def _render_top10_etf_2025_view():
-    _render_tw_etf_top10_page(
-        title="2025 年前十大 ETF（台股）",
-        start_yyyymmdd="20241231",
-        end_yyyymmdd="20251231",
+    _render_top10_etf_2026_ytd_view(
+        page_title="2026 年截至今日前十大股利型、配息型 ETF（台股）",
+        page_key_prefix="top10_dividend_etf_ytd",
+        etf_type_filter="股利型",
+        card_subject_label="前十大股利型、配息型 ETF",
+        strategy_label="前十大股利型ETF等權",
+        empty_warning_text="目前沒有可顯示的股利型、配息型 ETF 排行資料。",
     )
 
 
-def _render_top10_etf_2026_ytd_view():
+def _render_top10_etf_2026_ytd_view(
+    *,
+    page_title: str = "2026 年截至今日前十大 ETF（台股）",
+    page_key_prefix: str = "top10_etf_ytd",
+    etf_type_filter: Optional[str] = None,
+    card_subject_label: str = "前十大 ETF",
+    strategy_label: str = "前十大ETF等權",
+    empty_warning_text: str = "目前沒有可顯示的 ETF 排行資料。",
+):
     store = _history_store()
+    etf_type_filter_text = str(etf_type_filter or "").strip()
+    payload_key = f"{page_key_prefix}_compare_payload"
+    strategy_hover_code = f"{page_key_prefix.upper()}_EW"
+
     title_col, refresh_col = st.columns([6, 1])
     with title_col:
-        st.subheader("2026 年截至今日前十大 ETF（台股）")
+        st.subheader(page_title)
     with refresh_col:
-        refresh_market = st.button("更新最新市況", key="top10_etf_ytd_update_market", use_container_width=True, type="primary")
+        refresh_market = st.button(
+            "更新最新市況",
+            key=f"{page_key_prefix}_update_market",
+            use_container_width=True,
+            type="primary",
+        )
     if refresh_market:
         _fetch_twse_snapshot_with_fallback.clear()
         _build_tw_etf_top10_between.clear()
         _build_tw_active_etf_ytd_between.clear()
         _load_tw_market_return_between.clear()
-        st.session_state.pop("top10_etf_ytd_compare_payload", None)
+        st.session_state.pop(payload_key, None)
         st.rerun()
 
     start_target = "20251231"
@@ -3598,9 +3628,10 @@ def _render_top10_etf_2026_ytd_view():
             top10, start_used, end_used, universe_count = _build_tw_etf_top10_between(
                 start_yyyymmdd=start_target,
                 end_yyyymmdd=end_target,
+                type_filter=etf_type_filter_text or None,
             )
             if top10.empty:
-                st.warning("目前沒有可顯示的 ETF 排行資料。")
+                st.warning(empty_warning_text)
                 return
             top10_etf_df = top10.rename(columns={"區間報酬(%)": "YTD報酬(%)"}).copy()
             top10_symbols = tuple(str(x).strip().upper() for x in top10_etf_df["代碼"].astype(str).tolist() if str(x).strip())
@@ -3657,8 +3688,13 @@ def _render_top10_etf_2026_ytd_view():
         m1.metric("前10檔數", str(len(top10_etf_df)))
         m2.metric("母體檔數（可比較）", str(universe_count))
         m3.metric("前10占比", top10_ratio_text)
-        m4.metric("市值型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "市值型").sum())))
-        m5.metric("股利型", str(int((top10_etf_df.get("類型", pd.Series(dtype=str)) == "股利型").sum())))
+        type_series = top10_etf_df.get("類型", pd.Series(dtype=str))
+        if etf_type_filter_text == "股利型":
+            m4.metric("股利/配息型", str(int((type_series == "股利型").sum())))
+            m5.metric("非股利型", str(int((type_series != "股利型").sum())))
+        else:
+            m4.metric("市值型", str(int((type_series == "市值型").sum())))
+            m5.metric("股利型", str(int((type_series == "股利型").sum())))
         m6.metric("有復權事件", str(int((top10_etf_df["復權事件"] != "—").sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
@@ -3675,6 +3711,8 @@ def _render_top10_etf_2026_ytd_view():
         if market_issues:
             _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
+        if etf_type_filter_text:
+            st.caption("篩選條件：僅納入 `股利型`（名稱含高股息/股利/股息/收益/配息/月配/季配/年配）ETF。")
         st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
         st.caption("`2025績效(%)` 採各檔在 2025 區間內首個可交易日計算；若空白代表該檔 2025 區間無可用日K。")
         st.caption("報酬計算：`贏輸台股大盤(%) = YTD報酬 - 大盤報酬`。")
@@ -3685,7 +3723,7 @@ def _render_top10_etf_2026_ytd_view():
                 "\n".join(
                     [
                         "- `市值型`：名稱含台灣50/中型100/市值等關鍵字。",
-                        "- `股利型`：名稱含高股息/股利/收益/月配/季配等關鍵字。",
+                        "- `股利型`：名稱含高股息/股利/股息/收益/配息/月配/季配/年配等關鍵字。",
                         "- `其他`：其餘主題型、產業型、槓反型、主動式等。",
                     ]
                 )
@@ -3712,8 +3750,8 @@ def _render_top10_etf_2026_ytd_view():
         st.markdown(
             (
                 "說明："
-                "<span title='把前十大ETF平均分配資金後，從區間起點買進並持有到期末，不做換股或調倉。'>"
-                "<code>Strategy Equity（前十大ETF等權）</code>（滑鼠移入查看）"
+                f"<span title='把{card_subject_label}平均分配資金後，從區間起點買進並持有到期末，不做換股或調倉。'>"
+                f"<code>Strategy Equity（{strategy_label}）</code>（滑鼠移入查看）"
                 "</span>"
             ),
             unsafe_allow_html=True,
@@ -3724,33 +3762,32 @@ def _render_top10_etf_2026_ytd_view():
             options=["twii", "0050", "006208"],
             index=0,
             format_func=lambda x: {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(x, x),
-            key="top10_etf_ytd_benchmark",
+            key=f"{page_key_prefix}_benchmark",
         )
         sync_before_run = c2.checkbox(
             "執行前同步最新日K（較慢）",
             value=False,
-            key="top10_etf_ytd_sync_before_run",
+            key=f"{page_key_prefix}_sync_before_run",
         )
-        force_refresh = c3.button("重新計算", use_container_width=True, key="top10_etf_ytd_refresh")
+        force_refresh = c3.button("重新計算", use_container_width=True, key=f"{page_key_prefix}_refresh")
 
         start_dt = datetime.combine(datetime.strptime(start_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
         end_dt = datetime.combine(datetime.strptime(end_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
-        run_key = f"top10_etf_ytd:{start_used}:{end_used}:{benchmark_choice}:{sync_before_run}:{','.join(symbols)}"
-        payload_key = "top10_etf_ytd_compare_payload"
+        run_key = f"{page_key_prefix}:{start_used}:{end_used}:{benchmark_choice}:{sync_before_run}:{','.join(symbols)}"
         payload = st.session_state.get(payload_key)
         if not isinstance(payload, dict):
             payload = {}
 
         should_recompute = force_refresh or payload.get("run_key") != run_key
         if should_recompute:
-            with st.spinner("計算前十大 ETF Benchmark 對照中..."):
+            with st.spinner(f"計算 {card_subject_label} Benchmark 對照中..."):
                 payload = _compute_tw_equal_weight_compare_payload(
                     symbols=symbols,
                     start_dt=start_dt,
                     end_dt=end_dt,
                     benchmark_choice=benchmark_choice,
                     sync_before_run=sync_before_run,
-                    insufficient_msg="可用前十大 ETF 歷史資料不足，無法建立對照圖。",
+                    insufficient_msg=f"可用{card_subject_label}歷史資料不足，無法建立對照圖。",
                 )
             payload["run_key"] = run_key
             st.session_state[payload_key] = payload
@@ -3796,12 +3833,12 @@ def _render_top10_etf_2026_ytd_view():
         benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
         chart_lines: list[dict[str, Any]] = [
             {
-                "name": "Strategy Equity（前十大ETF等權）",
+                "name": f"Strategy Equity（{strategy_label}）",
                 "series": strategy_equity,
                 "color": str(palette["equity"]),
                 "width": 2.4,
                 "dash": "solid",
-                "hover_code": "TOP10_EW",
+                "hover_code": strategy_hover_code,
                 "value_label": "Equity",
                 "y_format": ",.0f",
             }
@@ -3842,14 +3879,14 @@ def _render_top10_etf_2026_ytd_view():
         _render_benchmark_lines_chart(
             lines=chart_lines,
             height=460,
-            chart_key="top10_etf_benchmark",
+            chart_key=f"{page_key_prefix}_benchmark_chart",
         )
 
         summary_rows: list[dict[str, object]] = []
         strategy_perf = _series_metrics_basic(strategy_equity)
         summary_rows.append(
             {
-                "Series": "Strategy Equity（前十大ETF等權）",
+                "Series": f"Strategy Equity（{strategy_label}）",
                 "Total Return %": round(strategy_perf["total_return"] * 100.0, 2),
                 "CAGR %": round(strategy_perf["cagr"] * 100.0, 2),
                 "MDD %": round(strategy_perf["max_drawdown"] * 100.0, 2),
@@ -7872,7 +7909,7 @@ def _render_tutorial_view():
         [
             {"分頁": "即時看盤", "你會看到什麼": "即時行情、即時趨勢、技術快照、建議卡", "什麼時候用": "盤中快速看狀態"},
             {"分頁": "回測工作台", "你會看到什麼": "單檔/投組回測、Walk-Forward、Benchmark 比較、回放", "什麼時候用": "驗證策略與參數"},
-            {"分頁": "2025 前十大 ETF", "你會看到什麼": "2025 全年 Top10 報酬排行", "什麼時候用": "回顧去年全年度強弱"},
+            {"分頁": "2026 YTD 前十大股利型、配息型 ETF", "你會看到什麼": "2026 年迄今股利/配息型 Top10、2025 對照、大盤勝負、Benchmark 對照卡", "什麼時候用": "看今年高股息族群領先 ETF"},
             {"分頁": "2026 YTD 前十大 ETF", "你會看到什麼": "2026 年迄今 Top10、2025 對照、大盤勝負、Benchmark 對照卡", "什麼時候用": "看今年領先 ETF"},
             {"分頁": "共識代表 ETF", "你會看到什麼": "以前10 ETF 成分股交集推導建議ETF與備選", "什麼時候用": "想要從多檔收斂到單一核心ETF"},
             {"分頁": "兩檔 ETF 推薦", "你會看到什麼": "核心+衛星兩檔建議（低重疊動能）", "什麼時候用": "想快速落地成可執行兩檔組合"},
@@ -7895,7 +7932,7 @@ def _render_tutorial_view():
             [
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
-                "3. 再到 `2026 YTD 前十大 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
+                "3. 再到 `2026 YTD 前十大 ETF` 與 `2026 YTD 前十大股利型、配息型 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
                 "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00993A / 0050 / 0052 熱力圖`。",
                 "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
             ]
@@ -8040,7 +8077,7 @@ def _render_tutorial_view():
             [
                 "1. 先在 `回測工作台` 用 `buy_hold` 跑單檔，確認資料與報表都正常。",
                 "2. 再改成 `sma_trend_filter` 或 `donchian_breakout`，比較是否優於 `buy_hold`。",
-                "3. 接著用 `2026 YTD 前十大 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合。",
+                "3. 接著用 `2026 YTD 前十大 ETF` + `2026 YTD 前十大股利型、配息型 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合。",
                 "4. 最後才進 `ETF 輪動策略`、`2026 YTD 主動式 ETF` 與各熱力圖做進階判讀。",
             ]
         )
@@ -9697,7 +9734,7 @@ def main():
     page_renderers = {
         "即時看盤": _render_live_view,
         "回測工作台": _render_backtest_view,
-        "2025 前十大 ETF": _render_top10_etf_2025_view,
+        "2026 YTD 前十大股利型、配息型 ETF": _render_top10_etf_2025_view,
         "2026 YTD 前十大 ETF": _render_top10_etf_2026_ytd_view,
         "共識代表 ETF": _render_consensus_representative_etf_view,
         "兩檔 ETF 推薦": _render_two_etf_pick_view,

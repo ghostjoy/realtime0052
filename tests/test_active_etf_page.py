@@ -33,6 +33,7 @@ from app import (
     _load_cached_backtest_payload,
     _load_tw_benchmark_bars,
     _snapshot_fallback_depth,
+    _classify_tw_etf,
 )
 
 
@@ -213,6 +214,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertTrue(_is_tw_active_etf("00993A", "安聯台灣高息成長主動式ETF"))
         self.assertFalse(_is_tw_active_etf("00993", "安聯台灣高息成長主動式ETF"))
         self.assertFalse(_is_tw_active_etf("00993A", "安聯台灣高息成長ETF"))
+        self.assertEqual(_classify_tw_etf("某某高股息月月配息ETF"), "股利型")
 
     def test_build_symbol_line_styles_assigns_distinct_colors(self):
         symbols = [f"00{i:03d}A" for i in range(1, 11)]
@@ -394,6 +396,40 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(end_used, "20260214")
         self.assertTrue(out.empty)
         self.assertEqual(universe_count, 0)
+
+    def test_build_tw_etf_top10_between_type_filter(self):
+        _build_tw_etf_top10_between.clear()
+
+        start_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 100.0},
+                {"code": "0056", "name": "元大高股息", "close": 30.0},
+                {"code": "00929", "name": "復華台灣科技季配息", "close": 20.0},
+            ]
+        )
+        end_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 120.0},
+                {"code": "0056", "name": "元大高股息", "close": 33.0},
+                {"code": "00929", "name": "復華台灣科技季配息", "close": 25.0},
+            ]
+        )
+
+        with patch(
+            "app._fetch_twse_snapshot_with_fallback",
+            side_effect=[("20251231", start_df), ("20260214", end_df)],
+        ), patch("app.known_split_events", return_value=[]):
+            out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+                "20260101",
+                "20260216",
+                type_filter="股利型",
+            )
+
+        self.assertEqual(start_used, "20251231")
+        self.assertEqual(end_used, "20260214")
+        self.assertEqual(universe_count, 2)
+        self.assertEqual(list(out["代碼"]), ["00929", "0056"])
+        self.assertTrue((out["類型"] == "股利型").all())
 
     def test_consensus_threshold_candidates(self):
         self.assertEqual(_consensus_threshold_candidates(10), [10, 8, 7])

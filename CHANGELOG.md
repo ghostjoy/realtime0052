@@ -98,6 +98,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- 分頁調整：原 `2025 前十大 ETF` 改為 `2026 YTD 前十大股利型、配息型 ETF`（台股），並沿用 `2026 YTD 前十大 ETF` 的同級內容（`2025績效`、`贏輸台股大盤`、Benchmark 對照圖與績效表）。
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, conf/config.yaml, conf/features/default.yaml, conf/storage/duckdb.yaml, ... (+20) [id:1c648218cb]
 - 預設技術線切換為 `Hydra + DuckDB/Parquet`：
   - `conf/config.yaml` 預設 storage 改為 `duckdb`
