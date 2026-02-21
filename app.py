@@ -10,6 +10,7 @@ from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -217,6 +218,208 @@ def _runtime_stack_caption() -> str:
 def _store_data_source(store: object, dataset: str) -> str:
     backend = str(getattr(store, "backend_name", "duckdb") or "duckdb").strip().lower()
     return f"{backend}:{dataset}"
+
+
+BACKTEST_DRILL_CODE_COLUMNS = {
+    "代碼",
+    "ETF代碼",
+    "symbol",
+    "Symbol",
+    "代號",
+    "股票代號",
+    "證券代號",
+    "標的",
+}
+BACKTEST_DRILL_MARKET_COLUMNS = {"市場", "market", "Market", "交易所", "exchange", "Exchange"}
+BACKTEST_DRILL_QUERY_KEYS = ("bt_symbol", "bt_market", "bt_autorun", "bt_src")
+BACKTEST_AUTORUN_PENDING_KEY = "bt_autorun_pending"
+
+
+def _normalize_market_tag_for_drill(value: object) -> str:
+    token = str(value or "").strip().upper()
+    if not token:
+        return ""
+    if ("OTC" in token) or ("TWO" in token) or ("上櫃" in token):
+        return "OTC"
+    if ("US" in token) or ("NYSE" in token) or ("NASDAQ" in token) or ("美股" in token):
+        return "US"
+    if ("TW" in token) or ("TWSE" in token) or ("TSE" in token) or ("上市" in token) or ("台股" in token):
+        return "TW"
+    return ""
+
+
+def _strip_symbol_label_token(text: str) -> str:
+    token = str(text or "").strip().upper()
+    if not token:
+        return ""
+    token = re.split(r"\s+|　", token, maxsplit=1)[0].strip()
+    if "／" in token:
+        token = token.split("／", 1)[0].strip()
+    if "/" in token:
+        token = token.split("/", 1)[0].strip()
+    return token
+
+
+def _parse_drill_symbol(value: object) -> tuple[str, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return "", ""
+    token = _strip_symbol_label_token(raw)
+    if not token or token in {"—", "-", "NAN", "NONE", "NULL"}:
+        return "", ""
+    tw_match = re.fullmatch(r"(\d{4,6}[A-Z]?)\.(TW|TWO)", token, flags=re.IGNORECASE)
+    if tw_match:
+        symbol = str(tw_match.group(1)).upper()
+        market = "OTC" if str(tw_match.group(2)).upper() == "TWO" else "TW"
+        return symbol, market
+    if re.fullmatch(r"\d{4,6}[A-Z]?", token):
+        return token, "TW"
+    if token == "^TWII":
+        return token, "TW"
+    if re.fullmatch(r"\^[A-Z0-9.\-]{2,10}", token):
+        return token, "US"
+    if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", token):
+        return token, "US"
+    return "", ""
+
+
+def _build_backtest_drill_url(symbol: str, market: str) -> str:
+    return "?" + urlencode(
+        {
+            "bt_symbol": str(symbol).strip().upper(),
+            "bt_market": str(market).strip().upper(),
+            "bt_autorun": "1",
+            "bt_src": "table",
+        }
+    )
+
+
+def _decorate_dataframe_backtest_links(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df, {}
+    code_cols = [col for col in df.columns if str(col).strip() in BACKTEST_DRILL_CODE_COLUMNS]
+    if not code_cols:
+        return df, {}
+    market_col = next((col for col in df.columns if str(col).strip() in BACKTEST_DRILL_MARKET_COLUMNS), None)
+    market_series = df[market_col] if market_col in df.columns else pd.Series(index=df.index, dtype=str)
+    out = df.copy()
+    link_config: dict[str, object] = {}
+    for col in code_cols:
+        links: list[Optional[str]] = []
+        linked_count = 0
+        col_series = out[col]
+        for row_idx, value in col_series.items():
+            symbol, default_market = _parse_drill_symbol(value)
+            if not symbol or symbol.startswith("^"):
+                links.append(None)
+                continue
+            row_market = _normalize_market_tag_for_drill(market_series.get(row_idx, "") if hasattr(market_series, "get") else "")
+            market = row_market or default_market
+            if market not in {"TW", "OTC", "US"}:
+                inferred = _infer_market_target_from_symbols([symbol]) if symbol else None
+                market = inferred if inferred in {"TW", "OTC", "US"} else (default_market if default_market in {"TW", "OTC", "US"} else "TW")
+            links.append(_build_backtest_drill_url(symbol=symbol, market=market))
+            linked_count += 1
+        if linked_count <= 0:
+            continue
+        out[col] = links
+        link_config[str(col)] = st.column_config.LinkColumn(
+            label=str(col),
+            help="點擊代碼可帶入回測工作台並自動執行回測",
+            display_text=r"bt_symbol=([^&]+)",
+            max_chars=20,
+        )
+    return out, link_config
+
+
+_ORIGINAL_ST_DATAFRAME = st.dataframe
+
+
+def _dataframe_with_backtest_drilldown(data: Any = None, *args, **kwargs):
+    opts = dict(kwargs)
+    disable_drilldown = bool(opts.pop("disable_backtest_drilldown", False))
+    frame = data
+    if isinstance(frame, pd.DataFrame) and (not disable_drilldown):
+        frame, auto_config = _decorate_dataframe_backtest_links(frame)
+        if auto_config:
+            merged_config: dict[str, object] = {}
+            existing = opts.get("column_config")
+            if isinstance(existing, dict):
+                merged_config.update(existing)
+            for col_name, cfg in auto_config.items():
+                if col_name not in merged_config:
+                    merged_config[col_name] = cfg
+            opts["column_config"] = merged_config
+    return _ORIGINAL_ST_DATAFRAME(frame, *args, **opts)
+
+
+st.dataframe = _dataframe_with_backtest_drilldown  # type: ignore[assignment]
+
+
+def _query_param_first(name: str) -> str:
+    try:
+        params = st.query_params
+        value = params.get(name)
+        if isinstance(value, list):
+            return str(value[0]).strip() if value else ""
+        return str(value or "").strip()
+    except Exception:
+        try:
+            params_legacy = st.experimental_get_query_params()
+            values = params_legacy.get(name, [])
+            if isinstance(values, list):
+                return str(values[0]).strip() if values else ""
+            return str(values or "").strip()
+        except Exception:
+            return ""
+
+
+def _clear_query_params(keys: tuple[str, ...]) -> None:
+    try:
+        params = st.query_params
+        for key in keys:
+            if key in params:
+                del params[key]
+        return
+    except Exception:
+        pass
+    try:
+        params_legacy = dict(st.experimental_get_query_params())
+        changed = False
+        for key in keys:
+            if key in params_legacy:
+                params_legacy.pop(key, None)
+                changed = True
+        if changed:
+            st.experimental_set_query_params(**params_legacy)
+    except Exception:
+        return
+
+
+def _consume_backtest_drilldown_query() -> None:
+    symbol_raw = _query_param_first("bt_symbol")
+    if not symbol_raw:
+        return
+    symbol, default_market = _parse_drill_symbol(symbol_raw)
+    if not symbol:
+        _clear_query_params(BACKTEST_DRILL_QUERY_KEYS)
+        return
+    market_hint = _normalize_market_tag_for_drill(_query_param_first("bt_market"))
+    market = market_hint or default_market
+    if market not in {"TW", "OTC", "US"}:
+        inferred = _infer_market_target_from_symbols([symbol]) if symbol else None
+        market = inferred if inferred in {"TW", "OTC", "US"} else "TW"
+    st.session_state["active_page"] = "回測工作台"
+    st.session_state[BT_KEYS.symbol] = str(symbol).strip().upper()
+    st.session_state[BT_KEYS.mode] = "單一標的"
+    st.session_state[BT_KEYS.market] = market
+    autorun_flag = _query_param_first("bt_autorun").strip().lower()
+    if autorun_flag in {"1", "true", "yes", "y", "on", "run"}:
+        st.session_state[BACKTEST_AUTORUN_PENDING_KEY] = {
+            "symbol": str(symbol).strip().upper(),
+            "market": market,
+        }
+    _clear_query_params(BACKTEST_DRILL_QUERY_KEYS)
 
 
 BACKTEST_REPLAY_SCHEMA_VERSION = 3
@@ -1077,6 +1280,7 @@ PAGE_CARDS = [
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
     {"key": "2026 YTD 前十大股利型、配息型 ETF", "desc": "2026 年截至今日的台股股利/配息型 ETF 報酬率前十名。"},
     {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
+    {"key": "台股 ETF 全類型總表", "desc": "台股 ETF 全名單（含類型）與 2025/2026 YTD/大盤勝負比較。"},
     {"key": "2025 後20大最差勁 ETF", "desc": "2025 全年區間台股 ETF 報酬率後20名。"},
     {"key": "共識代表 ETF", "desc": "以前10 ETF 成分股交集，找出最具代表性的單一 ETF。"},
     {"key": "兩檔 ETF 推薦", "desc": "以共識代表+低重疊動能，收斂為兩檔建議組合。"},
@@ -3040,6 +3244,98 @@ def _decorate_tw_etf_top10_ytd_table(
     return table_df[[col for col in columns_order if col in table_df.columns]]
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _build_tw_etf_all_types_performance_table(
+    *,
+    ytd_start_yyyymmdd: str,
+    ytd_end_yyyymmdd: str,
+    compare_start_yyyymmdd: str = "20250101",
+    compare_end_yyyymmdd: str = "20251231",
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    ytd_df, ytd_start_used, ytd_end_used, universe_count = _build_tw_etf_top10_between(
+        start_yyyymmdd=ytd_start_yyyymmdd,
+        end_yyyymmdd=ytd_end_yyyymmdd,
+        top_n=99999,
+        sort_ascending=False,
+    )
+    if ytd_df.empty:
+        return pd.DataFrame(), {
+            "ytd_start_used": ytd_start_used,
+            "ytd_end_used": ytd_end_used,
+            "compare_start_used": compare_start_yyyymmdd,
+            "compare_end_used": compare_end_yyyymmdd,
+            "universe_count": int(universe_count),
+            "issues": [],
+        }
+
+    compare_df, compare_start_used, compare_end_used, _ = _build_tw_etf_top10_between(
+        start_yyyymmdd=compare_start_yyyymmdd,
+        end_yyyymmdd=compare_end_yyyymmdd,
+        top_n=99999,
+        sort_ascending=False,
+    )
+    compare_map: dict[str, float] = {}
+    if isinstance(compare_df, pd.DataFrame) and not compare_df.empty:
+        for _, row in compare_df.iterrows():
+            code = str(row.get("代碼", "")).strip().upper()
+            value = _safe_float(row.get("區間報酬(%)"))
+            if code and value is not None:
+                compare_map[code] = float(value)
+
+    market_ytd_return, market_ytd_symbol, market_ytd_issues = _load_tw_market_return_between(
+        start_yyyymmdd=ytd_start_used,
+        end_yyyymmdd=ytd_end_used,
+        force_sync=False,
+    )
+    market_2025_return, market_2025_symbol, market_2025_issues = _load_tw_market_return_between(
+        start_yyyymmdd=compare_start_used,
+        end_yyyymmdd=compare_end_used,
+        force_sync=False,
+    )
+
+    table_df = ytd_df.rename(columns={"區間報酬(%)": "2026YTD績效(%)"}).copy()
+    code_series = table_df.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
+    table_df["2025績效(%)"] = code_series.map(compare_map)
+    table_df["2025績效(%)"] = pd.to_numeric(table_df["2025績效(%)"], errors="coerce").round(2)
+    table_df["2026YTD績效(%)"] = pd.to_numeric(table_df["2026YTD績效(%)"], errors="coerce").round(2)
+    table_df["贏輸台股大盤2025(%)"] = np.nan
+    table_df["贏輸台股大盤2026YTD(%)"] = np.nan
+    if market_2025_return is not None and math.isfinite(float(market_2025_return)):
+        table_df["贏輸台股大盤2025(%)"] = (table_df["2025績效(%)"] - float(market_2025_return)).round(2)
+    if market_ytd_return is not None and math.isfinite(float(market_ytd_return)):
+        table_df["贏輸台股大盤2026YTD(%)"] = (table_df["2026YTD績效(%)"] - float(market_ytd_return)).round(2)
+
+    table_df = table_df.sort_values(["類型", "2026YTD績效(%)"], ascending=[True, False], na_position="last").reset_index(drop=True)
+    table_df["排名"] = range(1, len(table_df) + 1)
+    columns_order = [
+        "排名",
+        "代碼",
+        "ETF",
+        "類型",
+        "2025績效(%)",
+        "2026YTD績效(%)",
+        "贏輸台股大盤2025(%)",
+        "贏輸台股大盤2026YTD(%)",
+        "期初收盤",
+        "復權期初",
+        "期末收盤",
+        "復權事件",
+    ]
+    table_df = table_df[[col for col in columns_order if col in table_df.columns]]
+    return table_df, {
+        "ytd_start_used": ytd_start_used,
+        "ytd_end_used": ytd_end_used,
+        "compare_start_used": compare_start_used,
+        "compare_end_used": compare_end_used,
+        "universe_count": int(universe_count),
+        "market_ytd_return": market_ytd_return,
+        "market_ytd_symbol": market_ytd_symbol,
+        "market_2025_return": market_2025_return,
+        "market_2025_symbol": market_2025_symbol,
+        "issues": [*market_ytd_issues, *market_2025_issues],
+    }
+
+
 def _normalize_constituent_symbol(symbol: object, tw_code: object) -> str:
     code_token = str(tw_code or "").strip().upper()
     if re.fullmatch(r"\d{4,6}[A-Z]?", code_token):
@@ -3791,6 +4087,94 @@ def _render_top10_etf_2025_view():
         strategy_label="前十大股利型ETF等權",
         empty_warning_text="目前沒有可顯示的股利型、配息型 ETF 排行資料。",
     )
+
+
+def _render_tw_etf_all_types_view():
+    title_col, refresh_col = st.columns([6, 1])
+    with title_col:
+        st.subheader("台股 ETF 全類型總表（2025 / 2026 YTD）")
+    with refresh_col:
+        refresh_market = st.button(
+            "更新最新市況",
+            key="tw_etf_all_types_update_market",
+            use_container_width=True,
+            type="primary",
+        )
+    if refresh_market:
+        _fetch_twse_snapshot_with_fallback.clear()
+        _build_tw_etf_top10_between.clear()
+        _load_tw_market_return_between.clear()
+        _build_tw_etf_all_types_performance_table.clear()
+        st.rerun()
+
+    with st.container(border=True):
+        _render_card_section_header("總表卡", "列出台股 ETF 全名單，並同時比較 2025 全年與 2026 YTD。")
+        try:
+            table_df, meta = _build_tw_etf_all_types_performance_table(
+                ytd_start_yyyymmdd="20251231",
+                ytd_end_yyyymmdd=datetime.now().strftime("%Y%m%d"),
+                compare_start_yyyymmdd="20241231",
+                compare_end_yyyymmdd="20251231",
+            )
+        except Exception as exc:
+            st.error(f"無法建立 ETF 全類型總表：{exc}")
+            return
+
+        if table_df.empty:
+            st.warning("目前沒有可顯示的台股 ETF 全類型資料。")
+            return
+
+        universe_count = int(meta.get("universe_count", len(table_df)))
+        type_series = table_df.get("類型", pd.Series(dtype=str)).astype(str)
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("ETF檔數", str(len(table_df)))
+        m2.metric("母體檔數（可比較）", str(universe_count))
+        m3.metric("類型數", str(int(type_series.nunique(dropna=True))))
+        m4.metric("市值型", str(int((type_series == "市值型").sum())))
+        m5.metric("股利型", str(int((type_series == "股利型").sum())))
+        m6.metric("主動式", str(int((type_series == "主動式").sum())))
+
+        ytd_start_used = str(meta.get("ytd_start_used", "")).strip()
+        ytd_end_used = str(meta.get("ytd_end_used", "")).strip()
+        compare_start_used = str(meta.get("compare_start_used", "")).strip()
+        compare_end_used = str(meta.get("compare_end_used", "")).strip()
+        if ytd_start_used and ytd_end_used:
+            st.caption(f"2026 YTD 區間（實際交易日）：{ytd_start_used} -> {ytd_end_used}")
+        if compare_start_used and compare_end_used:
+            st.caption(f"2025 區間（實際交易日）：{compare_start_used} -> {compare_end_used}")
+        snapshot_health = _build_snapshot_health(
+            start_used=ytd_start_used,
+            end_used=ytd_end_used,
+            target_yyyymmdd=datetime.now().strftime("%Y%m%d"),
+        )
+        _render_data_health_caption("快照資料健康度", snapshot_health)
+
+        market_2025_return = _safe_float(meta.get("market_2025_return"))
+        market_2025_symbol = str(meta.get("market_2025_symbol", "")).strip()
+        if market_2025_return is not None and market_2025_symbol:
+            st.caption(f"2025 台股大盤：{market_2025_symbol} 區間報酬 {market_2025_return:.2f}%")
+        else:
+            st.caption("2025 台股大盤：目前無法取得，`贏輸台股大盤2025(%)` 先顯示空白。")
+
+        market_ytd_return = _safe_float(meta.get("market_ytd_return"))
+        market_ytd_symbol = str(meta.get("market_ytd_symbol", "")).strip()
+        if market_ytd_return is not None and market_ytd_symbol:
+            st.caption(f"2026 YTD 台股大盤：{market_ytd_symbol} 區間報酬 {market_ytd_return:.2f}%")
+        else:
+            st.caption("2026 YTD 台股大盤：目前無法取得，`贏輸台股大盤2026YTD(%)` 先顯示空白。")
+
+        issues = meta.get("issues", [])
+        if isinstance(issues, list) and issues:
+            _render_sync_issues("大盤資料同步有部分錯誤，已盡量使用本地可用資料", issues, preview_limit=2)
+        st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
+        st.caption("排序規則：先依 ETF 類型，再依 2026 YTD 績效由高到低。")
+
+        st.dataframe(
+            table_df,
+            use_container_width=True,
+            hide_index=True,
+            height=min(_full_table_height(table_df), 1200),
+        )
 
 
 def _render_bottom20_etf_2025_view():
@@ -6616,6 +7000,14 @@ def _render_backtest_view():
         invest_start_date=invest_start_date,
         invest_start_k=int(invest_start_k) if invest_start_k is not None else -1,
     )
+    auto_run_payload = st.session_state.get(BACKTEST_AUTORUN_PENDING_KEY)
+    if isinstance(auto_run_payload, dict):
+        req_symbol = str(auto_run_payload.get("symbol", "")).strip().upper()
+        req_market = str(auto_run_payload.get("market", "")).strip().upper()
+        if len(symbols) == 1 and req_symbol and symbols[0] == req_symbol and (not req_market or req_market == market_selector):
+            st.session_state[BACKTEST_RUN_REQUEST_KEY] = run_key
+            st.session_state.pop(BACKTEST_AUTORUN_PENDING_KEY, None)
+            st.caption(f"已從表格帶入 `{req_symbol}`，自動執行回測。")
     with st.container(border=True):
         _render_card_section_header("回測執行", "按下按鈕後才會執行；同條件會優先讀取本地快取。")
         run_clicked = st.button("執行回測", type="primary", use_container_width=True, key="bt_execute_run")
@@ -8188,6 +8580,7 @@ def _render_tutorial_view():
             {"分頁": "回測工作台", "你會看到什麼": "單檔/投組回測、Walk-Forward、Benchmark 比較、回放", "什麼時候用": "驗證策略與參數"},
             {"分頁": "2026 YTD 前十大股利型、配息型 ETF", "你會看到什麼": "2026 年迄今股利/配息型 Top10、2025 對照、大盤勝負、Benchmark 對照卡", "什麼時候用": "看今年高股息族群領先 ETF"},
             {"分頁": "2026 YTD 前十大 ETF", "你會看到什麼": "2026 年迄今 Top10、2025 對照、大盤勝負、Benchmark 對照卡", "什麼時候用": "看今年領先 ETF"},
+            {"分頁": "台股 ETF 全類型總表", "你會看到什麼": "台股 ETF 全名單、類型分類、2025/2026YTD 與大盤勝負", "什麼時候用": "一次盤點全市場 ETF 的跨年度相對強弱"},
             {"分頁": "2025 後20大最差勁 ETF", "你會看到什麼": "2025 全年報酬後20名排行", "什麼時候用": "快速盤點全年落後族群"},
             {"分頁": "共識代表 ETF", "你會看到什麼": "以前10 ETF 成分股交集推導建議ETF與備選", "什麼時候用": "想要從多檔收斂到單一核心ETF"},
             {"分頁": "兩檔 ETF 推薦", "你會看到什麼": "核心+衛星兩檔建議（低重疊動能）", "什麼時候用": "想快速落地成可執行兩檔組合"},
@@ -8210,7 +8603,7 @@ def _render_tutorial_view():
             [
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
-                "3. 再到 `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF` 與 `2025 後20大最差勁 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
+                "3. 再到 `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
                 "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00993A / 0050 / 0052 熱力圖`。",
                 "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
             ]
@@ -8355,7 +8748,7 @@ def _render_tutorial_view():
             [
                 "1. 先在 `回測工作台` 用 `buy_hold` 跑單檔，確認資料與報表都正常。",
                 "2. 再改成 `sma_trend_filter` 或 `donchian_breakout`，比較是否優於 `buy_hold`。",
-                "3. 接著用 `2026 YTD 前十大 ETF` + `2026 YTD 前十大股利型、配息型 ETF` + `2025 後20大最差勁 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合。",
+                "3. 接著用 `2026 YTD 前十大 ETF` + `2026 YTD 前十大股利型、配息型 ETF` + `台股 ETF 全類型總表` + `2025 後20大最差勁 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合。",
                 "4. 最後才進 `ETF 輪動策略`、`2026 YTD 主動式 ETF` 與各熱力圖做進階判讀。",
             ]
         )
@@ -10004,6 +10397,7 @@ def _render_db_browser_view():
 def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
+    _consume_backtest_drilldown_query()
     _auto_run_daily_incremental_refresh(_history_store())
     st.title("即時走勢 / 多來源資料 / 回測平台")
     st.caption(_runtime_stack_caption())
@@ -10014,6 +10408,7 @@ def main():
         "回測工作台": _render_backtest_view,
         "2026 YTD 前十大股利型、配息型 ETF": _render_top10_etf_2025_view,
         "2026 YTD 前十大 ETF": _render_top10_etf_2026_ytd_view,
+        "台股 ETF 全類型總表": _render_tw_etf_all_types_view,
         "2025 後20大最差勁 ETF": _render_bottom20_etf_2025_view,
         "共識代表 ETF": _render_consensus_representative_etf_view,
         "兩檔 ETF 推薦": _render_two_etf_pick_view,

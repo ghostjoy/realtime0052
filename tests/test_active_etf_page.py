@@ -13,7 +13,9 @@ from app import (
     BACKTEST_REPLAY_SCHEMA_VERSION,
     _apply_unified_benchmark_hover,
     _benchmark_candidates_tw,
+    _build_tw_etf_all_types_performance_table,
     _fill_unresolved_tw_names,
+    _decorate_dataframe_backtest_links,
     _decorate_tw_etf_top10_ytd_table,
     _build_data_health,
     _build_snapshot_health,
@@ -34,6 +36,7 @@ from app import (
     _load_tw_benchmark_bars,
     _snapshot_fallback_depth,
     _classify_tw_etf,
+    _parse_drill_symbol,
 )
 
 
@@ -100,6 +103,28 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(_infer_market_target_from_symbols(["8069.TWO"]), "OTC")
         self.assertIsNone(_infer_market_target_from_symbols(["8069", "AAPL"]))
         self.assertIsNone(_infer_market_target_from_symbols([]))
+
+    def test_parse_drill_symbol(self):
+        self.assertEqual(_parse_drill_symbol("0050 元大台灣50"), ("0050", "TW"))
+        self.assertEqual(_parse_drill_symbol("8069.TWO"), ("8069", "OTC"))
+        self.assertEqual(_parse_drill_symbol("AAPL Apple"), ("AAPL", "US"))
+        self.assertEqual(_parse_drill_symbol("—"), ("", ""))
+
+    def test_decorate_dataframe_backtest_links(self):
+        source = pd.DataFrame(
+            [
+                {"代碼": "0050 元大台灣50", "市場": "台股上市(TWSE)"},
+                {"代碼": "8069", "市場": "台股上櫃(OTC)"},
+                {"代碼": "AAPL", "市場": "US"},
+                {"代碼": "—", "市場": "TW"},
+            ]
+        )
+        out, cfg = _decorate_dataframe_backtest_links(source)
+        self.assertIn("代碼", cfg)
+        self.assertTrue(str(out.iloc[0]["代碼"]).startswith("?bt_symbol=0050&bt_market=TW"))
+        self.assertTrue(str(out.iloc[1]["代碼"]).startswith("?bt_symbol=8069&bt_market=OTC"))
+        self.assertTrue(str(out.iloc[2]["代碼"]).startswith("?bt_symbol=AAPL&bt_market=US"))
+        self.assertTrue(pd.isna(out.iloc[3]["代碼"]))
 
     def test_load_tw_benchmark_bars_fallback_chain(self):
         idx = pd.to_datetime(["2026-01-02", "2026-01-03"], utc=True)
@@ -915,6 +940,70 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.iloc[2]["輸給台股大盤(%)"]), 0.0)
         self.assertIn("2025績效(%)", out.columns)
         self.assertIn("YTD報酬(%)", out.columns)
+
+    def test_build_tw_etf_all_types_performance_table(self):
+        _build_tw_etf_all_types_performance_table.clear()
+        ytd_df = pd.DataFrame(
+            [
+                {
+                    "排名": 1,
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "類型": "市值型",
+                    "期初收盤": 100.0,
+                    "復權期初": 100.0,
+                    "期末收盤": 112.0,
+                    "復權事件": "—",
+                    "區間報酬(%)": 12.0,
+                },
+                {
+                    "排名": 2,
+                    "代碼": "00935",
+                    "ETF": "野村臺灣新科技50",
+                    "類型": "科技型",
+                    "期初收盤": 50.0,
+                    "復權期初": 50.0,
+                    "期末收盤": 57.5,
+                    "復權事件": "—",
+                    "區間報酬(%)": 15.0,
+                },
+            ]
+        )
+        y2025_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "區間報酬(%)": 30.0},
+                {"代碼": "00935", "區間報酬(%)": 20.0},
+            ]
+        )
+        with patch(
+            "app._build_tw_etf_top10_between",
+            side_effect=[
+                (ytd_df, "20251231", "20260214", 2),
+                (y2025_df, "20241231", "20251231", 2),
+            ],
+        ), patch(
+            "app._load_tw_market_return_between",
+            side_effect=[
+                (10.0, "0050", []),
+                (18.0, "0050", []),
+            ],
+        ):
+            out, meta = _build_tw_etf_all_types_performance_table(
+                ytd_start_yyyymmdd="20251231",
+                ytd_end_yyyymmdd="20260214",
+                compare_start_yyyymmdd="20241231",
+                compare_end_yyyymmdd="20251231",
+            )
+
+        self.assertEqual(len(out), 2)
+        self.assertIn("2025績效(%)", out.columns)
+        self.assertIn("2026YTD績效(%)", out.columns)
+        self.assertIn("贏輸台股大盤2025(%)", out.columns)
+        self.assertIn("贏輸台股大盤2026YTD(%)", out.columns)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "贏輸台股大盤2025(%)"].iloc[0]), 12.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "贏輸台股大盤2026YTD(%)"].iloc[0]), 5.0)
+        self.assertEqual(str(meta.get("market_2025_symbol", "")), "0050")
+        self.assertEqual(str(meta.get("market_ytd_symbol", "")), "0050")
 
 
 if __name__ == "__main__":

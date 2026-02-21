@@ -98,10 +98,13 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated app.py, tests/test_active_etf_page.py [id:14cbfe2554]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, backtest/adjustments.py, tests/test_active_etf_page.py, tests/test_split_adjustments.py [id:a69a023b1b]
 - 分頁調整：原 `2025 前十大 ETF` 改為 `2026 YTD 前十大股利型、配息型 ETF`（台股），並沿用 `2026 YTD 前十大 ETF` 的同級內容（`2025績效`、`贏輸台股大盤`、Benchmark 對照圖與績效表）。
 - 新增 `2025 後20大最差勁 ETF` 卡片頁：以 2025 全年區間 `輸給台股大盤(%)` 最多排序顯示後20名，且排除區間內有復權事件標的，版型與 Benchmark 圖比照 `2026 YTD 前十大 ETF`。
 - 新增 `ETF代碼 -> 類型` 白名單，分類時優先採用白名單，再回退名稱關鍵字，降低大量落入 `其他` 的情況。
+- 新增 `台股 ETF 全類型總表` 卡片：列出台股 ETF 全名單與類型，並同時顯示 `2025績效(%)`、`2026YTD績效(%)`、`贏輸台股大盤2025(%)`、`贏輸台股大盤2026YTD(%)`（僅表格，不含 Benchmark 圖）。
+- 新增全域表格「代碼可點擊回測」：所有含代碼欄位的表格都可直接點擊代碼，系統會自動跳轉到 `回測工作台`，帶入標的與市場並自動執行回測。
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, conf/config.yaml, conf/features/default.yaml, conf/storage/duckdb.yaml, ... (+20) [id:1c648218cb]
 - 預設技術線切換為 `Hydra + DuckDB/Parquet`：
   - `conf/config.yaml` 預設 storage 改為 `duckdb`
