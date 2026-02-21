@@ -215,6 +215,19 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertFalse(_is_tw_active_etf("00993", "安聯台灣高息成長主動式ETF"))
         self.assertFalse(_is_tw_active_etf("00993A", "安聯台灣高息成長ETF"))
         self.assertEqual(_classify_tw_etf("某某高股息月月配息ETF"), "股利型")
+        self.assertEqual(_classify_tw_etf("某某AI科技ETF"), "科技型")
+        self.assertEqual(_classify_tw_etf("某某永續ESG ETF"), "永續ESG型")
+        self.assertEqual(_classify_tw_etf("某某金融ETF"), "金融型")
+        self.assertEqual(_classify_tw_etf("某某主動ETF"), "主動式")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="0050"), "市值型")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="0056"), "股利型")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00935"), "科技型")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00920"), "永續ESG型")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00917"), "金融型")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="0061"), "海外市場型")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00981T"), "平衡收益型")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00995A"), "主動式")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00999A"), "主動式")
 
     def test_build_symbol_line_styles_assigns_distinct_colors(self):
         symbols = [f"00{i:03d}A" for i in range(1, 11)]
@@ -430,6 +443,75 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(universe_count, 2)
         self.assertEqual(list(out["代碼"]), ["00929", "0056"])
         self.assertTrue((out["類型"] == "股利型").all())
+
+    def test_build_tw_etf_top10_between_bottom_n(self):
+        _build_tw_etf_top10_between.clear()
+
+        start_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 100.0},
+                {"code": "0056", "name": "元大高股息", "close": 30.0},
+                {"code": "00929", "name": "復華台灣科技季配息", "close": 20.0},
+                {"code": "00935", "name": "野村台灣創新科技50", "close": 50.0},
+            ]
+        )
+        end_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 120.0},  # +20%
+                {"code": "0056", "name": "元大高股息", "close": 27.0},   # -10%
+                {"code": "00929", "name": "復華台灣科技季配息", "close": 16.0},  # -20%
+                {"code": "00935", "name": "野村台灣創新科技50", "close": 55.0},  # +10%
+            ]
+        )
+
+        with patch(
+            "app._fetch_twse_snapshot_with_fallback",
+            side_effect=[("20241231", start_df), ("20251231", end_df)],
+        ), patch("app.known_split_events", return_value=[]):
+            out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+                "20250101",
+                "20251231",
+                top_n=2,
+                sort_ascending=True,
+            )
+
+        self.assertEqual(start_used, "20241231")
+        self.assertEqual(end_used, "20251231")
+        self.assertEqual(universe_count, 4)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(list(out["代碼"]), ["00929", "0056"])
+
+    def test_build_tw_etf_top10_between_exclude_split_event(self):
+        _build_tw_etf_top10_between.clear()
+
+        start_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 100.0},
+                {"code": "0056", "name": "元大高股息", "close": 30.0},
+            ]
+        )
+        end_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 60.0},
+                {"code": "0056", "name": "元大高股息", "close": 27.0},
+            ]
+        )
+
+        split_event = SimpleNamespace(date="2025-06-18", ratio=0.2)
+        with patch(
+            "app._fetch_twse_snapshot_with_fallback",
+            side_effect=[("20241231", start_df), ("20251231", end_df)],
+        ), patch("app.known_split_events", side_effect=lambda symbol, market: [split_event] if str(symbol) == "0050" else []):
+            out, _, _, universe_count = _build_tw_etf_top10_between(
+                "20250101",
+                "20251231",
+                top_n=10,
+                sort_ascending=True,
+                exclude_split_event=True,
+            )
+
+        self.assertEqual(universe_count, 1)
+        self.assertEqual(list(out["代碼"]), ["0056"])
 
     def test_consensus_threshold_candidates(self):
         self.assertEqual(_consensus_threshold_candidates(10), [10, 8, 7])
@@ -817,17 +899,20 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         out = _decorate_tw_etf_top10_ytd_table(
             top10,
-            y2025_map={"0050": 18.5, "0056": 10.25},
+            compare_return_map={"0050": 18.5, "0056": 10.25},
             market_return_pct=5.0,
-            market_2025_return_pct=9.0,
+            market_compare_return_pct=9.0,
             benchmark_code="^TWII",
             end_used="20260214",
+            underperform_col_label="輸給台股大盤(%)",
         )
         self.assertEqual(len(out), 3)
         self.assertEqual(str(out.iloc[0]["ETF"]), "台股大盤")
         self.assertEqual(str(out.iloc[0]["排名"]), "—")
         self.assertEqual(float(out.iloc[0]["YTD報酬(%)"]), 5.0)
         self.assertEqual(float(out.iloc[1]["贏輸台股大盤(%)"]), 7.0)
+        self.assertEqual(float(out.iloc[1]["輸給台股大盤(%)"]), 0.0)
+        self.assertEqual(float(out.iloc[2]["輸給台股大盤(%)"]), 0.0)
         self.assertIn("2025績效(%)", out.columns)
         self.assertIn("YTD報酬(%)", out.columns)
 

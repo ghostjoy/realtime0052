@@ -8,6 +8,32 @@ from backtest.adjustments import apply_split_adjustment, detect_split_events
 
 
 class SplitAdjustmentTests(unittest.TestCase):
+    def test_known_split_adjusts_0050_history(self):
+        idx = pd.to_datetime(
+            [
+                "2025-06-16",
+                "2025-06-17",
+                "2025-06-18",
+                "2025-06-19",
+            ],
+            utc=True,
+        )
+        bars = pd.DataFrame(
+            {
+                "open": [190.0, 192.0, 48.0, 48.5],
+                "high": [191.0, 193.0, 48.8, 49.2],
+                "low": [189.0, 191.5, 47.7, 48.0],
+                "close": [190.5, 192.5, 48.2, 48.9],
+                "volume": [1200.0, 1300.0, 5200.0, 5100.0],
+            },
+            index=idx,
+        )
+        out, events = apply_split_adjustment(bars, symbol="0050", market="TW", use_known=True, use_auto_detect=False)
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].ratio, 1.0 / 4.0, places=8)
+        self.assertAlmostEqual(float(out.loc[pd.Timestamp("2025-06-16", tz="UTC"), "close"]), 190.5 / 4.0, places=4)
+        self.assertAlmostEqual(float(out.loc[pd.Timestamp("2025-06-18", tz="UTC"), "close"]), 48.2, places=4)
+
     def test_known_split_adjusts_0052_history(self):
         idx = pd.to_datetime(
             [

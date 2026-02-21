@@ -6,6 +6,7 @@
 - `回測工作台`：日K歷史下載、本地資料庫同步、策略回測、播放式回放、DCA（期初+每月定投）績效比較
 - `2026 YTD 前十大股利型、配息型 ETF`：以 2026/01/01 至今區間計算前十大台股股利/配息型 ETF（卡片頁）
 - `2026 YTD 前十大 ETF`：以 2026/01/01 至今區間計算前十大台股 ETF（卡片頁）
+- `2025 後20大最差勁 ETF`：以 2025 全年區間「輸給台股大盤(%)」最多排序的後20名台股 ETF（排除復權事件標的，卡片頁）
 - `共識代表 ETF`：以前10 ETF 成分股交集推導單一代表 ETF（附前3備選）
 - `兩檔 ETF 推薦`：以「共識代表 + 低重疊動能」輸出核心/衛星兩檔組合（可切換海外限制與重疊門檻）
 - `2026 YTD 主動式 ETF`：台股主動式 ETF 的 2026 YTD Buy & Hold 績效卡，含 Benchmark 對照圖（策略/基準/各ETF買進持有）
@@ -343,7 +344,7 @@ uv run python -m unittest discover -s tests -v
 
 ## 專案結構（主要）
 
-- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / 2026 YTD 前十大股利型、配息型 ETF / 2026 YTD 前十大 ETF / 共識代表 ETF / 兩檔 ETF 推薦 / 2026 YTD 主動式 ETF / ETF 輪動策略 / 00910 熱力圖 / 00935 熱力圖 / 00993A 熱力圖 / 0050 熱力圖 / 0052 熱力圖 / 資料庫檢視 / 新手教學）
+- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / 2026 YTD 前十大股利型、配息型 ETF / 2026 YTD 前十大 ETF / 2025 後20大最差勁 ETF / 共識代表 ETF / 兩檔 ETF 推薦 / 2026 YTD 主動式 ETF / ETF 輪動策略 / 00910 熱力圖 / 00935 熱力圖 / 00993A 熱力圖 / 0050 熱力圖 / 0052 熱力圖 / 資料庫檢視 / 新手教學）
 - `services/market_data_service.py`：多來源 provider chain 與資料品質封裝
 - `providers/`：各資料來源 adapter
 - `storage/history_store.py`：SQLite schema、增量同步、回測紀錄

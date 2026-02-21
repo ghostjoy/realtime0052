@@ -17,6 +17,7 @@ class SplitEvent:
 # Known split events (minimal curated list for symbols we actively use).
 # ratio = post-split price / pre-split price.
 KNOWN_SPLITS: Dict[Tuple[str, str], Sequence[Tuple[str, float]]] = {
+    ("TW", "0050"): (("2025-06-18", 1.0 / 4.0),),
     ("TW", "0052"): (("2025-11-26", 1.0 / 7.0),),
 }
 
