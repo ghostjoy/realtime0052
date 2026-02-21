@@ -168,10 +168,27 @@ def load_benchmark_from_store(
             if source_vals:
                 source_text = ",".join(source_vals)
         out.attrs["symbol"] = bench_symbol
-        out.attrs["source"] = f"sqlite:{source_text}" if source_text else "sqlite"
+        store_backend = str(getattr(store, "backend_name", "store") or "store").strip().lower()
+        out.attrs["source"] = f"{store_backend}:{source_text}" if source_text else store_backend
         return out
 
     return pd.DataFrame(columns=["close"])
+
+
+def queue_benchmark_writeback(*, store: HistoryStoreLike, market_code: str, benchmark: pd.DataFrame) -> bool:
+    if not isinstance(benchmark, pd.DataFrame) or benchmark.empty:
+        return False
+    queue_fn = getattr(store, "queue_daily_bars_writeback", None)
+    if not callable(queue_fn):
+        return False
+    symbol = str(getattr(benchmark, "attrs", {}).get("symbol", "")).strip().upper()
+    if not symbol:
+        return False
+    source = str(getattr(benchmark, "attrs", {}).get("source", "")).strip()
+    try:
+        return bool(queue_fn(symbol=symbol, market=market_code, bars=benchmark, source=source or "benchmark_fallback"))
+    except Exception:
+        return False
 
 
 def load_and_prepare_symbol_bars(
@@ -324,5 +341,6 @@ __all__ = [
     "load_and_prepare_symbol_bars",
     "load_benchmark_from_store",
     "parse_symbols",
+    "queue_benchmark_writeback",
     "series_metrics",
 ]

@@ -16,7 +16,7 @@
 - `0050 熱力圖`：0050 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `0052 熱力圖`：0052 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `00910 / 00935 / 00993A / 0050 / 0052` 熱力圖頁：頁首統一顯示「官方編製/管理規則摘要」與來源連結
-- `資料庫檢視`：查看 SQLite 內各資料表筆數、欄位結構與分頁資料
+- `資料庫檢視`：查看 SQLite / DuckDB 內各資料表筆數、欄位結構與分頁資料
 - `新手教學`：技術面與回測參數白話解釋、常見誤區、建議操作流程
 
 > 免責聲明：僅供教育/研究，非投資建議。
@@ -66,26 +66,31 @@ git config --get core.hooksPath
 - 每次顯示來源與資料品質（是否延遲、fallback depth、freshness）
 - 主要卡片補上資料健康度：`as_of / source / source chain / fallback depth`
 - 即時模式 UI：改為「即時總覽 / 即時走勢 / 側邊分析卡」版面，資訊密度更清楚
-- 台股即時資料可批次落地到 SQLite（`intraday_ticks`），供後續查詢與回放擴充
+- 台股即時資料可批次落地到本地歷史儲存（DuckDB + Parquet），供後續查詢與回放擴充
 - `Theme` 主題切換：可在側邊欄切換 `日光白` / `灰白專業` / `深色專業`
 
-### 2) 自建歷史資料庫（SQLite）
+### 2) 自建歷史資料庫（DuckDB+Parquet 預設）
 
 - 預設資料庫：
-  - 若偵測到 iCloud Drive：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`
-  - 否則回退本地：`market_history.sqlite3`
-- 啟用 `WAL`、UPSERT 增量同步
-- 表：
+  - 若偵測到 iCloud Drive：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.duckdb`
+  - 否則回退本地：`market_history.duckdb`
+- `daily_bars` / `intraday_ticks` 以 Parquet（market/symbol 分區）儲存
+- 表（DuckDB）：
   - `instruments`
-  - `daily_bars`
-  - `intraday_ticks`
   - `sync_state`
   - `symbol_metadata`（代碼/名稱/產業等快取）
   - `bootstrap_runs`（預載/增量更新任務紀錄）
   - `backtest_runs`
+  - `backtest_replay_runs`
   - `universe_snapshots`
   - `heatmap_runs`
   - `rotation_runs`
+
+```bash
+# 可選：自訂 DuckDB 與 Parquet 路徑
+export REALTIME0052_DUCKDB_PATH="/your/path/market_history.duckdb"
+export REALTIME0052_PARQUET_ROOT="/your/path/parquet"
+```
 
 ### 2.5) 基礎資料預載（降低第一次等待）
 
@@ -265,10 +270,25 @@ export FUGLE_WS_URL="wss://your-relay-or-proxy-endpoint"
 
 更多細節請看：`FUGLE_MCP_GUIDE.md`
 
-若要手動指定 SQLite 路徑（會覆蓋預設 iCloud/本地判斷），可設定：
+若要手動指定 DuckDB 路徑（會覆蓋預設 iCloud/本地判斷），可設定：
 
 ```bash
-export REALTIME0052_DB_PATH="/your/path/market_history.sqlite3"
+export REALTIME0052_DUCKDB_PATH="/your/path/market_history.duckdb"
+export REALTIME0052_PARQUET_ROOT="/your/path/parquet"
+```
+
+若要改回 legacy env（除錯/回滾用）：
+
+```bash
+export REALTIME0052_CONFIG_SOURCE="legacy_env"
+```
+
+若要切換圖表渲染器（預設維持 Plotly，可安全回退）：
+
+```bash
+export REALTIME0052_KLINE_RENDERER_LIVE="lightweight"
+export REALTIME0052_KLINE_RENDERER_REPLAY="lightweight"
+export REALTIME0052_BENCHMARK_RENDERER="lightweight"
 ```
 
 若要調整即時資料（`intraday_ticks`）保留天數（預設 1095 天），可設定：
@@ -277,11 +297,41 @@ export REALTIME0052_DB_PATH="/your/path/market_history.sqlite3"
 export REALTIME0052_INTRADAY_RETAIN_DAYS="1095"
 ```
 
+## SQLite -> DuckDB 一次性遷移（可回滾）
+
+先保留舊 SQLite 檔案不動，再執行：
+
+```bash
+uv run python scripts/migrate_sqlite_to_duckdb.py \
+  --sqlite-path "/your/path/market_history.sqlite3" \
+  --duckdb-path "/your/path/market_history.duckdb" \
+  --parquet-root "/your/path/parquet"
+```
+
+回滾方式：執行 `./scripts/rollback_legacy_stack.sh`，或手動把 `REALTIME0052_STORAGE_BACKEND=sqlite`。
+
 ## 執行
 
 ```bash
 cd /Users/ztw/codexapp/realtime0052
 uv run streamlit run app.py
+```
+
+一鍵啟用預設技術線（Hydra + DuckDB/Parquet + Plotly）：
+
+```bash
+cd /Users/ztw/codexapp/realtime0052
+./scripts/enable_new_stack.sh
+```
+
+腳本會在啟動前列印目前技術線摘要（`config_source / storage_backend / renderer / 路徑是否 iCloud`）。
+若偵測到 iCloud `codexapp` 目錄，腳本預設會直接使用 iCloud 路徑（DuckDB / Parquet / SQLite）。
+
+一鍵回滾舊技術線（legacy_env + SQLite + Plotly）：
+
+```bash
+cd /Users/ztw/codexapp/realtime0052
+./scripts/rollback_legacy_stack.sh
 ```
 
 ## 測試
@@ -297,5 +347,8 @@ uv run python -m unittest discover -s tests -v
 - `services/market_data_service.py`：多來源 provider chain 與資料品質封裝
 - `providers/`：各資料來源 adapter
 - `storage/history_store.py`：SQLite schema、增量同步、回測紀錄
+- `storage/duck_store.py`：DuckDB + Parquet hybrid store（與既有介面相容）
+- `conf/`：Hydra YAML 設定（預設直接啟用 `hydra`）
+- `config_loader.py`：Hydra/環境變數雙軌設定讀取器
 - `backtest/`：策略模板、回測引擎、結果型別
 - `tests/`：單元測試（資料鏈路/回測/儲存）

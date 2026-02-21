@@ -8,7 +8,8 @@ import sqlite3
 from collections import Counter
 from datetime import date, datetime, timezone
 from io import StringIO
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -39,6 +40,7 @@ from backtest import (
     required_walkforward_bars,
 )
 from backtest.adjustments import known_split_events
+from config_loader import cfg_or_env, cfg_or_env_bool, cfg_or_env_str, get_config_source
 from indicators import add_indicators
 from market_data_types import DataHealth
 from providers import TwMisProvider
@@ -57,6 +59,7 @@ from services.backtest_runner import (
     load_and_prepare_symbol_bars,
     load_benchmark_from_store as runner_load_benchmark_from_store,
     parse_symbols as runner_parse_symbols,
+    queue_benchmark_writeback as runner_queue_benchmark_writeback,
     series_metrics as runner_series_metrics,
 )
 from services.benchmark_loader import benchmark_candidates_tw, load_tw_benchmark_bars, load_tw_benchmark_close
@@ -76,6 +79,16 @@ from state_keys import BT_KEYS
 from storage import HistoryStore
 from ui.shared.perf import PerfTimer, perf_debug_enabled
 from ui.shared.session_utils import ensure_defaults
+from ui.charts import (
+    render_lightweight_kline_equity_chart,
+    render_lightweight_live_chart,
+    render_lightweight_multi_line_chart,
+)
+
+try:
+    import duckdb
+except Exception:  # pragma: no cover
+    duckdb = None  # type: ignore[assignment]
 
 try:
     from advice import Profile, render_advice, render_advice_scai_style
@@ -92,16 +105,44 @@ def _market_service() -> MarketDataService:
 
 @st.cache_resource
 def _history_store() -> HistoryStore:
-    return HistoryStore(service=_market_service())
+    backend = cfg_or_env_str("features.storage_backend", "REALTIME0052_STORAGE_BACKEND", "duckdb").strip().lower()
+    if backend not in {"duckdb", "sqlite"}:
+        backend = "duckdb"
+    if backend == "duckdb":
+        from storage.duck_store import DuckHistoryStore
+
+        duck_db_path = cfg_or_env("storage.duckdb.db_path", "REALTIME0052_DUCKDB_PATH", default=None)
+        parquet_root = cfg_or_env("storage.duckdb.parquet_root", "REALTIME0052_PARQUET_ROOT", default=None)
+        retain_days = cfg_or_env(
+            "storage.duckdb.intraday_retain_days",
+            "REALTIME0052_INTRADAY_RETAIN_DAYS",
+            default=1095,
+            cast=int,
+        )
+        legacy_sqlite_path = cfg_or_env("storage.duckdb.legacy_sqlite_path", "REALTIME0052_DB_PATH", default=None)
+        auto_migrate = cfg_or_env_bool(
+            "storage.duckdb.auto_migrate_legacy_sqlite",
+            "REALTIME0052_AUTO_MIGRATE_LEGACY_SQLITE",
+            default=True,
+        )
+        return DuckHistoryStore(
+            service=_market_service(),
+            db_path=duck_db_path,
+            parquet_root=parquet_root,
+            intraday_retain_days=retain_days,
+            legacy_sqlite_path=legacy_sqlite_path,
+            auto_migrate_legacy_sqlite=auto_migrate,
+        )
+    sqlite_db_path = cfg_or_env("storage.sqlite.db_path", "REALTIME0052_DB_PATH", default=None)
+    return HistoryStore(db_path=sqlite_db_path, service=_market_service())
 
 
 def _auto_run_daily_incremental_refresh(store: HistoryStore):
-    auto_enabled = str(os.getenv("REALTIME0052_AUTO_INCREMENTAL_ON_STARTUP", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    auto_enabled = cfg_or_env_bool(
+        "sync.auto_incremental_on_startup",
+        "REALTIME0052_AUTO_INCREMENTAL_ON_STARTUP",
+        default=False,
+    )
     if not auto_enabled:
         return
     today_token = date.today().isoformat()
@@ -120,15 +161,62 @@ def _auto_run_daily_incremental_refresh(store: HistoryStore):
     try:
         summary = run_incremental_refresh(
             store=store,
-            years=5,
+            years=int(cfg_or_env("sync.years", "REALTIME0052_SYNC_YEARS", default=5, cast=int) or 5),
             parallel=True,
-            max_workers=4,
+            max_workers=int(cfg_or_env("sync.parallel_workers", "REALTIME0052_SYNC_WORKERS", default=4, cast=int) or 4),
             tw_limit=120,
             us_limit=50,
         )
         st.session_state["daily_incremental_summary"] = summary
     except Exception as exc:
         st.session_state["daily_incremental_error"] = str(exc)
+
+
+def _renderer_choice(path: str, env_var: str, default: str = "plotly") -> str:
+    token = cfg_or_env_str(path, env_var, default).strip().lower()
+    return token if token in {"plotly", "lightweight"} else default
+
+
+def _live_kline_renderer() -> str:
+    return _renderer_choice("features.kline_renderer_live", "REALTIME0052_KLINE_RENDERER_LIVE", "plotly")
+
+
+def _replay_kline_renderer() -> str:
+    return _renderer_choice("features.kline_renderer_replay", "REALTIME0052_KLINE_RENDERER_REPLAY", "plotly")
+
+
+def _benchmark_renderer() -> str:
+    return _renderer_choice("features.benchmark_renderer", "REALTIME0052_BENCHMARK_RENDERER", "plotly")
+
+
+def _path_scope_label(path_like: object) -> str:
+    text = str(path_like or "").strip()
+    icloud_root = str(Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs")
+    return "iCloud" if text.startswith(icloud_root) else "local"
+
+
+def _runtime_stack_caption() -> str:
+    store = _history_store()
+    backend = str(getattr(store, "backend_name", "duckdb") or "duckdb").strip().lower()
+    db_path = str(getattr(store, "db_path", "") or "")
+    parts = [
+        f"config={get_config_source()}",
+        f"storage={backend}",
+        f"db={db_path} ({_path_scope_label(db_path)})",
+        f"live_chart={_live_kline_renderer()}",
+        f"replay_chart={_replay_kline_renderer()}",
+        f"benchmark_chart={_benchmark_renderer()}",
+    ]
+    if backend == "duckdb":
+        parquet_root = str(getattr(store, "parquet_root", "") or "")
+        if parquet_root:
+            parts.append(f"parquet={parquet_root} ({_path_scope_label(parquet_root)})")
+    return "技術線：" + " | ".join(parts)
+
+
+def _store_data_source(store: object, dataset: str) -> str:
+    backend = str(getattr(store, "backend_name", "duckdb") or "duckdb").strip().lower()
+    return f"{backend}:{dataset}"
 
 
 BACKTEST_REPLAY_SCHEMA_VERSION = 3
@@ -162,6 +250,17 @@ def _bars_need_backfill(bars: pd.DataFrame, *, start: datetime, end: datetime) -
 def _looks_like_tw_symbol(symbol: str) -> bool:
     token = str(symbol or "").strip().upper()
     return bool(re.fullmatch(r"\d{4,6}[A-Z]?", token))
+
+
+def _looks_like_us_symbol(symbol: str) -> bool:
+    token = str(symbol or "").strip().upper()
+    if not token:
+        return False
+    if token.endswith(".TW") or token.endswith(".TWO"):
+        return False
+    if _looks_like_tw_symbol(token):
+        return False
+    return bool(re.fullmatch(r"\^?[A-Z][A-Z0-9.\-]{0,11}", token))
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
@@ -228,14 +327,28 @@ def _infer_tw_symbol_exchanges(symbols: list[str]) -> dict[str, str]:
 def _infer_market_target_from_symbols(symbols: list[str]) -> Optional[str]:
     if not symbols:
         return None
-    tw_like_symbols = [sym for sym in symbols if _looks_like_tw_symbol(sym)]
-    if not tw_like_symbols or len(tw_like_symbols) != len(symbols):
+    tokens = [str(sym or "").strip().upper() for sym in symbols if str(sym or "").strip()]
+    if not tokens:
         return None
-    inferred_map = _infer_tw_symbol_exchanges(tw_like_symbols)
-    inferred_tags = [inferred_map.get(sym) for sym in tw_like_symbols if inferred_map.get(sym) in {"TW", "OTC"}]
-    if not inferred_tags:
-        return None
-    return "OTC" if all(tag == "OTC" for tag in inferred_tags) else "TW"
+
+    if all(token.endswith(".TW") for token in tokens):
+        return "TW"
+    if all(token.endswith(".TWO") for token in tokens):
+        return "OTC"
+
+    tw_like_symbols = [token for token in tokens if _looks_like_tw_symbol(token)]
+    if tw_like_symbols:
+        if len(tw_like_symbols) != len(tokens):
+            return None
+        inferred_map = _infer_tw_symbol_exchanges(tw_like_symbols)
+        inferred_tags = [inferred_map.get(sym) for sym in tw_like_symbols if inferred_map.get(sym) in {"TW", "OTC"}]
+        if not inferred_tags:
+            return None
+        return "OTC" if all(tag == "OTC" for tag in inferred_tags) else "TW"
+
+    if all(_looks_like_us_symbol(token) for token in tokens):
+        return "US"
+    return None
 
 
 def _persist_live_tick_buffer(
@@ -277,7 +390,7 @@ def _persist_live_tick_buffer(
             buffer = []
             st.session_state[flush_key] = now_ts
         except Exception as exc:
-            st.warning(f"即時資料寫入 SQLite 失敗（已略過本輪）：{exc}")
+            st.warning(f"即時資料寫入失敗（已略過本輪）：{exc}")
     st.session_state[buffer_key] = buffer
 
 
@@ -723,6 +836,104 @@ def _is_unresolved_symbol_name(symbol: str, name: str) -> bool:
     return nm == sym
 
 
+def _extract_tw_symbol_code(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    text = re.sub(r"\.(TW|TWO)$", "", text)
+    if re.fullmatch(r"\d{4,6}[A-Z]?", text):
+        return text
+    matched = re.search(r"(?<!\d)(\d{4,6}[A-Z]?)(?!\d)", text)
+    return str(matched.group(1)).upper() if matched else ""
+
+
+def _collect_tw_symbol_codes(values: list[object]) -> list[str]:
+    ordered: list[str] = []
+    for value in values:
+        code = _extract_tw_symbol_code(value)
+        if not code:
+            continue
+        if code not in ordered:
+            ordered.append(code)
+    return ordered
+
+
+def _format_tw_symbol_with_name(value: object, name_map: dict[str, str]) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    code = _extract_tw_symbol_code(raw)
+    if not code:
+        return raw
+    name = str(name_map.get(code, "")).strip()
+    if not name or _is_unresolved_symbol_name(code, name):
+        return raw
+    if name in raw:
+        return raw
+    if raw.upper() == code:
+        return f"{code} {name}"
+    pattern = re.compile(re.escape(code), flags=re.IGNORECASE)
+    return pattern.sub(f"{code} {name}", raw, count=1)
+
+
+def _symbol_watermark_text(
+    *,
+    symbol: object,
+    market: str,
+    service: Optional[MarketDataService] = None,
+) -> str:
+    raw_symbol = str(symbol or "").strip()
+    token = raw_symbol.upper()
+    if not raw_symbol:
+        return ""
+    market_tag = str(market or "").strip().upper()
+    if market_tag in {"TW", "OTC"}:
+        code = _extract_tw_symbol_code(token)
+        if not code:
+            return token
+        alias = re.sub(re.escape(code), "", raw_symbol, count=1, flags=re.IGNORECASE).strip()
+        alias = re.sub(r"^[\s:：\-_/]+|[\s:：\-_/]+$", "", alias)
+        if service is None:
+            return f"{code} {alias}".strip() if alias else code
+        name_map = service.get_tw_symbol_names([code])
+        mapped = str(name_map.get(code, "")).strip() if isinstance(name_map, dict) else ""
+        parts: list[str] = [code]
+        if alias and alias.upper() != code:
+            parts.append(alias)
+        if mapped and not _is_unresolved_symbol_name(code, mapped):
+            if all(str(mapped) != str(existing) for existing in parts):
+                parts.append(mapped)
+        return " ".join(parts).strip()
+    return token
+
+
+def _decorate_tw_symbol_columns(
+    frame: pd.DataFrame,
+    *,
+    service: MarketDataService,
+    enabled: bool,
+    columns: list[str],
+) -> pd.DataFrame:
+    if not enabled or frame is None or frame.empty:
+        return frame
+    target_cols = [col for col in columns if col in frame.columns]
+    if not target_cols:
+        return frame
+    values: list[object] = []
+    for col in target_cols:
+        values.extend(frame[col].tolist())
+    codes = _collect_tw_symbol_codes(values)
+    if not codes:
+        return frame
+    name_map = service.get_tw_symbol_names(codes)
+    if not isinstance(name_map, dict) or not name_map:
+        return frame
+    out = frame.copy()
+    for col in target_cols:
+        out[col] = out[col].map(lambda v: _format_tw_symbol_with_name(v, name_map))
+    return out
+
+
 def _build_tw_name_map_from_full_rows(rows: list[dict[str, object]]) -> dict[str, str]:
     out: dict[str, str] = {}
     for row in rows:
@@ -875,11 +1086,11 @@ PAGE_CARDS = [
     {"key": "00993A 熱力圖", "desc": "00993A 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "0052 熱力圖", "desc": "0052 成分股回測的相對大盤熱力圖。"},
-    {"key": "資料庫檢視", "desc": "直接查看 SQLite 各表筆數、欄位與內容。"},
+    {"key": "資料庫檢視", "desc": "直接查看 SQLite / DuckDB 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
 ]
 DEFAULT_ACTIVE_PAGE = "回測工作台"
-FIXED_UI_THEME = "灰白專業（Soft Gray）"
+DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
 
 
@@ -1015,6 +1226,32 @@ def _render_sync_issues(prefix: str, issues: list[str], *, preview_limit: int = 
     remain = len(issues) - len(preview)
     remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
     _emit_issue_message(f"{prefix}：{preview_text}{remain_text}")
+
+
+def _compact_sync_issue_messages(issues: list[str]) -> list[str]:
+    if not isinstance(issues, list) or not issues:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    noisy_tokens = [
+        "fugle api http 404",
+        "returned empty ohlcv",
+        "unsupported tw symbol",
+        "only provides latest daily snapshot",
+    ]
+    for item in issues:
+        text = " ".join(str(item).split())
+        if not text:
+            continue
+        symbol, sep, detail = text.partition(":")
+        symbol_token = str(symbol or "").strip().upper()
+        detail_lower = str(detail or "").lower()
+        if sep and symbol_token.endswith("A") and any(token in detail_lower for token in noisy_tokens):
+            text = f"{symbol_token}: 外部來源暫無完整日K（可能新上市或資料源尚未覆蓋）"
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
 
 
 def _snapshot_fallback_depth(target_yyyymmdd: str, used_yyyymmdd: str) -> int:
@@ -1295,6 +1532,83 @@ def _apply_unified_benchmark_hover(fig: go.Figure, palette: dict[str, object]):
     )
 
 
+_PLOTLY_DRAW_TOOL_COLOR = "#FF2D55"
+_PLOTLY_DRAW_MODEBAR_BUTTONS = ["drawline", "drawopenpath", "drawrect", "drawcircle"]
+
+
+def _enable_plotly_draw_tools(
+    fig: go.Figure,
+    *,
+    color: str = _PLOTLY_DRAW_TOOL_COLOR,
+) -> None:
+    if not isinstance(fig, go.Figure):
+        return
+    fig.update_layout(
+        dragmode="pan",
+        newshape=dict(
+            line=dict(color=str(color), width=2),
+            fillcolor=_to_rgba(str(color), 0.18),
+            opacity=0.9,
+        ),
+    )
+
+
+def _apply_plotly_watermark(
+    fig: go.Figure,
+    *,
+    text: str,
+    palette: Optional[dict[str, object]] = None,
+    force: bool = False,
+) -> None:
+    _ = (fig, text, palette, force)
+    return
+
+
+def _safe_export_filename(value: str, *, fallback: str = "chart") -> str:
+    token = re.sub(r"[^0-9A-Za-z._-]+", "_", str(value or "").strip())
+    token = token.strip("._-")
+    return token or fallback
+
+
+def _plotly_chart_config(*, filename: str = "", scale: int = 2) -> dict[str, object]:
+    cfg: dict[str, object] = {
+        "displaylogo": False,
+        "modeBarButtonsToAdd": list(_PLOTLY_DRAW_MODEBAR_BUTTONS),
+        "edits": {"shapePosition": True},
+    }
+    token = str(filename or "").strip()
+    if token:
+        cfg["toImageButtonOptions"] = {
+            "format": "png",
+            "filename": token,
+            "scale": int(scale),
+        }
+    return cfg
+
+
+def _render_plotly_chart(
+    fig: go.Figure,
+    *,
+    chart_key: str = "",
+    filename: str = "",
+    scale: int = 2,
+    use_container_width: bool = True,
+    watermark_text: str = "",
+    palette: Optional[dict[str, object]] = None,
+) -> None:
+    _ = (watermark_text, palette)
+    plot_kwargs: dict[str, object] = {}
+    if str(chart_key).strip():
+        plot_kwargs["key"] = str(chart_key).strip()
+    resolved_name = _safe_export_filename(filename, fallback=_safe_export_filename(chart_key, fallback="chart"))
+    st.plotly_chart(
+        fig,
+        use_container_width=bool(use_container_width),
+        config=_plotly_chart_config(filename=resolved_name, scale=int(scale)),
+        **plot_kwargs,
+    )
+
+
 HEATMAP_EXCESS_COLORSCALE: list[list[object]] = [
     [0.00, "rgba(239,68,68,0.78)"],
     [0.24, "rgba(248,113,113,0.58)"],
@@ -1439,6 +1753,7 @@ def _compute_tw_equal_weight_compare_payload(
             end=end_dt,
             parallel=True,
         )
+        symbol_sync_issues = _compact_sync_issue_messages(symbol_sync_issues)
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     skipped_symbols: list[str] = []
@@ -1467,7 +1782,7 @@ def _compute_tw_equal_weight_compare_payload(
     if not bars_by_symbol:
         return {
             "error": insufficient_msg,
-            "symbol_sync_issues": symbol_sync_issues,
+            "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
             "benchmark_sync_issues": benchmark_sync_issues,
             "used_symbols": [],
             "skipped_symbols": sorted(skipped_symbols),
@@ -1500,7 +1815,7 @@ def _compute_tw_equal_weight_compare_payload(
         start_dt=start_dt,
         end_dt=end_dt,
         sync_first=sync_before_run,
-        allow_twii_fallback=False,
+        allow_twii_fallback=True,
         min_rows=2,
     )
     benchmark_equity = pd.Series(dtype=float)
@@ -1521,7 +1836,7 @@ def _compute_tw_equal_weight_compare_payload(
     if len(common_index) < 2:
         return {
             "error": "Strategy 與 Benchmark 缺少足夠重疊交易日，無法建立對照圖。",
-            "symbol_sync_issues": symbol_sync_issues,
+            "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
             "benchmark_sync_issues": benchmark_sync_issues,
             "used_symbols": sorted(list(bars_by_symbol.keys())),
             "skipped_symbols": sorted(skipped_symbols),
@@ -1543,7 +1858,7 @@ def _compute_tw_equal_weight_compare_payload(
         "per_symbol_equity": per_symbol_plot,
         "used_symbols": sorted(list(bars_by_symbol.keys())),
         "skipped_symbols": sorted(skipped_symbols),
-        "symbol_sync_issues": symbol_sync_issues,
+        "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
         "benchmark_sync_issues": benchmark_sync_issues,
     }
 
@@ -1692,11 +2007,13 @@ _THEME_PALETTES: dict[str, dict[str, object]] = {
 
 
 def _theme_options() -> list[str]:
-    return [FIXED_UI_THEME]
+    return [_current_theme_name()]
 
 
 def _current_theme_name() -> str:
-    theme = FIXED_UI_THEME
+    theme = cfg_or_env_str("ui.default_theme", "REALTIME0052_UI_THEME", DEFAULT_UI_THEME)
+    if theme not in _THEME_PALETTES:
+        theme = DEFAULT_UI_THEME
     if st.session_state.get("ui_theme") != theme:
         st.session_state["ui_theme"] = theme
     return theme
@@ -3259,6 +3576,7 @@ def _render_top10_etf_2025_view():
 
 
 def _render_top10_etf_2026_ytd_view():
+    store = _history_store()
     title_col, refresh_col = st.columns([6, 1])
     with title_col:
         st.subheader("2026 年截至今日前十大 ETF（台股）")
@@ -3465,7 +3783,7 @@ def _render_top10_etf_2026_ytd_view():
             per_symbol_equity = {}
         compare_health = _build_data_health(
             as_of=strategy_equity.index.max() if len(strategy_equity.index) else "",
-            data_sources=["sqlite:daily_bars"],
+            data_sources=[_store_data_source(store, "daily_bars")],
             source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
             degraded=bool(symbol_sync_issues or benchmark_sync_issues),
             fallback_depth=len(symbol_sync_issues) + len(benchmark_sync_issues),
@@ -3475,30 +3793,33 @@ def _render_top10_etf_2026_ytd_view():
 
         palette = _ui_palette()
         symbol_styles = _build_symbol_line_styles(list(per_symbol_equity.keys()))
-        fig_cmp = go.Figure()
-        fig_cmp.add_trace(
-            go.Scatter(
-                x=strategy_equity.index,
-                y=strategy_equity.values,
-                mode="lines",
-                name="Strategy Equity（前十大ETF等權）",
-                line=dict(color=str(palette["equity"]), width=2.4),
-                hovertemplate=_hovertemplate_with_code("TOP10_EW", value_label="Equity", y_format=",.0f"),
-            )
-        )
+        benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+        chart_lines: list[dict[str, Any]] = [
+            {
+                "name": "Strategy Equity（前十大ETF等權）",
+                "series": strategy_equity,
+                "color": str(palette["equity"]),
+                "width": 2.4,
+                "dash": "solid",
+                "hover_code": "TOP10_EW",
+                "value_label": "Equity",
+                "y_format": ",.0f",
+            }
+        ]
         if not benchmark_equity.empty:
-            benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
-            fig_cmp.add_trace(
-                go.Scatter(
-                    x=benchmark_equity.index,
-                    y=benchmark_equity.values,
-                    mode="lines",
-                    name=f"Benchmark Equity（{benchmark_label}）",
-                    line=_benchmark_line_style(palette, width=2.0),
-                    hovertemplate=_hovertemplate_with_code(benchmark_label, value_label="Equity", y_format=",.0f"),
-                )
+            style = _benchmark_line_style(palette, width=2.0)
+            chart_lines.append(
+                {
+                    "name": f"Benchmark Equity（{benchmark_label}）",
+                    "series": benchmark_equity,
+                    "color": str(style["color"]),
+                    "width": float(style["width"]),
+                    "dash": str(style["dash"]),
+                    "hover_code": benchmark_label,
+                    "value_label": "Equity",
+                    "y_format": ",.0f",
+                }
             )
-
         for symbol in sorted(per_symbol_equity.keys()):
             series = per_symbol_equity[symbol]
             if not isinstance(series, pd.Series) or len(series) < 2:
@@ -3506,29 +3827,23 @@ def _render_top10_etf_2026_ytd_view():
             style = symbol_styles.get(symbol, {"color": "#1f77b4", "dash": "solid"})
             label_name = str(name_map.get(symbol, symbol)).strip()
             trace_name = f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
-            fig_cmp.add_trace(
-                go.Scatter(
-                    x=series.index,
-                    y=series.values,
-                    mode="lines",
-                    name=trace_name,
-                    line=dict(color=str(style["color"]), width=1.8, dash=str(style["dash"])),
-                    hovertemplate=_hovertemplate_with_code(symbol, value_label="Equity", y_format=",.0f"),
-                )
+            chart_lines.append(
+                {
+                    "name": trace_name,
+                    "series": series,
+                    "color": str(style["color"]),
+                    "width": 1.8,
+                    "dash": str(style["dash"]),
+                    "hover_code": symbol,
+                    "value_label": "Equity",
+                    "y_format": ",.0f",
+                }
             )
-
-        fig_cmp.update_layout(
+        _render_benchmark_lines_chart(
+            lines=chart_lines,
             height=460,
-            margin=dict(l=10, r=10, t=30, b=10),
-            template=str(palette["plot_template"]),
-            paper_bgcolor=str(palette["paper_bg"]),
-            plot_bgcolor=str(palette["plot_bg"]),
-            font=dict(color=str(palette["text_color"])),
+            chart_key="top10_etf_benchmark",
         )
-        fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
-        fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
-        _apply_unified_benchmark_hover(fig_cmp, palette)
-        st.plotly_chart(fig_cmp, use_container_width=True)
 
         summary_rows: list[dict[str, object]] = []
         strategy_perf = _series_metrics_basic(strategy_equity)
@@ -3875,6 +4190,7 @@ def _render_two_etf_pick_view():
 
 
 def _render_active_etf_2026_ytd_view():
+    store = _history_store()
     title_col, refresh_col = st.columns([6, 1])
     with title_col:
         st.subheader("2026 年主動式 ETF YTD（Buy & Hold）")
@@ -4109,7 +4425,7 @@ def _render_active_etf_2026_ytd_view():
                 per_symbol_equity = {}
             compare_health = _build_data_health(
                 as_of=strategy_equity.index.max() if len(strategy_equity.index) else "",
-                data_sources=["sqlite:daily_bars"],
+                data_sources=[_store_data_source(store, "daily_bars")],
                 source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
                 degraded=bool(symbol_sync_issues or benchmark_sync_issues),
                 fallback_depth=len(symbol_sync_issues) + len(benchmark_sync_issues),
@@ -4119,30 +4435,33 @@ def _render_active_etf_2026_ytd_view():
 
             palette = _ui_palette()
             symbol_styles = _build_symbol_line_styles(list(per_symbol_equity.keys()))
-            fig_cmp = go.Figure()
-            fig_cmp.add_trace(
-                go.Scatter(
-                    x=strategy_equity.index,
-                    y=strategy_equity.values,
-                    mode="lines",
-                    name="Strategy Equity（主動式ETF等權）",
-                    line=dict(color=str(palette["equity"]), width=2.4),
-                    hovertemplate=_hovertemplate_with_code(f"{key_prefix.upper()}_EW", value_label="Equity", y_format=",.0f"),
-                )
-            )
+            benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
+            chart_lines: list[dict[str, Any]] = [
+                {
+                    "name": "Strategy Equity（主動式ETF等權）",
+                    "series": strategy_equity,
+                    "color": str(palette["equity"]),
+                    "width": 2.4,
+                    "dash": "solid",
+                    "hover_code": f"{key_prefix.upper()}_EW",
+                    "value_label": "Equity",
+                    "y_format": ",.0f",
+                }
+            ]
             if not benchmark_equity.empty:
-                benchmark_label = str(payload.get("benchmark_symbol", "") or "Benchmark")
-                fig_cmp.add_trace(
-                    go.Scatter(
-                        x=benchmark_equity.index,
-                        y=benchmark_equity.values,
-                        mode="lines",
-                        name=f"Benchmark Equity（{benchmark_label}）",
-                        line=_benchmark_line_style(palette, width=2.0),
-                        hovertemplate=_hovertemplate_with_code(benchmark_label, value_label="Equity", y_format=",.0f"),
-                    )
+                style = _benchmark_line_style(palette, width=2.0)
+                chart_lines.append(
+                    {
+                        "name": f"Benchmark Equity（{benchmark_label}）",
+                        "series": benchmark_equity,
+                        "color": str(style["color"]),
+                        "width": float(style["width"]),
+                        "dash": str(style["dash"]),
+                        "hover_code": benchmark_label,
+                        "value_label": "Equity",
+                        "y_format": ",.0f",
+                    }
                 )
-
             for symbol in sorted(per_symbol_equity.keys()):
                 series = per_symbol_equity[symbol]
                 if not isinstance(series, pd.Series) or len(series) < 2:
@@ -4152,29 +4471,23 @@ def _render_active_etf_2026_ytd_view():
                 trace_name = (
                     f"Buy-and-Hold（{symbol} {label_name}）" if label_name and label_name != symbol else f"Buy-and-Hold（{symbol}）"
                 )
-                fig_cmp.add_trace(
-                    go.Scatter(
-                        x=series.index,
-                        y=series.values,
-                        mode="lines",
-                        name=trace_name,
-                        line=dict(color=str(style["color"]), width=1.8, dash=str(style["dash"])),
-                        hovertemplate=_hovertemplate_with_code(symbol, value_label="Equity", y_format=",.0f"),
-                    )
+                chart_lines.append(
+                    {
+                        "name": trace_name,
+                        "series": series,
+                        "color": str(style["color"]),
+                        "width": 1.8,
+                        "dash": str(style["dash"]),
+                        "hover_code": symbol,
+                        "value_label": "Equity",
+                        "y_format": ",.0f",
+                    }
                 )
-
-            fig_cmp.update_layout(
+            _render_benchmark_lines_chart(
+                lines=chart_lines,
                 height=460,
-                margin=dict(l=10, r=10, t=30, b=10),
-                template=str(palette["plot_template"]),
-                paper_bgcolor=str(palette["paper_bg"]),
-                plot_bgcolor=str(palette["plot_bg"]),
-                font=dict(color=str(palette["text_color"])),
+                chart_key=f"{key_prefix}_benchmark",
             )
-            fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
-            fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
-            _apply_unified_benchmark_hover(fig_cmp, palette)
-            st.plotly_chart(fig_cmp, use_container_width=True)
 
             summary_rows: list[dict[str, object]] = []
             strategy_perf = _series_metrics_basic(strategy_equity)
@@ -4320,8 +4633,176 @@ def _render_quality_bar(ctx, refresh_sec: int):
     st.caption(f"最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}（fragment 局部刷新）")
 
 
-def _render_live_chart(ind: pd.DataFrame):
+def _render_benchmark_lines_chart(
+    *,
+    lines: list[dict[str, Any]],
+    height: int,
+    chart_key: str,
+    enable_lightweight: bool = True,
+    annotate_extrema: bool = False,
+    extrema_series_name: Optional[str] = None,
+    watermark_text: str = "",
+):
     palette = _ui_palette()
+    renderer = _benchmark_renderer()
+    if enable_lightweight and renderer == "lightweight":
+        ok = render_lightweight_multi_line_chart(
+            lines=lines,
+            palette=palette,
+            key=f"lw:{chart_key}",
+            height=height,
+        )
+        if ok:
+            return
+        st.caption("lightweight-charts 渲染失敗，已自動回退 Plotly。")
+
+    fig = go.Figure()
+    plotted_series: list[tuple[str, pd.Series]] = []
+    for line in lines:
+        series = line.get("series")
+        if not isinstance(series, pd.Series) or series.empty:
+            continue
+        color = str(line.get("color", palette["equity"]))
+        width = float(line.get("width", 2.0) or 2.0)
+        dash = str(line.get("dash", "solid"))
+        name = str(line.get("name", "Series"))
+        hover_code = str(line.get("hover_code", name))
+        value_label = str(line.get("value_label", "Value"))
+        y_format = str(line.get("y_format", ",.0f"))
+        fig.add_trace(
+            go.Scatter(
+                x=series.index,
+                y=series.values,
+                mode="lines",
+                name=name,
+                line=dict(color=color, width=width, dash=dash),
+                hovertemplate=_hovertemplate_with_code(hover_code, value_label=value_label, y_format=y_format),
+            )
+        )
+        plotted_series.append((name, series))
+
+    if annotate_extrema and plotted_series:
+        target_name = str(extrema_series_name or "").strip()
+        target_pair = next((item for item in plotted_series if item[0] == target_name), None)
+        if target_pair is None:
+            target_pair = plotted_series[0]
+        extrema_name, extrema_series = target_pair
+        extrema_vals = pd.to_numeric(extrema_series, errors="coerce").dropna()
+        if not extrema_vals.empty:
+            def _fmt_extrema_date(ts_val: object) -> str:
+                try:
+                    return pd.Timestamp(ts_val).strftime("%Y-%m-%d")
+                except Exception:
+                    return str(ts_val)
+
+            high_idx = extrema_vals.idxmax()
+            low_idx = extrema_vals.idxmin()
+            high_val = float(extrema_vals.loc[high_idx])
+            low_val = float(extrema_vals.loc[low_idx])
+            high_date = _fmt_extrema_date(high_idx)
+            low_date = _fmt_extrema_date(low_idx)
+            high_color = str(palette.get("signal_sell", "#D6465A"))
+            low_color = str(palette.get("signal_buy", "#2F9E6B"))
+            val_fmt = ",.4f" if max(abs(high_val), abs(low_val)) < 10 else ",.2f"
+            low_ax = 0
+            low_ay = 48
+            fig.add_annotation(
+                x=high_idx,
+                y=high_val,
+                text=f"{extrema_name} 最高 {high_val:{val_fmt}}<br>日期 {high_date}",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1.0,
+                arrowwidth=1.8,
+                arrowcolor=high_color,
+                ax=0,
+                ay=-48,
+                font=dict(color=high_color, size=11),
+                bgcolor=_to_rgba(str(palette["paper_bg"]), 0.78),
+                bordercolor=high_color,
+                borderwidth=1,
+            )
+            if low_idx != high_idx:
+                fig.add_annotation(
+                    x=low_idx,
+                    y=low_val,
+                    text=f"{extrema_name} 最低 {low_val:{val_fmt}}<br>日期 {low_date}",
+                    showarrow=True,
+                    arrowhead=2,
+                    arrowsize=1.0,
+                    arrowwidth=1.8,
+                    arrowcolor=low_color,
+                    ax=low_ax,
+                    ay=low_ay,
+                    font=dict(color=low_color, size=11),
+                    bgcolor=_to_rgba(str(palette["paper_bg"]), 0.78),
+                    bordercolor=low_color,
+                    borderwidth=1,
+                )
+
+    legend_name_len = max((len(str(line.get("name", ""))) for line in lines), default=12)
+    legend_right_margin = int(min(420, max(190, legend_name_len * 7 + 40)))
+    fig.update_layout(
+        height=height,
+        margin=dict(l=12, r=legend_right_margin, t=36, b=12),
+        template=str(palette["plot_template"]),
+        paper_bgcolor=str(palette["paper_bg"]),
+        plot_bgcolor=str(palette["plot_bg"]),
+        font=dict(color=str(palette["text_color"])),
+        legend=dict(
+            orientation="v",
+            y=1.0,
+            yanchor="top",
+            x=1.01,
+            xanchor="left",
+            bgcolor=_to_rgba(str(palette["paper_bg"]), 0.65),
+            bordercolor=str(palette["grid"]),
+            borderwidth=1,
+        ),
+    )
+    fig.update_xaxes(gridcolor=str(palette["grid"]))
+    fig.update_yaxes(gridcolor=str(palette["grid"]))
+    _apply_unified_benchmark_hover(fig, palette)
+    _enable_plotly_draw_tools(fig)
+    if not str(watermark_text).strip():
+        fallback_code = str(lines[0].get("hover_code", "")) if lines else ""
+        watermark_text = fallback_code or str(lines[0].get("name", "")) if lines else ""
+    _apply_plotly_watermark(fig, text=str(watermark_text), palette=palette)
+    safe_name = str(chart_key).replace(":", "_").replace("/", "_")
+    _render_plotly_chart(
+        fig,
+        chart_key=f"plotly:{chart_key}",
+        filename=safe_name,
+        scale=2,
+        use_container_width=True,
+        watermark_text=str(watermark_text),
+        palette=palette,
+    )
+
+
+def _render_live_chart(ind: pd.DataFrame, *, watermark_text: str = ""):
+    palette = _ui_palette()
+    if _live_kline_renderer() == "lightweight":
+        overlays: list[dict[str, object]] = []
+        for col, name, color in [
+            ("sma_20", "SMA20", str(palette["sma20"])),
+            ("sma_60", "SMA60", str(palette["sma60"])),
+            ("vwap", "VWAP", str(palette["vwap"])),
+            ("bb_upper", "BB上軌", str(palette["bb_upper"])),
+            ("bb_lower", "BB下軌", str(palette["bb_lower"])),
+        ]:
+            if col in ind.columns:
+                overlays.append({"name": name, "series": pd.to_numeric(ind[col], errors="coerce"), "color": color, "width": 2})
+        ok = render_lightweight_live_chart(
+            ind=ind,
+            palette=palette,
+            key="live_chart",
+            overlays=overlays,
+        )
+        if ok:
+            return
+        st.caption("lightweight-charts 渲染失敗，已自動回退 Plotly。")
+
     price_up_line = str(palette.get("price_up_line", palette["price_up"]))
     price_down_line = str(palette.get("price_down_line", palette["price_down"]))
     price_up_fill = str(palette.get("price_up_fill", _to_rgba(price_up_line, 0.42)))
@@ -4379,15 +4860,26 @@ def _render_live_chart(ind: pd.DataFrame):
         plot_bgcolor=str(palette["plot_bg"]),
         font=dict(color=str(palette["text_color"])),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    _enable_plotly_draw_tools(fig)
+    _apply_plotly_watermark(fig, text=str(watermark_text), palette=palette)
+    _render_plotly_chart(
+        fig,
+        chart_key="plotly:live_chart_main",
+        filename="live_chart",
+        scale=2,
+        use_container_width=True,
+        watermark_text=str(watermark_text),
+        palette=palette,
+    )
 
 
 def _render_indicator_panels(
     ind: pd.DataFrame,
     *,
     chart_key: str,
-    height: int = 420,
+    height: int = 460,
     x_range: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None,
+    watermark_text: str = "",
 ):
     if not isinstance(ind, pd.DataFrame) or ind.empty or "close" not in ind.columns:
         st.caption("指標副圖：資料不足。")
@@ -4416,13 +4908,13 @@ def _render_indicator_panels(
     kd_d_color = str(palette.get("kd_d", palette["signal_sell"]))
     macd_line_color = str(palette.get("macd_line", palette["equity"]))
     macd_signal_color = str(palette.get("macd_signal", palette["buy_hold"]))
-    panel_height = max(280, min(int(height), 520))
+    panel_height = max(320, min(int(height), 580))
     fig = make_subplots(
         rows=4,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.02,
-        row_heights=[0.36, 0.18, 0.18, 0.28],
+        vertical_spacing=0.04,
+        row_heights=[0.34, 0.2, 0.2, 0.26],
     )
 
     fig.add_trace(
@@ -4473,6 +4965,19 @@ def _render_indicator_panels(
             row=1,
             col=1,
         )
+    panel1_cols = [c for c in ["close", "bb_upper", "bb_mid", "bb_lower"] if c in frame.columns]
+    if panel1_cols:
+        panel1_vals = (
+            pd.concat([pd.to_numeric(frame[c], errors="coerce") for c in panel1_cols], axis=1)
+            .stack(future_stack=True)
+            .dropna()
+        )
+        if not panel1_vals.empty:
+            y_min = float(panel1_vals.min())
+            y_max = float(panel1_vals.max())
+            span = y_max - y_min
+            pad = max(span * 0.08, max(abs(y_max), 1.0) * 0.01)
+            fig.update_yaxes(range=[y_min - pad, y_max + pad], row=1, col=1)
 
     if "rsi_14" in frame.columns:
         fig.add_trace(
@@ -4561,15 +5066,29 @@ def _render_indicator_panels(
     fig.update_yaxes(gridcolor=str(palette["grid"]))
     fig.update_layout(
         height=panel_height,
-        margin=dict(l=10, r=10, t=18, b=8),
+        margin=dict(l=10, r=10, t=64, b=8),
         template=str(palette["plot_template"]),
         paper_bgcolor=str(palette["paper_bg"]),
         plot_bgcolor=str(palette["plot_bg"]),
         font=dict(color=str(palette["text_color"])),
         legend_orientation="h",
-        legend_y=1.02,
+        legend_y=1.13,
+        legend_yanchor="bottom",
+        legend_x=0.0,
+        legend_xanchor="left",
+        uirevision=f"indicators:{chart_key}",
     )
-    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    _enable_plotly_draw_tools(fig)
+    _apply_plotly_watermark(fig, text=str(watermark_text), palette=palette)
+    _render_plotly_chart(
+        fig,
+        chart_key=str(chart_key),
+        filename=str(chart_key),
+        scale=2,
+        use_container_width=True,
+        watermark_text=str(watermark_text),
+        palette=palette,
+    )
 
 
 def _render_live_view():
@@ -4710,9 +5229,9 @@ def _render_live_view():
                     before = int(len(bars_intraday))
                     bars_intraday = sqlite_bars
                     if before <= 0:
-                        st.caption("即時走勢：本輪改用本地 SQLite 即時快取。")
+                        st.caption("即時走勢：本輪改用本地即時快取。")
                     else:
-                        st.caption(f"即時走勢：K數偏少，已用本地 SQLite 補齊（{before} -> {len(bars_intraday)}）。")
+                        st.caption(f"即時走勢：K數偏少，已用本地快取補齊（{before} -> {len(bars_intraday)}）。")
         if bars_intraday.empty:
             st.warning("目前無法取得走勢資料。")
             return
@@ -4762,7 +5281,14 @@ def _render_live_view():
         with main_col:
             with st.container(border=True):
                 _render_card_section_header("即時趨勢卡", "主圖使用分K；下方補上日K長期視角。")
-                _render_live_chart(ind)
+                live_watermark_symbol = stock_id if market == "台股(TWSE)" else (us_symbol or quote.symbol or "")
+                live_watermark_market = "TW" if market == "台股(TWSE)" else "US"
+                live_watermark_text = _symbol_watermark_text(
+                    symbol=live_watermark_symbol,
+                    market=live_watermark_market,
+                    service=service,
+                )
+                _render_live_chart(ind, watermark_text=live_watermark_text)
                 live_symbol_key = (stock_id if market == "台股(TWSE)" else (us_symbol or quote.symbol or "US")).strip().upper()
                 live_indicator_toggle_key = f"live_indicator_panel:{market}:{live_symbol_key}"
                 if live_indicator_toggle_key not in st.session_state:
@@ -4783,6 +5309,7 @@ def _render_live_view():
                         ind,
                         chart_key=f"live_indicator_chart:{market}:{live_symbol_key}",
                         height=340 if st.session_state.get(live_indicator_compact_key) else 430,
+                        watermark_text=live_watermark_text,
                     )
                 if not daily_long.empty:
                     st.markdown("#### 長期視角（Daily）")
@@ -5332,7 +5859,7 @@ def _load_cached_backtest_payload(
     restored = _deserialize_backtest_run_payload(cached_replay.payload)
     if restored is None:
         return None, "偵測到快取內容不完整，本次會重新計算回測。"
-    return restored, "已載入同條件的 SQLite 快取回測結果。"
+    return restored, "已載入同條件的本地快取回測結果。"
 
 
 def _render_backtest_view():
@@ -5361,18 +5888,26 @@ def _render_backtest_view():
     symbol_prefill_text = str(st.session_state.get(BT_KEYS.symbol, "")).strip().upper()
     prefill_symbols = _parse_symbols(symbol_prefill_text)
     prefill_target = _infer_market_target_from_symbols(prefill_symbols)
-    if prefill_target in {"TW", "OTC"} and st.session_state.get(BT_KEYS.market) != prefill_target:
+    if prefill_target in {"TW", "OTC", "US"} and st.session_state.get(BT_KEYS.market) != prefill_target:
         st.session_state[BT_KEYS.market] = prefill_target
-    if prefill_target in {"TW", "OTC"}:
+    if prefill_target in {"TW", "OTC", "US"}:
         st.session_state[market_auto_note_key] = prefill_target
     else:
         st.session_state.pop(market_auto_note_key, None)
+    if len(prefill_symbols) > 1 and st.session_state.get(BT_KEYS.mode) != "投組(多標的)":
+        st.session_state[BT_KEYS.mode] = "投組(多標的)"
+    elif len(prefill_symbols) == 1 and st.session_state.get(BT_KEYS.mode) != "單一標的":
+        st.session_state[BT_KEYS.mode] = "單一標的"
 
     def _on_bt_symbol_change():
         current_text = str(st.session_state.get(BT_KEYS.symbol, "")).strip().upper()
         current_symbols = _parse_symbols(current_text)
+        if len(current_symbols) > 1 and st.session_state.get(BT_KEYS.mode) != "投組(多標的)":
+            st.session_state[BT_KEYS.mode] = "投組(多標的)"
+        elif len(current_symbols) == 1 and st.session_state.get(BT_KEYS.mode) != "單一標的":
+            st.session_state[BT_KEYS.mode] = "單一標的"
         inferred = _infer_market_target_from_symbols(current_symbols)
-        if inferred in {"TW", "OTC"}:
+        if inferred in {"TW", "OTC", "US"}:
             st.session_state[market_auto_note_key] = inferred
             if st.session_state.get(BT_KEYS.market) != inferred:
                 st.session_state[BT_KEYS.market] = inferred
@@ -5393,11 +5928,16 @@ def _render_backtest_view():
     )
     is_tw_market = market_selector in {"TW", "OTC"}
     market_code = "TW" if is_tw_market else "US"
+    tw_symbol_label_enabled = market_code == "TW"
     mode = c2.selectbox("模式", ["單一標的", "投組(多標的)"], index=0, key=BT_KEYS.mode)
     default_symbol = "0052" if market_selector == "TW" else ("8069" if market_selector == "OTC" else "TSLA")
+    default_symbol_multi = (
+        "0052,2330" if market_selector == "TW" else ("8069,4123" if market_selector == "OTC" else "AAPL,MSFT,TSLA")
+    )
+    symbol_input_value = symbol_prefill_text or (default_symbol if mode == "單一標的" else default_symbol_multi)
     symbol_text = c3.text_input(
         "代碼（投組用逗號分隔）",
-        value=default_symbol if mode == "單一標的" else ("0052,2330" if market_selector == "TW" else ("8069,4123" if market_selector == "OTC" else "AAPL,MSFT,TSLA")),
+        value=symbol_input_value,
         key=BT_KEYS.symbol,
         on_change=_on_bt_symbol_change,
     ).strip().upper()
@@ -5409,13 +5949,19 @@ def _render_backtest_view():
         key=BT_KEYS.strategy,
     )
     symbols = _parse_symbols(symbol_text)
+    if len(symbols) > 1 and mode != "投組(多標的)":
+        mode = "投組(多標的)"
+    elif len(symbols) == 1 and mode != "單一標的":
+        mode = "單一標的"
     if mode == "單一標的":
         symbols = symbols[:1]
     if not symbols:
         st.warning("請輸入至少一個代碼。")
         return
+    if len(symbols) > 1:
+        st.caption("已偵測多組標的，模式自動切換為投組(多標的)。")
     inferred_target = _infer_market_target_from_symbols(symbols)
-    if inferred_target in {"TW", "OTC"}:
+    if inferred_target in {"TW", "OTC", "US"}:
         st.session_state[market_auto_note_key] = inferred_target
     else:
         st.session_state.pop(market_auto_note_key, None)
@@ -5424,6 +5970,8 @@ def _render_backtest_view():
         st.caption("代碼已自動判斷為台股上櫃（OTC）。")
     elif inferred_note == "TW":
         st.caption("代碼已自動判斷為台股上市（TWSE）。")
+    elif inferred_note == "US":
+        st.caption("代碼已自動判斷為美股（US）。")
 
     auto_cost_key = BT_KEYS.auto_cost
     fee_key = BT_KEYS.fee_rate
@@ -5719,7 +6267,7 @@ def _render_backtest_view():
                     "- `Benchmark Equity`：把基準指數（台股 `^TWII` / 美股 `^GSPC`）縮放到相同初始資產後的曲線。",
                     "- `Benchmark`：可手動選擇；`Auto` 會在主來源失敗時自動 fallback。",
                     "- `Benchmark 比較`：同期間比較策略與基準的總報酬、CAGR、MDD、Sharpe。",
-                    "- `策略 vs 買進持有`：比較策略報酬率與買進持有（單檔或等權投組）的報酬率。",
+                    "- `策略 vs 買進持有`：比較策略報酬率與買進持有（理論無摩擦，單檔或等權投組）的報酬率。",
                     "- `指定區間報酬率`：可輸入任意日期區間（如 2026-01-01 ~ 2026-02-11）比較策略與買進持有。",
                     "- `位置顯示`可切換：",
                     "  - `K棒`：用第幾根K（0 起算）定位。",
@@ -5728,7 +6276,7 @@ def _render_backtest_view():
                     "  - `固定視窗`：可用 `視窗K數` 與 `生長位置（靠右%）` 調整線圖長出來的位置。",
                     "  - `完整區間`：從第一根一路看到目前回放位置。",
                     "- `Benchmark Base Date`：Benchmark 與策略都會從此基準日（實際交易日）開始重設為 1.0 再比較。",
-                    "- `顯示成交連線`：在 Buy/Sell Fill 時刻加上垂直細線，方便對照價格圖與資產圖。",
+                    "- 回放圖預設顯示成交連線與技術指標副圖，方便同時檢視訊號、成交與動能。",
                 ]
             )
         )
@@ -5755,7 +6303,7 @@ def _render_backtest_view():
         invest_start_k=int(invest_start_k) if invest_start_k is not None else -1,
     )
     with st.container(border=True):
-        _render_card_section_header("回測執行", "按下按鈕後才會執行；同條件會優先讀取 SQLite 快取。")
+        _render_card_section_header("回測執行", "按下按鈕後才會執行；同條件會優先讀取本地快取。")
         run_clicked = st.button("執行回測", type="primary", use_container_width=True, key="bt_execute_run")
     if run_clicked:
         st.session_state[BACKTEST_RUN_REQUEST_KEY] = run_key
@@ -5771,7 +6319,7 @@ def _render_backtest_view():
         "App 啟動時自動增量同步（較慢）",
         value=False,
         key=BT_KEYS.auto_sync,
-        help="關閉可先直接使用本地 SQLite；需要時再手動同步。",
+        help="關閉可先直接使用本地資料庫；需要時再手動同步。",
     )
     auto_fill_gaps = st.checkbox(
         "回測前自動補資料缺口（推薦）",
@@ -5798,7 +6346,16 @@ def _render_backtest_view():
         sync_df = pd.DataFrame(sync_rows)
         if plan.issues:
             st.warning("部分同步失敗，請檢查下方同步結果。")
-        st.dataframe(sync_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            _decorate_tw_symbol_columns(
+                sync_df,
+                service=service,
+                enabled=tw_symbol_label_enabled,
+                columns=["symbol"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     if run_requested and auto_fill_gaps and not st.session_state.get(gapfill_key):
         reports, plan = sync_symbols_if_needed(
@@ -5816,7 +6373,16 @@ def _render_backtest_view():
                 st.warning("缺口補齊時有部分同步失敗，請檢查下方結果。")
             else:
                 st.caption("已自動補齊回測區間資料缺口。")
-            st.dataframe(pd.DataFrame(sync_rows), use_container_width=True, hide_index=True)
+            st.dataframe(
+                _decorate_tw_symbol_columns(
+                    pd.DataFrame(sync_rows),
+                    service=service,
+                    enabled=tw_symbol_label_enabled,
+                    columns=["symbol"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
         st.session_state[gapfill_key] = True
 
     if st.button("同步歷史資料", use_container_width=True):
@@ -5835,7 +6401,16 @@ def _render_backtest_view():
             st.error("部分同步失敗，請檢查同步結果。")
         else:
             st.success("同步成功。")
-        st.dataframe(sync_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            _decorate_tw_symbol_columns(
+                sync_df,
+                service=service,
+                enabled=tw_symbol_label_enabled,
+                columns=["symbol"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     if not run_requested:
         st.info("已就緒。按下「執行回測」後才會開始載入資料並執行回測。")
@@ -5856,7 +6431,16 @@ def _render_backtest_view():
     availability_rows = list(prepared_bars.availability_rows)
     perf_timer.mark("bars_prepared")
     if availability_rows:
-        st.dataframe(pd.DataFrame(availability_rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            _decorate_tw_symbol_columns(
+                pd.DataFrame(availability_rows),
+                service=service,
+                enabled=tw_symbol_label_enabled,
+                columns=["symbol"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
     if not bars_by_symbol:
         st.info("資料庫尚無可用資料，請先同步。")
         return
@@ -5869,7 +6453,16 @@ def _render_backtest_view():
     )
     if not invest_df.empty:
         st.markdown("**投入起點檢查**")
-        st.dataframe(invest_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            _decorate_tw_symbol_columns(
+                invest_df,
+                service=service,
+                enabled=tw_symbol_label_enabled,
+                columns=["symbol"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
     base_min_bars = get_strategy_min_bars(strategy)
     min_required_bars = (
         required_walkforward_bars(strategy_name=strategy, train_ratio=float(train_ratio))
@@ -5992,6 +6585,14 @@ def _render_backtest_view():
     run_initial_capital = float(payload.get("initial_capital", initial_capital))
     bars_by_symbol = payload["bars_by_symbol"]
     selected_symbols = list(bars_by_symbol.keys())
+    multi_symbol_compare = len(selected_symbols) > 1
+    tw_name_map: dict[str, str] = {}
+    if tw_symbol_label_enabled and selected_symbols:
+        tw_name_map = service.get_tw_symbol_names(_collect_tw_symbol_codes(list(selected_symbols)))
+
+    def _tw_label(value: object) -> str:
+        return _format_tw_symbol_with_name(value, tw_name_map)
+
     is_portfolio = payload["mode"] == "portfolio"
     strategy_equity = result.equity_curve["equity"].copy()
     buy_hold_equity = build_buy_hold_equity(
@@ -6002,6 +6603,7 @@ def _render_backtest_view():
     benchmark_raw = _load_benchmark_from_store(market_code=market_code, start=sync_start, end=sync_end, choice=benchmark_choice)
     if benchmark_raw.empty:
         benchmark_raw = service.get_benchmark_series(market=market_code, start=sync_start, end=sync_end, benchmark=benchmark_choice)
+        runner_queue_benchmark_writeback(store=store, market_code=market_code, benchmark=benchmark_raw)
     perf_timer.mark("benchmark_loaded")
     benchmark_adj_info: dict[str, object] = {"applied": False}
     if use_total_return_adjustment and not benchmark_raw.empty:
@@ -6029,6 +6631,13 @@ def _render_backtest_view():
             if benchmark_symbol:
                 adjusted.attrs["symbol"] = benchmark_symbol
             benchmark_raw = adjusted
+
+    benchmark_symbol_now = str(benchmark_raw.attrs.get("symbol", "")).strip() if hasattr(benchmark_raw, "attrs") else ""
+    if tw_symbol_label_enabled and benchmark_symbol_now:
+        extra_names = service.get_tw_symbol_names(_collect_tw_symbol_codes([benchmark_symbol_now]))
+        if isinstance(extra_names, dict) and extra_names:
+            tw_name_map.update({str(k).strip().upper(): str(v).strip() for k, v in extra_names.items()})
+
     benchmark_equity = pd.Series(dtype=float)
     if not benchmark_raw.empty and "close" in benchmark_raw.columns:
         bench = benchmark_raw["close"].reindex(strategy_equity.index).ffill()
@@ -6065,7 +6674,7 @@ def _render_backtest_view():
             if not isinstance(symbol_equity, pd.Series) or symbol_equity.empty:
                 component_vs_benchmark_rows.append(
                     {
-                        "代碼": symbol,
+                        "代碼": _tw_label(symbol),
                         "策略總報酬(%)": np.nan,
                         "Benchmark總報酬(%)": np.nan,
                         "相對Benchmark(%)": np.nan,
@@ -6083,7 +6692,7 @@ def _render_backtest_view():
             if len(rel_sym) < 2:
                 component_vs_benchmark_rows.append(
                     {
-                        "代碼": symbol,
+                        "代碼": _tw_label(symbol),
                         "策略總報酬(%)": np.nan,
                         "Benchmark總報酬(%)": np.nan,
                         "相對Benchmark(%)": np.nan,
@@ -6100,7 +6709,7 @@ def _render_backtest_view():
             symbol_verdict = "勝過Benchmark" if symbol_diff_pct > 0 else ("輸給Benchmark" if symbol_diff_pct < 0 else "與Benchmark持平")
             component_vs_benchmark_rows.append(
                 {
-                    "代碼": symbol,
+                    "代碼": _tw_label(symbol),
                     "策略總報酬(%)": round(symbol_ret * 100.0, 2),
                     "Benchmark總報酬(%)": round(symbol_bench_ret * 100.0, 2),
                     "相對Benchmark(%)": round(symbol_diff_pct, 2),
@@ -6108,50 +6717,51 @@ def _render_backtest_view():
                 }
             )
 
-    with st.container(border=True):
-        _render_card_section_header("績效卡", "總報酬、CAGR、MDD 與相對大盤結果。")
-        if is_portfolio:
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("投組總報酬", f"{result.metrics.total_return * 100:.2f}%")
-            k2.metric("Benchmark總報酬", "—" if benchmark_ret is None else f"{benchmark_ret * 100:.2f}%")
-            k3.metric("超額報酬", "—" if diff_pct is None else f"{diff_pct:+.2f}%")
-            winner_text = "—" if component_comparable_count <= 0 else f"{component_winner_count}/{component_comparable_count}"
-            k4.metric("勝過Benchmark檔數", winner_text)
+    if not multi_symbol_compare:
+        with st.container(border=True):
+            _render_card_section_header("績效卡", "總報酬、CAGR、MDD 與相對大盤結果。")
+            if is_portfolio:
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("投組總報酬", f"{result.metrics.total_return * 100:.2f}%")
+                k2.metric("Benchmark總報酬", "—" if benchmark_ret is None else f"{benchmark_ret * 100:.2f}%")
+                k3.metric("超額報酬", "—" if diff_pct is None else f"{diff_pct:+.2f}%")
+                winner_text = "—" if component_comparable_count <= 0 else f"{component_winner_count}/{component_comparable_count}"
+                k4.metric("勝過Benchmark檔數", winner_text)
 
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("投組CAGR", f"{result.metrics.cagr * 100:.2f}%")
-            s2.metric("投組MDD", f"{result.metrics.max_drawdown * 100:.2f}%")
-            s3.metric("投組Sharpe", f"{result.metrics.sharpe:.2f}")
-            s4.metric("交易次數", str(int(result.metrics.trades)))
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("投組CAGR", f"{result.metrics.cagr * 100:.2f}%")
+                s2.metric("投組MDD", f"{result.metrics.max_drawdown * 100:.2f}%")
+                s3.metric("投組Sharpe", f"{result.metrics.sharpe:.2f}")
+                s4.metric("交易次數", str(int(result.metrics.trades)))
 
-            if diff_pct is not None and strategy_ret is not None and benchmark_ret is not None:
-                st.caption(
-                    "計算基準：同一重疊區間的 Total Return；"
-                    f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%（{verdict}）"
-                )
-            elif benchmark_choice != "off" and benchmark_equity.empty:
-                st.caption("目前沒有可用的 Benchmark 資料，無法計算超額報酬。")
-            elif benchmark_choice != "off":
-                st.caption("Benchmark 可用資料不足，暫時無法判斷投組是否勝過大盤。")
-        else:
-            metric_rows = _metrics_to_rows(result.metrics)
-            metric_cols = st.columns(4)
-            for idx, (label, val) in enumerate(metric_rows):
-                metric_cols[idx % 4].metric(label, val)
-            if diff_pct is not None and strategy_ret is not None and benchmark_ret is not None:
-                r1, r2 = st.columns(2)
-                r1.metric("相對大盤結果", verdict)
-                r2.metric("贏/輸大盤（百分比）", f"{diff_pct:+.2f}%")
-                st.caption(
-                    "計算基準：同一重疊區間的 Total Return；"
-                    f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%"
-                )
-            elif benchmark_choice != "off" and benchmark_equity.empty:
-                st.caption("目前沒有可用的 Benchmark 資料，無法計算是否贏過大盤。")
-            elif benchmark_choice != "off":
-                st.caption("Benchmark 可用資料不足，暫時無法判斷是否贏過大盤。")
+                if diff_pct is not None and strategy_ret is not None and benchmark_ret is not None:
+                    st.caption(
+                        "計算基準：同一重疊區間的 Total Return；"
+                        f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%（{verdict}）"
+                    )
+                elif benchmark_choice != "off" and benchmark_equity.empty:
+                    st.caption("目前沒有可用的 Benchmark 資料，無法計算超額報酬。")
+                elif benchmark_choice != "off":
+                    st.caption("Benchmark 可用資料不足，暫時無法判斷投組是否勝過大盤。")
+            else:
+                metric_rows = _metrics_to_rows(result.metrics)
+                metric_cols = st.columns(4)
+                for idx, (label, val) in enumerate(metric_rows):
+                    metric_cols[idx % 4].metric(label, val)
+                if diff_pct is not None and strategy_ret is not None and benchmark_ret is not None:
+                    r1, r2 = st.columns(2)
+                    r1.metric("相對大盤結果", verdict)
+                    r2.metric("贏/輸大盤（百分比）", f"{diff_pct:+.2f}%")
+                    st.caption(
+                        "計算基準：同一重疊區間的 Total Return；"
+                        f"Strategy={strategy_ret * 100:.2f}% vs Benchmark={benchmark_ret * 100:.2f}%"
+                    )
+                elif benchmark_choice != "off" and benchmark_equity.empty:
+                    st.caption("目前沒有可用的 Benchmark 資料，無法計算是否贏過大盤。")
+                elif benchmark_choice != "off":
+                    st.caption("Benchmark 可用資料不足，暫時無法判斷是否贏過大盤。")
 
-    if is_portfolio:
+    if is_portfolio and not multi_symbol_compare:
         with st.container(border=True):
             _render_card_section_header("投組分項相對Benchmark", "多標的時優先看這張：每檔相對基準的超額報酬。")
             if component_vs_benchmark_rows:
@@ -6164,7 +6774,7 @@ def _render_backtest_view():
             else:
                 st.caption("目前沒有可顯示的分項相對 Benchmark 資料。")
 
-    if payload.get("walk_forward"):
+    if payload.get("walk_forward") and not multi_symbol_compare:
         with st.container(border=True):
             _render_card_section_header("Walk-Forward 卡", "Train/Test 分段結果與最佳參數。")
             split_date = payload["split_date"]
@@ -6183,7 +6793,7 @@ def _render_backtest_view():
             if best_params:
                 st.markdown("**最佳參數**")
                 if isinstance(best_params, dict) and all(isinstance(v, dict) for v in best_params.values()):
-                    rows = [{"symbol": s, "params": str(p)} for s, p in best_params.items()]
+                    rows = [{"symbol": _tw_label(s), "params": str(p)} for s, p in best_params.items()]
                     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
                 else:
                     st.code(str(best_params))
@@ -6193,9 +6803,6 @@ def _render_backtest_view():
     idx_key = f"play_idx:{run_key}"
     display_mode_key = f"play_display_mode:{run_key}"
     marker_mode_key = f"play_marker_mode:{run_key}"
-    fill_link_key = f"play_fill_link:{run_key}"
-    indicator_panel_key = f"play_indicator_panel:{run_key}"
-    indicator_compact_key = f"play_indicator_compact:{run_key}"
     viewport_mode_key = f"play_viewport_mode:{run_key}"
     viewport_window_key = f"play_viewport_window:{run_key}"
     viewport_anchor_key = f"play_viewport_anchor:{run_key}"
@@ -6207,20 +6814,26 @@ def _render_backtest_view():
             play_key: False,
             display_mode_key: "K棒",
             marker_mode_key: "同時顯示（訊號+成交）",
-            fill_link_key: True,
-            indicator_panel_key: True,
-            indicator_compact_key: True,
             viewport_mode_key: "完整區間",
             viewport_anchor_key: 70,
             focus_key: selected_symbols[0],
         },
     )
-    focus_symbol = st.selectbox("回放焦點標的", options=selected_symbols, key=focus_key)
+    if multi_symbol_compare:
+        focus_symbol = str(selected_symbols[0])
+    else:
+        focus_symbol = st.selectbox(
+            "回放焦點標的",
+            options=selected_symbols,
+            key=focus_key,
+            format_func=lambda sym: _tw_label(sym),
+        )
 
     focus_bars = bars_by_symbol[focus_symbol].sort_index().dropna(subset=["open", "high", "low", "close"], how="any")
     if focus_bars.empty:
-        st.warning(f"{focus_symbol} 沒有可回放的有效K線資料。")
-        return
+        if not multi_symbol_compare:
+            st.warning(f"{focus_symbol} 沒有可回放的有效K線資料。")
+            return
     focus_ind = add_indicators(focus_bars)
     focus_result = result.component_results[focus_symbol] if is_portfolio else result
     max_play_idx = len(focus_bars) - 1
@@ -6241,66 +6854,56 @@ def _render_backtest_view():
     date_options = [pd.Timestamp(ts).strftime("%Y-%m-%d") for ts in focus_bars.index]
     date_to_idx = {d: i for i, d in enumerate(date_options)}
 
-    with st.container(border=True):
-        _render_card_section_header("回放控制卡", "播放速度、標記模式與視窗控制。")
-        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 2, 2, 3])
-        if c1.button("Play", use_container_width=True):
-            st.session_state[play_key] = True
-        if c2.button("Pause", use_container_width=True):
-            st.session_state[play_key] = False
-        if c3.button("Reset", use_container_width=True):
-            st.session_state[play_key] = False
-            st.session_state[idx_key] = replay_reset_idx
-        c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
-        c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
-        c6.selectbox(
-            "買賣點顯示",
-            options=["不顯示", "訊號點（價格圖）", "實際成交點（資產圖）", "同時顯示（訊號+成交）"],
-            key=marker_mode_key,
-        )
-        q1, q2, q3 = st.columns([2, 2, 2])
-        q1.selectbox("回放視窗", options=["固定視窗", "完整區間"], key=viewport_mode_key)
-        q2.slider(
-            "視窗K數",
-            min_value=window_min,
-            max_value=window_max,
-            step=5,
-            key=viewport_window_key,
-            disabled=st.session_state[viewport_mode_key] != "固定視窗",
-        )
-        q3.slider(
-            "生長位置（靠右%）",
-            min_value=50,
-            max_value=90,
-            step=5,
-            key=viewport_anchor_key,
-            disabled=st.session_state[viewport_mode_key] != "固定視窗",
-            help="數值越大，最新K越靠右；例如 70 代表最新K大約落在畫面 70% 的位置。",
-        )
-        st.checkbox(
-            "顯示成交連線（價格圖↔資產圖）",
-            key=fill_link_key,
-            help="在 Buy/Sell Fill 的時間點畫垂直細線，幫助對照價格與資產變化。",
-        )
-        st.checkbox(
-            "顯示技術指標副圖（RSI / MACD / 布林 / KD）",
-            key=indicator_panel_key,
-        )
-        st.checkbox(
-            "緊湊指標副圖（筆電建議）",
-            key=indicator_compact_key,
-        )
-        st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
-        st.caption(
-            f"回放預設位置：第 {default_play_idx} 根K（完整區間末端）。"
-            f"若要重播動畫可按 Reset 回到第 {replay_reset_idx} 根。"
-        )
+    if not multi_symbol_compare:
+        with st.container(border=True):
+            _render_card_section_header("回放控制卡", "播放速度、標記模式與視窗控制。")
+            c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 2, 2, 3])
+            if c1.button("Play", use_container_width=True):
+                st.session_state[play_key] = True
+            if c2.button("Pause", use_container_width=True):
+                st.session_state[play_key] = False
+            if c3.button("Reset", use_container_width=True):
+                st.session_state[play_key] = False
+                st.session_state[idx_key] = replay_reset_idx
+            c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
+            c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
+            c6.selectbox(
+                "買賣點顯示",
+                options=["不顯示", "訊號點（價格圖）", "實際成交點（資產圖）", "同時顯示（訊號+成交）"],
+                key=marker_mode_key,
+            )
+            q1, q2, q3 = st.columns([2, 2, 2])
+            q1.selectbox("回放視窗", options=["固定視窗", "完整區間"], key=viewport_mode_key)
+            q2.slider(
+                "視窗K數",
+                min_value=window_min,
+                max_value=window_max,
+                step=5,
+                key=viewport_window_key,
+                disabled=st.session_state[viewport_mode_key] != "固定視窗",
+            )
+            q3.slider(
+                "生長位置（靠右%）",
+                min_value=50,
+                max_value=90,
+                step=5,
+                key=viewport_anchor_key,
+                disabled=st.session_state[viewport_mode_key] != "固定視窗",
+                help="數值越大，最新K越靠右；例如 70 代表最新K大約落在畫面 70% 的位置。",
+            )
+            st.caption("成交連線與技術指標副圖預設固定顯示。")
+            st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
+            st.caption(
+                f"回放預設位置：第 {default_play_idx} 根K（完整區間末端）。"
+                f"若要重播動畫可按 Reset 回到第 {replay_reset_idx} 根。"
+            )
 
     speed_steps = {"0.5x": 1, "1x": 2, "2x": 4, "5x": 8, "10x": 16}
 
     @st.fragment(run_every="0.5s")
     def playback():
         palette = _ui_palette()
+        playback_symbol_label = _tw_label(focus_symbol) or str(focus_symbol)
         price_up_line = str(palette.get("price_up_line", palette["price_up"]))
         price_down_line = str(palette.get("price_down_line", palette["price_down"]))
         price_up_fill = str(palette.get("price_up_fill", _to_rgba(price_up_line, 0.42)))
@@ -6340,6 +6943,46 @@ def _render_backtest_view():
         equity_now = result.equity_curve.iloc[: min(idx + 1, len(result.equity_curve))]
         benchmark_now = benchmark_equity.reindex(equity_now.index).ffill() if not benchmark_equity.empty else pd.Series(dtype=float)
         panel_x_range: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
+        if _replay_kline_renderer() == "lightweight":
+            strategy_series = equity_now["equity"] if "equity" in equity_now.columns else pd.Series(dtype=float)
+            if st.session_state[viewport_mode_key] == "固定視窗":
+                view_window = int(st.session_state[viewport_window_key])
+                anchor_ratio = float(st.session_state[viewport_anchor_key]) / 100.0
+                left_idx = idx - int(round(view_window * anchor_ratio))
+                right_idx = left_idx + view_window - 1
+                if left_idx < 0:
+                    right_idx -= left_idx
+                    left_idx = 0
+                if right_idx > max_play_idx:
+                    left_idx -= right_idx - max_play_idx
+                    right_idx = max_play_idx
+                    left_idx = max(0, left_idx)
+                panel_x_range = (pd.Timestamp(focus_bars.index[left_idx]), pd.Timestamp(focus_bars.index[right_idx]))
+            elif len(bars_now.index) >= 2:
+                panel_x_range = (pd.Timestamp(bars_now.index[0]), pd.Timestamp(bars_now.index[-1]))
+
+            ok = render_lightweight_kline_equity_chart(
+                bars=bars_now,
+                strategy=strategy_series,
+                benchmark=benchmark_now,
+                palette=palette,
+                key=f"playback_lw:{run_key}",
+            )
+            if ok:
+                _render_indicator_panels(
+                    ind_now,
+                    chart_key=f"play_indicator_chart:{run_key}:{focus_symbol}",
+                    height=440,
+                    x_range=panel_x_range,
+                    watermark_text=playback_symbol_label,
+                )
+                st.caption(
+                    "lightweight 模式目前專注 K線+Equity+Benchmark；"
+                    "訊號點/成交點僅在 Plotly 模式顯示。"
+                )
+                st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
+                return
+            st.caption("lightweight-charts 渲染失敗，已自動回退 Plotly。")
 
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.018, row_heights=[0.68, 0.32])
         fig.add_trace(
@@ -6379,6 +7022,55 @@ def _render_backtest_view():
                     line=_benchmark_line_style(palette, width=2.0),
                 ),
                 row=2,
+                col=1,
+            )
+
+        high_series = pd.to_numeric(bars_now.get("high", pd.Series(dtype=float)), errors="coerce")
+        low_series = pd.to_numeric(bars_now.get("low", pd.Series(dtype=float)), errors="coerce")
+        high_marker_color = str(palette.get("signal_sell", "#D6465A"))
+        low_marker_color = str(palette.get("signal_buy", "#2F9E6B"))
+        if (not multi_symbol_compare) and high_series.notna().any():
+            highest_idx = high_series.idxmax()
+            highest_val = float(high_series.loc[highest_idx])
+            highest_date = pd.Timestamp(highest_idx).strftime("%Y-%m-%d")
+            fig.add_annotation(
+                x=highest_idx,
+                y=highest_val,
+                text=f"最高價 {_format_price(highest_val)}<br>日期 {highest_date}",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1.0,
+                arrowwidth=1.8,
+                arrowcolor=high_marker_color,
+                ax=0,
+                ay=-42,
+                font=dict(color=high_marker_color, size=11),
+                bgcolor=_to_rgba(str(palette["paper_bg"]), 0.78),
+                bordercolor=high_marker_color,
+                borderwidth=1,
+                row=1,
+                col=1,
+            )
+        if (not multi_symbol_compare) and low_series.notna().any():
+            lowest_idx = low_series.idxmin()
+            lowest_val = float(low_series.loc[lowest_idx])
+            lowest_date = pd.Timestamp(lowest_idx).strftime("%Y-%m-%d")
+            fig.add_annotation(
+                x=lowest_idx,
+                y=lowest_val,
+                text=f"最低價 {_format_price(lowest_val)}<br>日期 {lowest_date}",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1.0,
+                arrowwidth=1.8,
+                arrowcolor=low_marker_color,
+                ax=0,
+                ay=42,
+                font=dict(color=low_marker_color, size=11),
+                bgcolor=_to_rgba(str(palette["paper_bg"]), 0.78),
+                bordercolor=low_marker_color,
+                borderwidth=1,
+                row=1,
                 col=1,
             )
 
@@ -6470,7 +7162,7 @@ def _render_backtest_view():
                                 col=1,
                             )
                             first_line = False
-                if st.session_state[fill_link_key] and fill_times:
+                if fill_times:
                     for fill_dt in sorted(set(fill_times)):
                         fig.add_shape(
                             type="line",
@@ -6532,7 +7224,7 @@ def _render_backtest_view():
         fig.update_layout(
             height=560,
             xaxis_rangeslider_visible=False,
-            margin=dict(l=10, r=10, t=30, b=10),
+            margin=dict(l=10, r=10, t=68, b=10),
             uirevision=f"playback:{run_key}",
             transition=dict(duration=0),
             template=str(palette["plot_template"]),
@@ -6540,20 +7232,40 @@ def _render_backtest_view():
             plot_bgcolor=str(palette["plot_bg"]),
             font=dict(color=str(palette["text_color"])),
         )
+        _enable_plotly_draw_tools(fig)
+        _apply_plotly_watermark(fig, text=playback_symbol_label, palette=palette)
         _apply_unified_benchmark_hover(fig, palette)
-        st.plotly_chart(fig, use_container_width=True, key=f"playback_chart:{run_key}")
-        if st.session_state.get(indicator_panel_key):
-            _render_indicator_panels(
-                ind_now,
-                chart_key=f"play_indicator_chart:{run_key}:{focus_symbol}",
-                height=300 if st.session_state.get(indicator_compact_key) else 380,
-                x_range=panel_x_range,
-            )
+        playback_file = str(run_key).replace(":", "_").replace("/", "_")
+        _render_plotly_chart(
+            fig,
+            chart_key=f"playback_chart:{run_key}",
+            filename=f"playback_{playback_file}",
+            scale=2,
+            use_container_width=True,
+            watermark_text=str(playback_symbol_label),
+            palette=palette,
+        )
+        _render_indicator_panels(
+            ind_now,
+            chart_key=f"play_indicator_chart:{run_key}:{focus_symbol}",
+            height=440,
+            x_range=panel_x_range,
+            watermark_text=playback_symbol_label,
+        )
         st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
 
-    with st.container(border=True):
-        _render_card_section_header("回放圖卡", "K線 + Equity + Benchmark 動態回放。")
-        playback()
+    if not multi_symbol_compare:
+        with st.container(border=True):
+            _render_card_section_header("回放圖卡", "K線 + Equity + Benchmark 動態回放。")
+            playback()
+        replay_symbol_label = _tw_label(focus_symbol)
+        benchmark_between_label = ""
+        if hasattr(benchmark_raw, "attrs"):
+            benchmark_between_label = _tw_label(str(benchmark_raw.attrs.get("symbol", "")).strip())
+        if replay_symbol_label and benchmark_between_label:
+            st.caption(f"回放標的：{replay_symbol_label} | Benchmark：{benchmark_between_label}")
+        elif replay_symbol_label:
+            st.caption(f"回放標的：{replay_symbol_label}")
 
     model_params = payload.get("best_params") if payload.get("walk_forward") else strategy_params
     if isinstance(model_params, dict):
@@ -6568,14 +7280,17 @@ def _render_backtest_view():
     if payload.get("walk_forward"):
         strategy_model_desc = f"{strategy_model_desc} [walk-forward]"
 
-    _render_card_section_header("Benchmark 對照卡", "策略曲線、基準曲線與買進持有同圖比較。")
+    _render_card_section_header("Benchmark 對照卡", "策略曲線、基準曲線與買進持有（理論無摩擦）同圖比較。")
     benchmark = benchmark_raw
     benchmark_symbol = str(benchmark.attrs.get("symbol", "")).strip() if hasattr(benchmark, "attrs") else ""
     benchmark_source = str(benchmark.attrs.get("source", "")).strip() if hasattr(benchmark, "attrs") else ""
+    hide_strategy_line = str(strategy).strip().lower() == "buy_hold"
+    benchmark_line_label = f"Benchmark ({_tw_label(benchmark_symbol)})" if benchmark_symbol else "Benchmark Equity"
+    single_symbol_label = _tw_label(selected_symbols[0]) if selected_symbols else ""
     buy_hold_label = (
-        "Buy-and-Hold Equity (Equal-Weight Portfolio)"
+        "Buy and Hold (EW Portfolio)"
         if is_portfolio
-        else f"Buy-and-Hold Equity ({selected_symbols[0]})"
+        else f"Buy and Hold ({single_symbol_label or selected_symbols[0]})"
     )
     benchmark_as_of = result.equity_curve.index.max() if not result.equity_curve.empty else ""
     if not benchmark.empty and len(benchmark.index):
@@ -6595,7 +7310,7 @@ def _render_backtest_view():
     )
     _render_data_health_caption("Benchmark 資料健康度", benchmark_health)
     if benchmark_choice != "off" and benchmark_symbol:
-        st.caption(f"Benchmark 來源：{benchmark_symbol}（{benchmark_source or 'unknown'}）")
+        st.caption(f"Benchmark 來源：{_tw_label(benchmark_symbol)}（{benchmark_source or 'unknown'}）")
     if bool(benchmark_adj_info.get("applied")):
         st.caption(f"Benchmark 已套用還原權息（Adj Close 覆蓋率 {benchmark_adj_info.get('coverage_pct', 0)}%）。")
     if benchmark_split_events:
@@ -6633,6 +7348,7 @@ def _render_backtest_view():
                 options=selected_symbols,
                 key=extra_symbol_lines_key,
                 help="在 Benchmark 圖上額外顯示各標的的買進持有線。",
+                format_func=lambda sym: _tw_label(sym),
             )
             if is_portfolio
             else []
@@ -6701,80 +7417,86 @@ def _render_backtest_view():
 
             if not norm.empty:
                 palette = _ui_palette()
-                fig_cmp = go.Figure()
-                fig_cmp.add_trace(
-                    go.Scatter(
-                        x=norm.index,
-                        y=norm["strategy"],
-                        mode="lines",
-                        name="Strategy Equity",
-                        line=dict(color=str(palette["equity"]), width=2.2),
-                        hovertemplate=_hovertemplate_with_code("STRATEGY", value_label="Normalized", y_format=".4f"),
+                bench_style = _benchmark_line_style(palette, width=2.0)
+                chart_lines: list[dict[str, Any]] = []
+                if not hide_strategy_line:
+                    chart_lines.append(
+                        {
+                            "name": "Strategy Equity",
+                            "series": norm["strategy"],
+                            "color": str(palette["equity"]),
+                            "width": 2.2,
+                            "dash": "solid",
+                            "hover_code": "STRATEGY",
+                            "value_label": "Normalized",
+                            "y_format": ".4f",
+                        }
                     )
-                )
-                fig_cmp.add_trace(
-                    go.Scatter(
-                        x=norm.index,
-                        y=norm["benchmark"],
-                        mode="lines",
-                        name="Benchmark Equity",
-                        line=_benchmark_line_style(palette, width=2.0),
-                        hovertemplate=_hovertemplate_with_code(
-                            benchmark_symbol or "BENCHMARK",
-                            value_label="Normalized",
-                            y_format=".4f",
-                        ),
-                    )
+                chart_lines.append(
+                    {
+                        "name": benchmark_line_label,
+                        "series": norm["benchmark"],
+                        "color": str(bench_style["color"]),
+                        "width": float(bench_style["width"]),
+                        "dash": str(bench_style["dash"]),
+                        "hover_code": benchmark_symbol or "BENCHMARK",
+                        "value_label": "Normalized",
+                        "y_format": ".4f",
+                    }
                 )
                 if "buy_hold" in norm.columns and norm["buy_hold"].notna().any():
                     buy_hold_code = "EW_POOL" if is_portfolio else selected_symbols[0]
-                    fig_cmp.add_trace(
-                        go.Scatter(
-                            x=norm.index,
-                            y=norm["buy_hold"],
-                            mode="lines",
-                            name=buy_hold_label,
-                            line=dict(color=str(palette["buy_hold"]), width=1.9),
-                            hovertemplate=_hovertemplate_with_code(
-                                buy_hold_code,
-                                value_label="Normalized",
-                                y_format=".4f",
-                            ),
-                        )
+                    chart_lines.append(
+                        {
+                            "name": buy_hold_label,
+                            "series": norm["buy_hold"],
+                            "color": str(palette["buy_hold"]),
+                            "width": 1.9,
+                            "dash": "solid",
+                            "hover_code": buy_hold_code,
+                            "value_label": "Normalized",
+                            "y_format": ".4f",
+                        }
                     )
                 asset_palette = list(palette["asset_palette"])
                 asset_color_idx = 0
                 for col in [c for c in norm.columns if c.startswith("asset:")]:
                     sym = col.split(":", 1)[1]
+                    sym_label = _tw_label(sym)
                     line_color = asset_palette[asset_color_idx % len(asset_palette)]
                     asset_color_idx += 1
-                    fig_cmp.add_trace(
-                        go.Scatter(
-                            x=norm.index,
-                            y=norm[col],
-                            mode="lines",
-                            name=f"Buy-and-Hold Equity ({sym})",
-                            line=dict(color=line_color, width=1.6),
-                            hovertemplate=_hovertemplate_with_code(sym, value_label="Normalized", y_format=".4f"),
-                        )
+                    chart_lines.append(
+                        {
+                            "name": f"Buy and Hold ({sym_label})",
+                            "series": norm[col],
+                            "color": str(line_color),
+                            "width": 1.6,
+                            "dash": "solid",
+                            "hover_code": sym_label,
+                            "value_label": "Normalized",
+                            "y_format": ".4f",
+                        }
                     )
-                fig_cmp.update_xaxes(gridcolor=str(palette["grid"]))
-                fig_cmp.update_yaxes(gridcolor=str(palette["grid"]))
-                fig_cmp.update_layout(
-                    height=360,
-                    margin=dict(l=10, r=10, t=25, b=10),
-                    template=str(palette["plot_template"]),
-                    paper_bgcolor=str(palette["paper_bg"]),
-                    plot_bgcolor=str(palette["plot_bg"]),
-                    font=dict(color=str(palette["text_color"])),
+                extrema_target = "Strategy Equity"
+                if hide_strategy_line:
+                    extrema_target = buy_hold_label if any(str(line.get("name")) == buy_hold_label for line in chart_lines) else benchmark_line_label
+                benchmark_watermark_text = (
+                    _tw_label(selected_symbols[0]) if (not is_portfolio and selected_symbols) else "EW Portfolio"
                 )
-                _apply_unified_benchmark_hover(fig_cmp, palette)
-                st.plotly_chart(fig_cmp, use_container_width=True)
+                _render_benchmark_lines_chart(
+                    lines=chart_lines,
+                    height=360,
+                    chart_key=f"backtest_benchmark:{run_key}",
+                    annotate_extrema=not multi_symbol_compare,
+                    extrema_series_name=extrema_target,
+                    watermark_text=benchmark_watermark_text,
+                )
 
-                strategy_perf = runner_series_metrics(comp_view["strategy"])
                 bench_perf = runner_series_metrics(comp_view["benchmark"])
-                cmp_rows = pd.DataFrame(
-                    [
+                cmp_rows_data: list[dict[str, object]] = []
+                if not hide_strategy_line:
+                    strategy_perf = runner_series_metrics(comp_view["strategy"])
+                    cmp_rows_data.append(
                         {
                             "Series": "Strategy Equity",
                             "Definition": "Backtest equity after fees/tax/slippage",
@@ -6782,22 +7504,24 @@ def _render_backtest_view():
                             "CAGR %": round(strategy_perf["cagr"] * 100.0, 2),
                             "MDD %": round(strategy_perf["max_drawdown"] * 100.0, 2),
                             "Sharpe": round(strategy_perf["sharpe"], 2),
-                        },
-                        {
-                            "Series": "Benchmark Equity",
-                            "Definition": f"Buy-and-hold reference ({benchmark_symbol or 'benchmark'})",
-                            "Total Return %": round(bench_perf["total_return"] * 100.0, 2),
-                            "CAGR %": round(bench_perf["cagr"] * 100.0, 2),
-                            "MDD %": round(bench_perf["max_drawdown"] * 100.0, 2),
-                            "Sharpe": round(bench_perf["sharpe"], 2),
-                        },
-                    ]
+                        }
+                    )
+                cmp_rows_data.append(
+                    {
+                        "Series": benchmark_line_label,
+                        "Definition": f"Buy-and-hold reference ({benchmark_symbol or 'benchmark'})",
+                        "Total Return %": round(bench_perf["total_return"] * 100.0, 2),
+                        "CAGR %": round(bench_perf["cagr"] * 100.0, 2),
+                        "MDD %": round(bench_perf["max_drawdown"] * 100.0, 2),
+                        "Sharpe": round(bench_perf["sharpe"], 2),
+                    }
                 )
+                cmp_rows = pd.DataFrame(cmp_rows_data)
                 if "buy_hold" in comp_view.columns and comp_view["buy_hold"].notna().any():
                     hold_perf = runner_series_metrics(comp_view["buy_hold"])
                     cmp_rows.loc[len(cmp_rows)] = {
                         "Series": buy_hold_label,
-                        "Definition": "Buy-and-hold on backtest symbols",
+                        "Definition": "Buy-and-hold (frictionless close-price baseline on backtest symbols)",
                         "Total Return %": round(hold_perf["total_return"] * 100.0, 2),
                         "CAGR %": round(hold_perf["cagr"] * 100.0, 2),
                         "MDD %": round(hold_perf["max_drawdown"] * 100.0, 2),
@@ -6805,28 +7529,108 @@ def _render_backtest_view():
                     }
                 for col in [c for c in comp_view.columns if c.startswith("asset:")]:
                     sym = col.split(":", 1)[1]
+                    sym_label = _tw_label(sym)
                     sym_series = pd.to_numeric(comp_view[col], errors="coerce").dropna()
                     if len(sym_series) < 2:
                         continue
                     sym_perf = runner_series_metrics(sym_series)
                     cmp_rows.loc[len(cmp_rows)] = {
-                        "Series": f"Buy-and-Hold Equity ({sym})",
-                        "Definition": f"Buy-and-hold on symbol {sym}",
+                        "Series": f"Buy and Hold ({sym_label})",
+                        "Definition": f"Buy-and-hold frictionless close-price baseline on symbol {sym_label}",
                         "Total Return %": round(sym_perf["total_return"] * 100.0, 2),
                         "CAGR %": round(sym_perf["cagr"] * 100.0, 2),
                         "MDD %": round(sym_perf["max_drawdown"] * 100.0, 2),
                         "Sharpe": round(sym_perf["sharpe"], 2),
                     }
-                st.dataframe(cmp_rows, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    _decorate_tw_symbol_columns(
+                        cmp_rows,
+                        service=service,
+                        enabled=tw_symbol_label_enabled,
+                        columns=["Series", "Definition"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
-    _render_card_section_header("策略 vs 買進持有卡", "看整段與指定區間的報酬率差異。")
-    hold_label = "買進持有（等權投組）" if is_portfolio else f"買進持有（{selected_symbols[0]}）"
-    st.caption("買進持有以回測標的收盤價計算；若為投組則採等權配置。")
+    def _render_component_and_trade_cards() -> None:
+        if is_portfolio:
+            _render_card_section_header("投組分項策略績效卡", "此卡顯示各檔策略本身績效（不含相對Benchmark比較）。")
+            rows = []
+            for symbol, comp in result.component_results.items():
+                rows.append(
+                    {
+                        "symbol": _tw_label(symbol),
+                        "total_return%": round(comp.metrics.total_return * 100.0, 2),
+                        "cagr%": round(comp.metrics.cagr * 100.0, 2),
+                        "mdd%": round(comp.metrics.max_drawdown * 100.0, 2),
+                        "sharpe": round(comp.metrics.sharpe, 2),
+                        "trades": comp.metrics.trades,
+                    }
+                )
+            _render_crisp_table(pd.DataFrame(rows), max_height=360)
+
+        _render_card_section_header("交易明細卡")
+        if is_portfolio:
+            if result.trades is not None and not result.trades.empty:
+                trades_df = result.trades.copy()
+                trades_df = _decorate_tw_symbol_columns(
+                    trades_df,
+                    service=service,
+                    enabled=tw_symbol_label_enabled,
+                    columns=["symbol"],
+                )
+                trades_df["entry_date"] = pd.to_datetime(trades_df["entry_date"]).dt.date.astype(str)
+                trades_df["exit_date"] = pd.to_datetime(trades_df["exit_date"]).dt.date.astype(str)
+                trades_df["pnl_pct%"] = (trades_df["pnl_pct"] * 100.0).round(2)
+                _render_crisp_table(trades_df.drop(columns=["pnl_pct"]), max_height=460)
+            else:
+                st.caption("沒有交易紀錄。")
+        else:
+            if result.trades:
+                trades_df = pd.DataFrame(
+                    [
+                        {
+                            "entry_date": t.entry_date.date().isoformat(),
+                            "entry_price": round(t.entry_price, 4),
+                            "exit_date": t.exit_date.date().isoformat(),
+                            "exit_price": round(t.exit_price, 4),
+                            "qty": round(t.qty, 4),
+                            "pnl": round(t.pnl, 2),
+                            "pnl_pct%": round(t.pnl_pct * 100.0, 2),
+                            "fee": round(t.fee, 2),
+                            "tax": round(t.tax, 2),
+                            "slippage": round(t.slippage, 4),
+                        }
+                        for t in result.trades
+                    ]
+                )
+                _render_crisp_table(trades_df, max_height=460)
+            else:
+                st.caption("沒有交易紀錄。")
+
+    if multi_symbol_compare:
+        _render_component_and_trade_cards()
+        perf_timer.mark("render_complete")
+        if perf_timer.enabled:
+            st.caption(perf_timer.summary_text(prefix="perf/backtest"))
+        return
+
+    _render_card_section_header("策略 vs 買進持有卡", "看整段與指定區間的報酬率差異（買進持有為理論無摩擦基準）。")
+    is_buy_hold_strategy = str(strategy).strip().lower() == "buy_hold"
+    strategy_label = "Buy and Hold（策略）" if is_buy_hold_strategy else "策略"
+    hold_label = "買進持有（理論無摩擦，等權投組）" if is_portfolio else f"買進持有（理論無摩擦，{single_symbol_label or selected_symbols[0]}）"
+    theoretical_label = (
+        "Theoretical No Friction（買進持有，等權投組）"
+        if is_portfolio
+        else f"Theoretical No Friction（買進持有，{single_symbol_label or selected_symbols[0]}）"
+    )
+    st.caption("買進持有為理論無摩擦基準：以回測標的收盤價計算，不含手續費、交易稅、滑價；若為投組則採等權配置。")
 
     comparison_rows = [
         {
             "比較區間": "整段",
-            "比較項目": "策略",
+            "比較項目": strategy_label,
             "起始交易日(實際)": strategy_equity.index[0].strftime("%Y-%m-%d"),
             "結束交易日(實際)": strategy_equity.index[-1].strftime("%Y-%m-%d"),
             "報酬率%": round((strategy_equity.iloc[-1] / strategy_equity.iloc[0] - 1.0) * 100.0, 2),
@@ -6836,7 +7640,7 @@ def _render_backtest_view():
         comparison_rows.append(
             {
                 "比較區間": "整段",
-                "比較項目": hold_label,
+                "比較項目": theoretical_label if is_buy_hold_strategy else hold_label,
                 "起始交易日(實際)": buy_hold_equity.index[0].strftime("%Y-%m-%d"),
                 "結束交易日(實際)": buy_hold_equity.index[-1].strftime("%Y-%m-%d"),
                 "報酬率%": round((buy_hold_equity.iloc[-1] / buy_hold_equity.iloc[0] - 1.0) * 100.0, 2),
@@ -6885,7 +7689,7 @@ def _render_backtest_view():
             comparison_rows.append(
                 {
                     "比較區間": "指定區間",
-                    "比較項目": "策略",
+                    "比較項目": strategy_label,
                     "起始交易日(實際)": strategy_interval["start_used"].strftime("%Y-%m-%d"),
                     "結束交易日(實際)": strategy_interval["end_used"].strftime("%Y-%m-%d"),
                     "報酬率%": round(float(strategy_interval["return"]) * 100.0, 2),
@@ -6895,7 +7699,7 @@ def _render_backtest_view():
             comparison_rows.append(
                 {
                     "比較區間": "指定區間",
-                    "比較項目": hold_label,
+                    "比較項目": theoretical_label if is_buy_hold_strategy else hold_label,
                     "起始交易日(實際)": hold_interval["start_used"].strftime("%Y-%m-%d"),
                     "結束交易日(實際)": hold_interval["end_used"].strftime("%Y-%m-%d"),
                     "報酬率%": round(float(hold_interval["return"]) * 100.0, 2),
@@ -6903,7 +7707,16 @@ def _render_backtest_view():
             )
     if comparison_rows:
         out_df = pd.DataFrame(comparison_rows)
-        st.dataframe(out_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            _decorate_tw_symbol_columns(
+                out_df,
+                service=service,
+                enabled=tw_symbol_label_enabled,
+                columns=["比較項目"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
         st.caption("目前沒有可計算的比較資料。")
 
@@ -6950,6 +7763,7 @@ def _render_backtest_view():
                 if market_code == "TW"
                 else fallback_symbol_map_us.get(benchmark_choice, "^GSPC")
             )
+        dca_benchmark_label = _tw_label(dca_benchmark_label)
 
         dca_equity = build_dca_equity(
             bars_by_symbol=bars_by_symbol,
@@ -7042,54 +7856,7 @@ def _render_backtest_view():
     else:
         st.caption("樣本不足，無逐年報酬。")
 
-    if is_portfolio:
-        _render_card_section_header("投組分項策略績效卡", "此卡顯示各檔策略本身績效（不含相對Benchmark比較）。")
-        rows = []
-        for symbol, comp in result.component_results.items():
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "total_return%": round(comp.metrics.total_return * 100.0, 2),
-                    "cagr%": round(comp.metrics.cagr * 100.0, 2),
-                    "mdd%": round(comp.metrics.max_drawdown * 100.0, 2),
-                    "sharpe": round(comp.metrics.sharpe, 2),
-                    "trades": comp.metrics.trades,
-                }
-            )
-        _render_crisp_table(pd.DataFrame(rows), max_height=360)
-
-    _render_card_section_header("交易明細卡")
-    if is_portfolio:
-        if result.trades is not None and not result.trades.empty:
-            trades_df = result.trades.copy()
-            trades_df["entry_date"] = pd.to_datetime(trades_df["entry_date"]).dt.date.astype(str)
-            trades_df["exit_date"] = pd.to_datetime(trades_df["exit_date"]).dt.date.astype(str)
-            trades_df["pnl_pct%"] = (trades_df["pnl_pct"] * 100.0).round(2)
-            _render_crisp_table(trades_df.drop(columns=["pnl_pct"]), max_height=460)
-        else:
-            st.caption("沒有交易紀錄。")
-    else:
-        if result.trades:
-            trades_df = pd.DataFrame(
-                [
-                    {
-                        "entry_date": t.entry_date.date().isoformat(),
-                        "entry_price": round(t.entry_price, 4),
-                        "exit_date": t.exit_date.date().isoformat(),
-                        "exit_price": round(t.exit_price, 4),
-                        "qty": round(t.qty, 4),
-                        "pnl": round(t.pnl, 2),
-                        "pnl_pct%": round(t.pnl_pct * 100.0, 2),
-                        "fee": round(t.fee, 2),
-                        "tax": round(t.tax, 2),
-                        "slippage": round(t.slippage, 4),
-                    }
-                    for t in result.trades
-                ]
-            )
-            _render_crisp_table(trades_df, max_height=460)
-        else:
-            st.caption("沒有交易紀錄。")
+    _render_component_and_trade_cards()
 
     perf_timer.mark("render_complete")
     if perf_timer.enabled:
@@ -7116,7 +7883,7 @@ def _render_tutorial_view():
             {"分頁": "00993A 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 00993A 內部強弱分布"},
             {"分頁": "0050 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介（依權重排序）", "什麼時候用": "看台灣 50 內部強弱"},
             {"分頁": "0052 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 0052 內部強弱分布"},
-            {"分頁": "資料庫檢視", "你會看到什麼": "SQLite 表格總覽、欄位、分頁資料", "什麼時候用": "確認資料是否有進 SQLite"},
+            {"分頁": "資料庫檢視", "你會看到什麼": "DuckDB/SQLite 表格總覽、欄位、分頁資料", "什麼時候用": "確認資料是否有進本地資料庫"},
             {"分頁": "新手教學", "你會看到什麼": "名詞解釋、快取邏輯、操作順序、常見誤解", "什麼時候用": "剛上手或看不懂數字時"},
         ]
     )
@@ -7143,7 +7910,7 @@ def _render_tutorial_view():
             {"項目": "重新計算（共識代表 ETF）", "作用": "重算前10交集與代表性分數", "不按會怎樣": "沿用最近一次共識計算結果"},
             {"項目": "重新計算（兩檔 ETF 推薦）", "作用": "重算核心/衛星推薦與重疊門檻", "不按會怎樣": "沿用最近一次兩檔推薦結果"},
             {"項目": "更新 成分股（熱力圖）", "作用": "重抓 ETF 成分股清單並更新快取", "不按會怎樣": "沿用 `universe_snapshots` 既有快取"},
-            {"項目": "執行前同步最新日K（較慢）", "作用": "先補齊資料再跑", "不按會怎樣": "優先用本地 SQLite，不足才補同步"},
+            {"項目": "執行前同步最新日K（較慢）", "作用": "先補齊資料再跑", "不按會怎樣": "優先用本地資料庫，不足才補同步"},
             {"項目": "重新計算（Benchmark 對照卡）", "作用": "在目前參數下重算曲線與績效表", "不按會怎樣": "沿用本頁已算過結果"},
         ]
     )
@@ -7152,13 +7919,13 @@ def _render_tutorial_view():
     st.markdown("### 3) 資料會存在哪裡？")
     storage_df = pd.DataFrame(
         [
-            {"項目": "歷史日K（含 Benchmark）", "位置": "SQLite（預設 iCloud，可由環境變數覆蓋）", "用途": "回測與比較主資料來源"},
-            {"項目": "回測摘要", "位置": "SQLite `backtest_runs`", "用途": "保存回測重點結果"},
-            {"項目": "回測回放快取", "位置": "SQLite `backtest_replay_runs`", "用途": "同條件可直接載入完整回放結果"},
-            {"項目": "熱力圖結果", "位置": "SQLite `heatmap_runs`", "用途": "熱力圖頁可先顯示上次結果"},
-            {"項目": "ETF 輪動結果", "位置": "SQLite `rotation_runs`", "用途": "輪動頁可先顯示上次結果"},
-            {"項目": "成分股清單", "位置": "SQLite `universe_snapshots`", "用途": "避免每次重抓成分股"},
-            {"項目": "即時資料", "位置": "Session 記憶體 + SQLite `intraday_ticks`", "用途": "即時看盤與補圖"},
+            {"項目": "歷史日K（含 Benchmark）", "位置": "Parquet（預設 iCloud，可由環境變數覆蓋）", "用途": "回測與比較主資料來源"},
+            {"項目": "回測摘要", "位置": "DuckDB `backtest_runs`", "用途": "保存回測重點結果"},
+            {"項目": "回測回放快取", "位置": "DuckDB `backtest_replay_runs`", "用途": "同條件可直接載入完整回放結果"},
+            {"項目": "熱力圖結果", "位置": "DuckDB `heatmap_runs`", "用途": "熱力圖頁可先顯示上次結果"},
+            {"項目": "ETF 輪動結果", "位置": "DuckDB `rotation_runs`", "用途": "輪動頁可先顯示上次結果"},
+            {"項目": "成分股清單", "位置": "DuckDB `universe_snapshots`", "用途": "避免每次重抓成分股"},
+            {"項目": "即時資料", "位置": "Session 記憶體 + Parquet `intraday_ticks`", "用途": "即時看盤與補圖"},
         ]
     )
     st.dataframe(storage_df, use_container_width=True, hide_index=True)
@@ -7222,7 +7989,6 @@ def _render_tutorial_view():
             {"控制項": "實際投入起點（日期或第幾根K）", "會不會改回測結果": "會", "重點": "改變本金開始參與時間"},
             {"控制項": "回放位置（K棒/日期）", "會不會改回測結果": "不會", "重點": "只改圖表播放位置"},
             {"控制項": "回放視窗 / 生長位置", "會不會改回測結果": "不會", "重點": "只改視覺呈現"},
-            {"控制項": "顯示成交連線", "會不會改回測結果": "不會", "重點": "僅做圖上對照"},
         ]
     )
     st.dataframe(confusion_df, use_container_width=True, hide_index=True)
@@ -7378,7 +8144,17 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         font=dict(color=str(palette["text_color"]), family="Noto Sans TC, Segoe UI, sans-serif"),
         hoverlabel=_plot_hoverlabel_style(palette),
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    _enable_plotly_draw_tools(fig_heat)
+    _apply_plotly_watermark(fig_heat, text=str(title), palette=palette)
+    _render_plotly_chart(
+        fig_heat,
+        chart_key=f"plotly:heatmap:{title}",
+        filename=f"heatmap_{title}",
+        scale=2,
+        use_container_width=True,
+        watermark_text=str(title),
+        palette=palette,
+    )
 
     out_df = frame.copy()
     for col in ["weight_pct", "asset_return_pct", "benchmark_return_pct", "excess_pct"]:
@@ -7910,7 +8686,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         "執行前同步最新日K（較慢）",
         value=False,
         key=f"{page_key}_sync_before_run",
-        help="預設關閉：優先使用本地 SQLite；資料不足時才補同步。",
+        help="預設關閉：優先使用本地資料庫；資料不足時才補同步。",
     )
     parallel_sync = s2.checkbox(
         "平行同步多標的",
@@ -8027,7 +8803,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         st.caption("目前顯示的是上一次執行結果；若要套用目前設定，請重新按下執行。")
     heatmap_health = _build_data_health(
         as_of=payload.get("generated_at", ""),
-        data_sources=["sqlite:heatmap_runs"],
+        data_sources=[_store_data_source(store, "heatmap_runs")],
         source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
         degraded=payload.get("run_key") != run_key,
         fallback_depth=1 if payload.get("run_key") != run_key else 0,
@@ -8154,7 +8930,17 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         font=dict(color=str(palette["text_color"]), family="Noto Sans TC, Segoe UI, sans-serif"),
         hoverlabel=_plot_hoverlabel_style(palette),
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    _enable_plotly_draw_tools(fig_heat)
+    _apply_plotly_watermark(fig_heat, text=f"{etf_text} 熱力圖", palette=palette)
+    _render_plotly_chart(
+        fig_heat,
+        chart_key=f"plotly:heatmap:{etf_text}",
+        filename=f"heatmap_{etf_text}",
+        scale=2,
+        use_container_width=True,
+        watermark_text=f"{etf_text} 熱力圖",
+        palette=palette,
+    )
 
     out_df = rows_df.copy()
     out_df["strategy_return_pct"] = out_df["strategy_return_pct"].map(lambda v: round(float(v), 2))
@@ -8281,7 +9067,7 @@ def _render_tw_etf_rotation_view():
         "執行前同步最新日K（較慢）",
         value=False,
         key="rotation_sync_before_run",
-        help="預設關閉：優先使用本地 SQLite；資料不足時才補同步。",
+        help="預設關閉：優先使用本地資料庫；資料不足時才補同步。",
     )
     parallel_sync = s2.checkbox(
         "平行同步多標的",
@@ -8443,7 +9229,7 @@ def _render_tw_etf_rotation_view():
         st.caption("目前顯示的是上一次執行結果；若要套用目前設定，請重新按下執行。")
     rotation_health = _build_data_health(
         as_of=payload.get("generated_at", ""),
-        data_sources=["sqlite:rotation_runs"],
+        data_sources=[_store_data_source(store, "rotation_runs")],
         source_chain=[str(payload.get("benchmark_symbol", "") or "benchmark")],
         degraded=payload.get("run_key") != run_key,
         fallback_depth=1 if payload.get("run_key") != run_key else 0,
@@ -8496,52 +9282,51 @@ def _render_tw_etf_rotation_view():
     if payload.get("skipped_symbols"):
         st.caption(f"資料不足未納入：{', '.join(payload.get('skipped_symbols', []))}")
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=strategy_series.index,
-            y=strategy_series.values,
-            mode="lines",
-            name="Strategy Equity (ETF Rotation)",
-            line=dict(color=str(palette["equity"]), width=2.3),
-            hovertemplate=_hovertemplate_with_code("ROTATION", value_label="Equity", y_format=",.0f"),
-        )
-    )
+    chart_lines: list[dict[str, Any]] = [
+        {
+            "name": "Strategy Equity (ETF Rotation)",
+            "series": strategy_series,
+            "color": str(palette["equity"]),
+            "width": 2.3,
+            "dash": "solid",
+            "hover_code": "ROTATION",
+            "value_label": "Equity",
+            "y_format": ",.0f",
+        }
+    ]
     if not benchmark_series.empty:
         benchmark_label = str(payload.get("benchmark_symbol", "Benchmark")).strip() or "Benchmark"
-        fig.add_trace(
-            go.Scatter(
-                x=benchmark_series.index,
-                y=benchmark_series.values,
-                mode="lines",
-                name=f"Benchmark Equity ({benchmark_label})",
-                line=_benchmark_line_style(palette, width=2.0),
-                hovertemplate=_hovertemplate_with_code(benchmark_label, value_label="Equity", y_format=",.0f"),
-            )
+        style = _benchmark_line_style(palette, width=2.0)
+        chart_lines.append(
+            {
+                "name": f"Benchmark Equity ({benchmark_label})",
+                "series": benchmark_series,
+                "color": str(style["color"]),
+                "width": float(style["width"]),
+                "dash": str(style["dash"]),
+                "hover_code": benchmark_label,
+                "value_label": "Equity",
+                "y_format": ",.0f",
+            }
         )
     if not buy_hold_series.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=buy_hold_series.index,
-                y=buy_hold_series.values,
-                mode="lines",
-                name="Buy-and-Hold Equity (Equal-Weight ETF Pool)",
-                line=dict(color=str(palette["buy_hold"]), width=1.9),
-                hovertemplate=_hovertemplate_with_code("EW_POOL", value_label="Equity", y_format=",.0f"),
-            )
+        chart_lines.append(
+            {
+                "name": "Buy-and-Hold Equity (Frictionless, Equal-Weight ETF Pool)",
+                "series": buy_hold_series,
+                "color": str(palette["buy_hold"]),
+                "width": 1.9,
+                "dash": "solid",
+                "hover_code": "EW_POOL",
+                "value_label": "Equity",
+                "y_format": ",.0f",
+            }
         )
-    fig.update_layout(
+    _render_benchmark_lines_chart(
+        lines=chart_lines,
         height=500,
-        margin=dict(l=10, r=10, t=30, b=10),
-        template=str(palette["plot_template"]),
-        paper_bgcolor=str(palette["paper_bg"]),
-        plot_bgcolor=str(palette["plot_bg"]),
-        font=dict(color=str(palette["text_color"])),
+        chart_key="rotation_benchmark",
     )
-    fig.update_xaxes(gridcolor=str(palette["grid"]))
-    fig.update_yaxes(gridcolor=str(palette["grid"]))
-    _apply_unified_benchmark_hover(fig, palette)
-    st.plotly_chart(fig, use_container_width=True)
 
     metrics = payload.get("metrics", {})
     if isinstance(metrics, dict):
@@ -8653,11 +9438,14 @@ def _render_00993a_heatmap_view():
 
 
 def _render_db_browser_view():
-    st.subheader("SQLite 資料庫檢視")
     store = _history_store()
+    backend_name = str(getattr(store, "backend_name", "duckdb") or "duckdb").strip().lower()
+    backend_label = "DuckDB" if backend_name == "duckdb" else "SQLite"
+
+    st.subheader(f"{backend_label} 資料庫檢視")
     db_path = store.db_path
 
-    st.caption(f"資料庫路徑：`{db_path}`")
+    st.caption(f"資料庫路徑：`{db_path}` | backend: `{backend_label}`")
     if not db_path.exists():
         st.error(f"找不到資料庫檔案：`{db_path}`。")
         return
@@ -8776,17 +9564,33 @@ def _render_db_browser_view():
         if isinstance(issues, list) and issues:
             _render_sync_issues("增量更新有部分同步錯誤", [str(item) for item in issues], preview_limit=3)
 
-    conn = sqlite3.connect(str(db_path))
+    conn_sqlite: Optional[sqlite3.Connection] = None
+    conn_duck = None
     try:
-        tables_df = pd.read_sql_query(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type='table' AND name NOT LIKE 'sqlite_%'
-            ORDER BY name ASC
-            """,
-            conn,
-        )
+        if backend_name == "duckdb":
+            if duckdb is None:
+                st.error("目前環境缺少 duckdb 套件，無法開啟 DuckDB 檢視。")
+                return
+            conn_duck = duckdb.connect(str(db_path), read_only=True)
+            tables_df = conn_duck.execute(
+                """
+                SELECT table_name AS name
+                FROM information_schema.tables
+                WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
+                ORDER BY table_name ASC
+                """
+            ).df()
+        else:
+            conn_sqlite = sqlite3.connect(str(db_path))
+            tables_df = pd.read_sql_query(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                ORDER BY name ASC
+                """,
+                conn_sqlite,
+            )
         if tables_df.empty:
             st.info("目前資料庫中沒有可檢視的資料表。")
             return
@@ -8796,7 +9600,12 @@ def _render_db_browser_view():
         count_map: dict[str, int] = {}
         for table in table_names:
             escaped = table.replace('"', '""')
-            count = int(conn.execute(f'SELECT COUNT(*) FROM "{escaped}"').fetchone()[0])
+            if backend_name == "duckdb":
+                assert conn_duck is not None
+                count = int(conn_duck.execute(f'SELECT COUNT(*) FROM "{escaped}"').fetchone()[0])
+            else:
+                assert conn_sqlite is not None
+                count = int(conn_sqlite.execute(f'SELECT COUNT(*) FROM "{escaped}"').fetchone()[0])
             count_map[table] = count
             summary_rows.append({"資料表": table, "筆數": count})
 
@@ -8824,7 +9633,13 @@ def _render_db_browser_view():
         st.caption(f"目前資料表 `{selected_table}`：共 {total_rows} 筆，頁 {page} / {total_pages}")
 
         escaped_table = selected_table.replace('"', '""')
-        schema_df = pd.read_sql_query(f'PRAGMA table_info("{escaped_table}")', conn)
+        escaped_table_literal = selected_table.replace("'", "''")
+        if backend_name == "duckdb":
+            assert conn_duck is not None
+            schema_df = conn_duck.execute(f"PRAGMA table_info('{escaped_table_literal}')").df()
+        else:
+            assert conn_sqlite is not None
+            schema_df = pd.read_sql_query(f'PRAGMA table_info("{escaped_table}")', conn_sqlite)
         col_names = schema_df["name"].astype(str).tolist() if not schema_df.empty else []
         order_candidates = ["updated_at", "created_at", "date", "fetched_at", "id"]
         order_col = next((col for col in order_candidates if col in col_names), None)
@@ -8835,7 +9650,12 @@ def _render_db_browser_view():
             query += f' ORDER BY "{order_col}" {direction}'
         query += " LIMIT ? OFFSET ?"
 
-        data_df = pd.read_sql_query(query, conn, params=[page_size, offset])
+        if backend_name == "duckdb":
+            assert conn_duck is not None
+            data_df = conn_duck.execute(query, [page_size, offset]).df()
+        else:
+            assert conn_sqlite is not None
+            data_df = pd.read_sql_query(query, conn_sqlite, params=[page_size, offset])
         st.markdown("#### 資料表內容")
         if data_df.empty:
             st.info("此頁沒有資料。")
@@ -8860,7 +9680,10 @@ def _render_db_browser_view():
     except Exception as exc:
         st.error(f"讀取資料庫失敗：{exc}")
     finally:
-        conn.close()
+        if conn_sqlite is not None:
+            conn_sqlite.close()
+        if conn_duck is not None:
+            conn_duck.close()
 
 
 def main():
@@ -8868,6 +9691,7 @@ def main():
     _inject_ui_styles()
     _auto_run_daily_incremental_refresh(_history_store())
     st.title("即時走勢 / 多來源資料 / 回測平台")
+    st.caption(_runtime_stack_caption())
     _render_design_toolbox()
     active_page = _render_page_cards_nav()
     page_renderers = {

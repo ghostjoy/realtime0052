@@ -1,0 +1,5 @@
+config_source: hydra
+storage_backend: duckdb
+kline_renderer_live: plotly
+kline_renderer_replay: plotly
+benchmark_renderer: plotly

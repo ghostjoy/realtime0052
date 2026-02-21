@@ -1,0 +1,3 @@
+sqlite:
+  db_path: "~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3"
+  intraday_retain_days: null

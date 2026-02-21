@@ -1,0 +1,9 @@
+defaults:
+  - _self_
+  - storage: duckdb
+  - sync: default
+  - features: default
+  - ui: default
+
+app:
+  name: realtime0052

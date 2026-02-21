@@ -54,8 +54,10 @@
 - `ui/shared/session_utils.py`
   - `session_state` 預設值初始化 helper
 - `storage/history_store.py`
-  - SQLite schema 與歷史資料同步
-  - 回測結果、成分股快取與台股即時 tick 持久化
+  - SQLite fallback store（回滾/相容用途）
+- `storage/duck_store.py`
+  - DuckDB + Parquet hybrid（目前預設）
+  - DuckDB 儲存 metadata/回測快取；Parquet 儲存 `daily_bars`/`intraday_ticks`
 - `backtest/*`
   - 回測核心邏輯、績效計算、walk-forward
   - `backtest/rotation.py`：ETF 輪動策略回測核心
@@ -63,17 +65,16 @@
 ## 3) 資料流（高層）
 
 1. UI 設定區間/標的/策略
-2. `HistoryStore` 先讀 SQLite，必要時增量同步
+2. `DuckHistoryStore` 先讀 DuckDB/Parquet，必要時增量同步
 3. 回測引擎運算策略曲線
 4. Benchmark 對齊同區間後比較
 5. 視覺化（K 棒、資產曲線、熱力圖）
 
-## 4) 關鍵資料表（SQLite）
+## 4) 關鍵資料表（DuckDB + Parquet）
 
-- 預設 DB 路徑：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`（若無 iCloud 則回退 `market_history.sqlite3`；可由 `REALTIME0052_DB_PATH` 覆蓋）
+- 預設 DB 路徑：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.duckdb`（若無 iCloud 則回退 `market_history.duckdb`；可由 `REALTIME0052_DUCKDB_PATH` 覆蓋）
+- 預設 Parquet 路徑：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/parquet`（可由 `REALTIME0052_PARQUET_ROOT` 覆蓋）
 - `instruments`
-- `daily_bars`
-- `intraday_ticks`（台股即時 tick；保留天數可由 `REALTIME0052_INTRADAY_RETAIN_DAYS` 調整，預設 1095 天）
 - `sync_state`
 - `symbol_metadata`（代碼名稱/交易所/產業 metadata）
 - `backtest_runs`
@@ -82,6 +83,7 @@
 - `heatmap_runs`（熱力圖最近一次結果）
 - `rotation_runs`（ETF 輪動最近一次結果）
 - `bootstrap_runs`（預載與增量更新任務紀錄）
+- `daily_bars` / `intraday_ticks`：Parquet 分區資料（market/symbol）
 
 ## 5) 既定行為與假設
 
@@ -96,7 +98,7 @@
 - 新增相對大盤勝負與超額報酬顯示
 - 回測/熱力圖/輪動三條路徑新增 runner 模組，將資料準備與執行邏輯從 `app.py` 抽離
 - 回測/熱力圖/輪動頁新增可選效能分段資訊（`REALTIME0052_PERF_DEBUG=1`）
-- 回測工作台改為輸入完成後自動回測；同條件優先讀取 SQLite 快取
+- 回測工作台改為輸入完成後自動回測；同條件優先讀取本地 DuckDB/Parquet 快取
 - 回測回放快取新增 `schema_version/source_hash` 簽章，舊快取會自動重算避免相容性錯誤
 - 回放預設改為完整區間且定位最後一根，`Reset` 可重播
 - 前十大/主動式 ETF 卡片新增資料健康度欄位（`as_of/source/chain/fallback`）
@@ -105,7 +107,7 @@
 - 主題提供 `日光白 / 灰白專業 / 深色專業`，預設灰白
 - 新增 ETF 輪動分頁（固定 6 檔 ETF，月調倉）
 - 新增/擴充 ETF 熱力圖分頁：`00910`（含全球成分股 YTD 分組）、`00935`、`00993A`、`0050`、`0052`
-- 成分股清單改為 SQLite 快取，避免反覆抓取
+- 成分股清單改為本地 DuckDB 快取，避免反覆抓取
 - 回測工作台新增「回測前自動補資料缺口」，可針對缺口標的增量回補
 - 新增兩個 ETF 排行卡片頁：`2025 前十大 ETF` 與 `2026 YTD 前十大 ETF`（TWSE 快照區間報酬）
 - 新增 `資料庫檢視` 分頁可執行基礎資料預載與每日增量更新

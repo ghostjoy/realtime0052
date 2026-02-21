@@ -1,0 +1,6 @@
+duckdb:
+  db_path: "~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.duckdb"
+  parquet_root: "~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/parquet"
+  intraday_retain_days: 1095
+  legacy_sqlite_path: "~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3"
+  auto_migrate_legacy_sqlite: true

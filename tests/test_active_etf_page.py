@@ -27,6 +27,7 @@ from app import (
     _build_symbol_line_styles,
     _resolve_tw_symbol_names,
     _build_tw_active_etf_ytd_between,
+    _compute_tw_equal_weight_compare_payload,
     _classify_issue_level,
     _is_tw_active_etf,
     _load_cached_backtest_payload,
@@ -92,7 +93,10 @@ class ActiveEtfPageTests(unittest.TestCase):
         with patch("app._infer_tw_symbol_exchanges", return_value={"8069": "OTC", "2330": "TW"}):
             self.assertEqual(_infer_market_target_from_symbols(["8069", "2330"]), "TW")
 
-        self.assertIsNone(_infer_market_target_from_symbols(["AAPL", "MSFT"]))
+        self.assertEqual(_infer_market_target_from_symbols(["AAPL", "MSFT"]), "US")
+        self.assertEqual(_infer_market_target_from_symbols(["SPY", "^GSPC"]), "US")
+        self.assertEqual(_infer_market_target_from_symbols(["2330.TW"]), "TW")
+        self.assertEqual(_infer_market_target_from_symbols(["8069.TWO"]), "OTC")
         self.assertIsNone(_infer_market_target_from_symbols(["8069", "AAPL"]))
         self.assertIsNone(_infer_market_target_from_symbols([]))
 
@@ -219,6 +223,51 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(len(set(used_colors)), len(used_colors))
         for color in used_colors:
             self.assertIn(color, ACTIVE_ETF_LINE_COLORS)
+
+    def test_compute_tw_equal_weight_compare_payload_enables_twii_fallback(self):
+        idx = pd.to_datetime(["2026-01-02", "2026-01-03"], utc=True)
+        bars = pd.DataFrame(
+            {
+                "open": [100.0, 101.0],
+                "high": [101.0, 102.0],
+                "low": [99.0, 100.0],
+                "close": [100.5, 101.5],
+                "volume": [1000.0, 1200.0],
+            },
+            index=idx,
+        )
+
+        class _FakeStore:
+            def load_daily_bars(self, symbol, market, start=None, end=None):
+                return bars if str(symbol) == "00980A" else pd.DataFrame()
+
+            def sync_symbol_history(self, symbol, market, start=None, end=None):
+                return SimpleNamespace(error=None)
+
+        def _fake_load_tw_benchmark_bars(**kwargs):
+            self.assertTrue(bool(kwargs.get("allow_twii_fallback")))
+            return bars, "0050", ["^TWII: unsupported"]
+
+        with patch("app._history_store", return_value=_FakeStore()), patch(
+            "app._load_tw_benchmark_bars",
+            side_effect=_fake_load_tw_benchmark_bars,
+        ), patch("app.apply_split_adjustment", side_effect=lambda bars, **kwargs: (bars, [])):
+            payload = _compute_tw_equal_weight_compare_payload(
+                symbols=["00980A"],
+                start_dt=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                end_dt=datetime(2026, 2, 1, tzinfo=timezone.utc),
+                benchmark_choice="twii",
+                sync_before_run=False,
+                insufficient_msg="insufficient",
+                initial_capital=1_000_000.0,
+            )
+
+        self.assertEqual(str(payload.get("error", "")), "")
+        self.assertEqual(str(payload.get("benchmark_symbol", "")), "0050")
+        benchmark_series = payload.get("benchmark_equity")
+        self.assertIsInstance(benchmark_series, pd.Series)
+        assert isinstance(benchmark_series, pd.Series)
+        self.assertGreaterEqual(len(benchmark_series), 2)
 
     def test_apply_unified_benchmark_hover_sets_layout(self):
         fig = go.Figure()

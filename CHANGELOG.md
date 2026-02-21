@@ -11,6 +11,16 @@
 ## [Unreleased]
 
 ### Added
+- 新增 `conf/` + `config_loader.py`，提供 `Hydra(YAML) / legacy env` 雙軌配置載入（預設仍維持 legacy env）。
+- 新增 `storage/duck_store.py`（`DuckDB + Parquet` hybrid）：
+  - DuckDB 儲存 metadata / 回測快取 / 任務紀錄
+  - Parquet 儲存 `daily_bars`、`intraday_ticks`（market/symbol 分區）
+  - 支援啟動時從 legacy SQLite 一次性遷移（僅在目標庫為空時）
+- 新增 `scripts/migrate_sqlite_to_duckdb.py` 一次性遷移腳本。
+- 新增 `ui/charts/lightweight_adapter.py` 與 `ui/charts/__init__.py`，提供 lightweight-charts 共用渲染封裝。
+- 新增測試：
+  - `tests/test_config_loader.py`
+  - `tests/test_duck_store.py`
 - 新增 `symbol_metadata`（SQLite）：
   - 儲存 `symbol / market / name / exchange / industry / currency / source / updated_at`
   - 供公司名稱/產業查詢優先走本地資料，降低重複打外部 API
@@ -88,6 +98,18 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated PROJECT_CONTEXT.md, README.md, app.py, conf/config.yaml, conf/features/default.yaml, conf/storage/duckdb.yaml, ... (+20) [id:1c648218cb]
+- 預設技術線切換為 `Hydra + DuckDB/Parquet`：
+  - `conf/config.yaml` 預設 storage 改為 `duckdb`
+  - `conf/features/default.yaml` 預設 `config_source=hydra`、`storage_backend=duckdb`
+  - `app.py` 在未設環境變數時預設走 DuckDB，保留 `rollback_legacy_stack.sh` 可回滾 SQLite
+- `app.py` 新增可回滾的 feature flags（可在 DuckDB / SQLite 間切換）：
+  - `storage backend`：`sqlite` / `duckdb`
+  - `kline renderer (live/replay)`：`plotly` / `lightweight`
+  - `benchmark renderer`：`plotly` / `lightweight`
+- 回測工作台 `Benchmark` 外部 fallback（如 yfinance/proxy）成功後，會以背景佇列非阻塞寫回 DuckDB/Parquet，降低下次重複查詢時的網路延遲與限流風險。
+- `即時看盤`、`回放圖卡`、`Benchmark 對照圖` 新增 lightweight 渲染分支，渲染失敗會自動回退 Plotly。
+- `資料庫檢視` 分頁改為同時支援 SQLite 與 DuckDB。
 - Auto: updated backtest/__init__.py, backtest/comparison.py, tests/test_comparison.py [id:ee4e5fafdc]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, services/__init__.py, services/backtest_runner.py, services/heatmap_runner.py, ... (+8) [id:93beeba92f]
 - Auto: updated AGENTS.md, GIT_GITHUB_GUIDE.md, PROJECT_CONTEXT.md, PROMPT_TEMPLATES.md, README.md [id:c20efff0af]

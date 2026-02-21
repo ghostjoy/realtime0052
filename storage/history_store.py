@@ -690,6 +690,8 @@ class HistoryStore:
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
     ) -> SyncReport:
+        symbol = self._normalize_symbol_token(symbol)
+        market = self._normalize_market_token(market)
         started_at = datetime.now(tz=timezone.utc)
         end = end or started_at
         instrument_id = self._get_or_create_instrument(symbol, market)
@@ -721,12 +723,18 @@ class HistoryStore:
 
         if market == "US":
             providers = [self.service.us_twelve, self.service.yahoo, self.service.us_stooq]
+        elif market == "OTC":
+            providers = []
+            fugle_rest = getattr(self.service, "tw_fugle_rest", None)
+            if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
+                providers.append(fugle_rest)
+            providers.extend([self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo])
         else:
             providers = []
             fugle_rest = getattr(self.service, "tw_fugle_rest", None)
             if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
                 providers.append(fugle_rest)
-            providers.extend([self.service.tw_openapi, self.service.tw_tpex, self.service.yahoo])
+            providers.extend([self.service.tw_openapi, self.service.yahoo])
         source = "unknown"
         fallback_depth = 0
         stale = False

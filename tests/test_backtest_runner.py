@@ -15,6 +15,7 @@ from services.backtest_runner import (
     load_and_prepare_symbol_bars,
     load_benchmark_from_store,
     parse_symbols,
+    queue_benchmark_writeback,
 )
 
 
@@ -89,6 +90,28 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(set(prepared.bars_by_symbol.keys()), {"0050", "2330"})
         self.assertEqual(len(prepared.availability_rows), 2)
         self.assertEqual({row["status"] for row in prepared.availability_rows}, {"OK"})
+
+    def test_queue_benchmark_writeback(self):
+        class _WritebackStore:
+            def __init__(self):
+                self.calls: list[dict[str, object]] = []
+
+            def queue_daily_bars_writeback(self, **kwargs):
+                self.calls.append(kwargs)
+                return True
+
+        idx = pd.date_range("2025-01-01", periods=3, freq="B", tz="UTC")
+        benchmark = pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=idx)
+        benchmark.attrs["symbol"] = "^GSPC"
+        benchmark.attrs["source"] = "yfinance"
+        store = _WritebackStore()
+
+        queued = queue_benchmark_writeback(store=store, market_code="US", benchmark=benchmark)
+
+        self.assertTrue(queued)
+        self.assertEqual(len(store.calls), 1)
+        self.assertEqual(store.calls[0]["symbol"], "^GSPC")
+        self.assertEqual(store.calls[0]["market"], "US")
 
     def test_execute_backtest_run_single_and_portfolio(self):
         bars_map = {"0050": _bars(220, seed=21), "2330": _bars(220, seed=22)}
