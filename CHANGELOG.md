@@ -98,6 +98,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated README.md, app.py, conf/tw_etf_management_fees.json, scripts/manage_tw_etf_fees.py [id:e82c0cab0d]
 - Auto: updated conf/tw_etf_management_fees.json, services/heatmap_runner.py, storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_heatmap_runner.py, ... (+1) [id:4bc6c67a8b]
 - Auto: updated app.py, tests/test_active_etf_page.py [id:14cbfe2554]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, backtest/adjustments.py, tests/test_active_etf_page.py, tests/test_split_adjustments.py [id:a69a023b1b]
@@ -109,6 +110,8 @@
 - `台股 ETF 全類型總表` 新增 `ETF` 中文名稱點擊開啟熱力圖：點擊後可在新分頁以動態 ETF 代碼載入完整熱力圖內容（同 `00935` 卡片等級）。
 - 動態 ETF 熱力圖頁補齊自動建置快取流程：從 `台股 ETF 全類型總表` 點擊名稱開啟時，若該 ETF 尚無熱力圖快取，會自動更新成分股並直接執行回測；若已有快取則預設重用，僅在成分股或本地市場資料較快取更新時才自動重算。
 - ETF 相關卡片表格統一新增 `管理費` 欄位（白名單可維護，支援 `0.15%起` 級距格式；已預填核心 ETF 費率，未收錄顯示 `—`），涵蓋 Top10/全類型/主動式/共識代表/兩檔推薦等頁面。
+- 新增 `scripts/manage_tw_etf_fees.py`：可輸出管理費覆蓋率/待補清單（含 AUM 排序），並支援 `--set` 或 `--input-csv` 分批補值到 `conf/tw_etf_management_fees.json`。
+- 管理費白名單改為依設定檔簽章快取載入（約 2 分鐘 TTL）：補值後通常不需重啟 App 即可生效。
 - ETF 相關卡片表格同步新增 `ETF規模(億)` 欄位：資料來源為 TWSE `etfExcel` 的資產規模欄位，快取載入；缺值顯示 `—`。
 - 新增 `conf/tw_etf_management_fees.json` 作為管理費公開資料快照來源，`app.py` 會自動載入 `fees` 映射（目前快照覆蓋 75/216 檔，其餘維持 `—`）。
 - 熱力圖方塊新增 `權重` 資訊：方塊文字與 hover 同步顯示；若有成分股權重資料會帶入，否則顯示 `—`。

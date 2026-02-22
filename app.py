@@ -3160,9 +3160,24 @@ def _attach_tw_etf_aum_column(
     return out
 
 
-def _load_tw_etf_management_fee_whitelist() -> dict[str, str]:
+def _tw_etf_management_fee_config_path() -> Path:
+    return Path(__file__).resolve().parent / "conf" / "tw_etf_management_fees.json"
+
+
+def _tw_etf_management_fee_config_signature() -> str:
+    cfg_path = _tw_etf_management_fee_config_path()
+    try:
+        stat = cfg_path.stat()
+    except Exception:
+        return "missing"
+    return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _load_tw_etf_management_fee_whitelist(config_signature: str) -> dict[str, str]:
+    _ = config_signature
     out = dict(TW_ETF_MANAGEMENT_FEE_FALLBACK)
-    cfg_path = Path(__file__).resolve().parent / "conf" / "tw_etf_management_fees.json"
+    cfg_path = _tw_etf_management_fee_config_path()
     try:
         payload = json.loads(cfg_path.read_text(encoding="utf-8"))
     except Exception:
@@ -3181,14 +3196,15 @@ def _load_tw_etf_management_fee_whitelist() -> dict[str, str]:
     return out
 
 
-TW_ETF_MANAGEMENT_FEE_WHITELIST: dict[str, str] = _load_tw_etf_management_fee_whitelist()
+def _get_tw_etf_management_fee_whitelist() -> dict[str, str]:
+    return _load_tw_etf_management_fee_whitelist(_tw_etf_management_fee_config_signature())
 
 
 def _lookup_tw_etf_management_fee_label(code: object) -> str:
     token = str(code or "").strip().upper()
     if not token or token.startswith("^"):
         return ""
-    value = TW_ETF_MANAGEMENT_FEE_WHITELIST.get(token)
+    value = _get_tw_etf_management_fee_whitelist().get(token)
     if value is None:
         return ""
     return _normalize_tw_etf_management_fee_label(value)

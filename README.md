@@ -311,6 +311,32 @@ uv run python scripts/migrate_sqlite_to_duckdb.py \
 
 回滾方式：執行 `./scripts/rollback_legacy_stack.sh`，或手動把 `REALTIME0052_STORAGE_BACKEND=sqlite`。
 
+## 台股 ETF 管理費（可逐步補齊）
+
+- 管理費資料檔：`conf/tw_etf_management_fees.json`
+- 補資料工具：`scripts/manage_tw_etf_fees.py`
+- App 端管理費設定會定期重新載入（約 2 分鐘快取），補完後通常不需重啟即可生效。
+
+先看覆蓋率與待補名單（可同時輸出 CSV）：
+
+```bash
+uv run python scripts/manage_tw_etf_fees.py \
+  --top 30 \
+  --missing-csv conf/tw_etf_management_fees_missing.csv
+```
+
+單筆補值：
+
+```bash
+uv run python scripts/manage_tw_etf_fees.py --set 00900=0.30%起
+```
+
+批次補值（CSV 需有 `code/symbol/代碼/ETF代碼/基金代號` 與 `fee/management_fee/管理費/經理費` 欄位）：
+
+```bash
+uv run python scripts/manage_tw_etf_fees.py --input-csv /path/to/fees.csv
+```
+
 ## 執行
 
 ```bash
