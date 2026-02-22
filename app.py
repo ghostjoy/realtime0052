@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 import os
 import re
@@ -86,6 +87,10 @@ from ui.charts import (
     render_lightweight_live_chart,
     render_lightweight_multi_line_chart,
 )
+
+# Streamlit may emit repetitive INFO logs when a scheduled fragment rerun arrives
+# after a full-app rerun removed that fragment. This is harmless but noisy.
+logging.getLogger("streamlit.runtime.app_session").setLevel(logging.WARNING)
 
 try:
     import duckdb
