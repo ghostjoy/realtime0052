@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -10,7 +11,7 @@ from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, unquote, urlencode
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -233,6 +234,23 @@ BACKTEST_DRILL_CODE_COLUMNS = {
 BACKTEST_DRILL_MARKET_COLUMNS = {"市場", "market", "Market", "交易所", "exchange", "Exchange"}
 BACKTEST_DRILL_QUERY_KEYS = ("bt_symbol", "bt_market", "bt_autorun", "bt_src")
 BACKTEST_AUTORUN_PENDING_KEY = "bt_autorun_pending"
+HEATMAP_DRILL_QUERY_KEYS = ("hm_etf", "hm_name", "hm_label", "hm_open", "hm_src")
+HEATMAP_HUB_SESSION_ACTIVE_KEY = "heatmap_hub_active_etf"
+HEATMAP_DYNAMIC_CARD_PREFIX = "ETF熱力圖:"
+
+
+def _normalize_heatmap_etf_code(value: object) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        return ""
+    return code if re.fullmatch(r"\d{4,6}[A-Z]?", code) else ""
+
+
+def _clean_heatmap_name_for_query(value: object) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    return text.replace("&", "＆").replace("?", "").replace("#", "")
 
 
 def _normalize_market_tag_for_drill(value: object) -> str:
@@ -292,6 +310,46 @@ def _build_backtest_drill_url(symbol: str, market: str) -> str:
             "bt_src": "table",
         }
     )
+
+
+def _build_heatmap_drill_url(etf_code: str, etf_name: str, *, src: str = "all_types_table") -> str:
+    code = _normalize_heatmap_etf_code(etf_code)
+    if not code:
+        return ""
+    label = _clean_heatmap_name_for_query(etf_name) or code
+    name_encoded = quote(str(etf_name or "").strip(), safe="")
+    return (
+        f"?hm_etf={code}&hm_name={name_encoded}"
+        f"&hm_label={label}&hm_open=1&hm_src={str(src or 'all_types_table').strip()}"
+    )
+
+
+def _decorate_tw_etf_name_heatmap_links(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df, {}
+    if ("ETF" not in df.columns) or ("代碼" not in df.columns):
+        return df, {}
+    out = df.copy()
+    links: list[Optional[str]] = []
+    linked_count = 0
+    for _, row in out.iterrows():
+        code = _normalize_heatmap_etf_code(row.get("代碼"))
+        name = str(row.get("ETF", "")).strip()
+        if not code:
+            links.append(None)
+            continue
+        links.append(_build_heatmap_drill_url(code, name))
+        linked_count += 1
+    if linked_count <= 0:
+        return out, {}
+    out["ETF"] = links
+    return out, {
+        "ETF": st.column_config.LinkColumn(
+            label="ETF",
+            help="點擊 ETF 名稱可在新分頁開啟對應熱力圖（內容比照 00935 熱力圖）",
+            display_text=r"hm_label=([^&]+)",
+        )
+    }
 
 
 def _decorate_dataframe_backtest_links(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
@@ -420,6 +478,140 @@ def _consume_backtest_drilldown_query() -> None:
             "market": market,
         }
     _clear_query_params(BACKTEST_DRILL_QUERY_KEYS)
+
+
+def _load_heatmap_hub_entries(*, pinned_only: bool = False) -> list[Any]:
+    store = _history_store()
+    loader = getattr(store, "list_heatmap_hub_entries", None)
+    if not callable(loader):
+        return []
+    try:
+        rows = loader(pinned_only=bool(pinned_only))
+    except Exception:
+        return []
+    return list(rows) if isinstance(rows, list) else []
+
+
+def _upsert_heatmap_hub_entry(*, etf_code: str, etf_name: str, opened: bool = False, pin_as_card: Optional[bool] = None) -> None:
+    code = _normalize_heatmap_etf_code(etf_code)
+    if not code:
+        return
+    store = _history_store()
+    writer = getattr(store, "upsert_heatmap_hub_entry", None)
+    if not callable(writer):
+        return
+    try:
+        writer(
+            etf_code=code,
+            etf_name=str(etf_name or code).strip(),
+            opened=bool(opened),
+            pin_as_card=pin_as_card,
+        )
+    except Exception:
+        return
+
+
+def _set_heatmap_hub_pin(*, etf_code: str, pin_as_card: bool) -> bool:
+    code = _normalize_heatmap_etf_code(etf_code)
+    if not code:
+        return False
+    store = _history_store()
+    setter = getattr(store, "set_heatmap_hub_pin", None)
+    if not callable(setter):
+        return False
+    try:
+        return bool(setter(etf_code=code, pin_as_card=bool(pin_as_card)))
+    except Exception:
+        return False
+
+
+def _session_active_heatmap() -> tuple[str, str]:
+    payload = st.session_state.get(HEATMAP_HUB_SESSION_ACTIVE_KEY)
+    if not isinstance(payload, dict):
+        return "", ""
+    code = _normalize_heatmap_etf_code(payload.get("code", ""))
+    if not code:
+        return "", ""
+    name = _clean_heatmap_name_for_query(payload.get("name", "")) or code
+    return code, name
+
+
+def _dynamic_heatmap_cards() -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    for row in _load_heatmap_hub_entries(pinned_only=True):
+        code = _normalize_heatmap_etf_code(getattr(row, "etf_code", ""))
+        if not code:
+            continue
+        seen_codes.add(code)
+        name = str(getattr(row, "etf_name", "") or code).strip()
+        cards.append(
+            {
+                "key": f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}",
+                "desc": f"{code} {name} 成分股熱力圖（動態釘選）",
+            }
+        )
+    active_code, active_name = _session_active_heatmap()
+    if active_code and active_code not in seen_codes:
+        cards.append(
+            {
+                "key": f"{HEATMAP_DYNAMIC_CARD_PREFIX}{active_code}",
+                "desc": f"{active_code} {active_name} 成分股熱力圖（當前開啟）",
+            }
+        )
+    return cards
+
+
+def _dynamic_heatmap_page_renderers() -> dict[str, Any]:
+    renderers: dict[str, Any] = {}
+    rows = list(_load_heatmap_hub_entries(pinned_only=True))
+    active_code, active_name = _session_active_heatmap()
+    if active_code:
+        rows.append(
+            type(
+                "_ActiveHeatmapEntry",
+                (),
+                {"etf_code": active_code, "etf_name": active_name},
+            )()
+        )
+    built_keys: set[str] = set()
+    for row in rows:
+        code = _normalize_heatmap_etf_code(getattr(row, "etf_code", ""))
+        if not code:
+            continue
+        name = str(getattr(row, "etf_name", "") or code).strip() or code
+        key = f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}"
+        if key in built_keys:
+            continue
+        built_keys.add(key)
+
+        def _render_dynamic_heatmap(_code: str = code, _name: str = name):
+            _render_tw_etf_heatmap_view(_code, page_desc=_name, auto_run_if_missing=True)
+
+        renderers[key] = _render_dynamic_heatmap
+    return renderers
+
+
+def _consume_heatmap_drilldown_query() -> None:
+    code_raw = _query_param_first("hm_etf")
+    if not code_raw:
+        return
+    code = _normalize_heatmap_etf_code(code_raw)
+    if not code:
+        _clear_query_params(HEATMAP_DRILL_QUERY_KEYS)
+        return
+    name = _query_param_first("hm_name")
+    if name:
+        name = unquote(name)
+    if not name:
+        name = _query_param_first("hm_label")
+    name = _clean_heatmap_name_for_query(name) or code
+    st.session_state["active_page"] = f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}"
+    st.session_state[HEATMAP_HUB_SESSION_ACTIVE_KEY] = {"code": code, "name": name}
+    opened_flag = _query_param_first("hm_open").strip().lower()
+    opened = opened_flag in {"1", "true", "yes", "y", "on", "open"}
+    _upsert_heatmap_hub_entry(etf_code=code, etf_name=name, opened=opened)
+    _clear_query_params(HEATMAP_DRILL_QUERY_KEYS)
 
 
 BACKTEST_REPLAY_SCHEMA_VERSION = 3
@@ -1275,6 +1467,36 @@ def _render_00910_constituent_intro_table(
     )
 
 
+def _render_heatmap_constituent_intro_sections(
+    *,
+    etf_code: str,
+    snapshot_symbols: list[str],
+    service: MarketDataService,
+    full_rows_00910: list[dict[str, object]],
+):
+    symbols = [str(symbol or "").strip().upper() for symbol in snapshot_symbols if str(symbol or "").strip()]
+    if not symbols:
+        return
+
+    etf_text = str(etf_code or "").strip().upper()
+    st.markdown("---")
+    if etf_text == "00910":
+        st.markdown("#### 00910 全球成分股公司簡介")
+        _render_00910_constituent_intro_table(
+            service=service,
+            full_rows=full_rows_00910,
+        )
+        st.markdown("#### 成分股公司簡介")
+    else:
+        st.markdown("#### 成分股公司簡介")
+
+    _render_tw_constituent_intro_table(
+        etf_code=etf_text,
+        symbols=symbols,
+        service=service,
+    )
+
+
 PAGE_CARDS = [
     {"key": "即時看盤", "desc": "台股/美股即時報價、即時走勢與技術快照。"},
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
@@ -1286,6 +1508,7 @@ PAGE_CARDS = [
     {"key": "兩檔 ETF 推薦", "desc": "以共識代表+低重疊動能，收斂為兩檔建議組合。"},
     {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效。"},
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
+    {"key": "熱力圖總表", "desc": "集中管理你開啟過的 ETF 熱力圖與釘選卡片。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
     {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
     {"key": "00993A 熱力圖", "desc": "00993A 成分股回測的相對大盤熱力圖。"},
@@ -1297,6 +1520,18 @@ PAGE_CARDS = [
 DEFAULT_ACTIVE_PAGE = "回測工作台"
 DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
+
+
+def _runtime_page_cards() -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = [dict(item) for item in PAGE_CARDS]
+    existing_keys = {str(item.get("key", "")).strip() for item in cards}
+    for item in _dynamic_heatmap_cards():
+        key = str(item.get("key", "")).strip()
+        if not key or key in existing_keys:
+            continue
+        cards.append(item)
+        existing_keys.add(key)
+    return cards
 
 
 def _strategy_label(name: str) -> str:
@@ -2557,7 +2792,8 @@ def _render_design_toolbox():
 
 
 def _render_page_cards_nav() -> str:
-    page_options = [item["key"] for item in PAGE_CARDS]
+    cards = _runtime_page_cards()
+    page_options = [item["key"] for item in cards]
     default_page = DEFAULT_ACTIVE_PAGE if DEFAULT_ACTIVE_PAGE in page_options else page_options[0]
     active_page = str(st.session_state.get("active_page", default_page))
     if active_page not in page_options:
@@ -2566,7 +2802,7 @@ def _render_page_cards_nav() -> str:
 
     st.markdown("#### 功能卡片")
     cols = st.columns(5, gap="small")
-    for idx, item in enumerate(PAGE_CARDS):
+    for idx, item in enumerate(cards):
         key = item["key"]
         desc = item["desc"]
         is_active = key == active_page
@@ -2803,6 +3039,208 @@ TW_ETF_TYPE_WHITELIST: dict[str, str] = {
 }
 
 
+TW_ETF_MANAGEMENT_FEE_FALLBACK: dict[str, str] = {
+    # NOTE:
+    # - 管理費為公開資訊（基金公開說明書/公告）。
+    # - 若為級距費率，顯示為「x.xx%起」。
+    "0050": "0.15%起",
+    "0052": "0.15%起",
+    "0056": "0.40%起",
+    "006208": "0.15%起",
+    "00935": "0.40%起",
+    "00993A": "0.80%",
+    "00995A": "0.75%起",
+}
+
+
+def _normalize_tw_etf_management_fee_label(value: object) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    token = token.replace("％", "%").replace("﹪", "%")
+    has_from = "起" in token
+    if token.endswith("%") or token.endswith("%起"):
+        return token
+    try:
+        base = float(token)
+    except Exception:
+        m = re.search(r"(\d+(?:\.\d+)?)", token)
+        if not m:
+            return ""
+        base = float(m.group(1))
+    out = f"{base:.2f}%"
+    if has_from:
+        out += "起"
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_tw_etf_aum_billion_map() -> dict[str, float]:
+    import requests
+
+    out: dict[str, float] = {}
+    try:
+        resp = requests.get("https://www.twse.com.tw/zh/ETFortune/etfExcel", timeout=20)
+        resp.raise_for_status()
+        text = resp.content.decode("cp950", errors="ignore")
+        rows = csv.reader(StringIO(text))
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 5:
+                continue
+            raw_code = str(row[0] or "").strip().upper()
+            m = re.search(r"(\d{4,6}[A-Z]?)", raw_code)
+            if not m:
+                continue
+            code = m.group(1)
+            raw_aum = str(row[4] or "").strip().replace(",", "")
+            if raw_aum in {"", "--", "-"}:
+                continue
+            try:
+                aum = float(raw_aum)
+            except Exception:
+                continue
+            if not math.isfinite(aum) or aum < 0:
+                continue
+            out[code] = float(aum)
+    except Exception:
+        return {}
+    return out
+
+
+def _lookup_tw_etf_aum_billion(code: object) -> Optional[float]:
+    token = str(code or "").strip().upper()
+    if not token or token.startswith("^"):
+        return None
+    value = _load_tw_etf_aum_billion_map().get(token)
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(val) or val < 0:
+        return None
+    return val
+
+
+def _format_tw_etf_aum_billion(code: object) -> str:
+    value = _lookup_tw_etf_aum_billion(code)
+    if value is None:
+        return "—"
+    text = f"{value:,.2f}"
+    if text.endswith(".00"):
+        return text[:-3]
+    return text.rstrip("0").rstrip(".")
+
+
+def _attach_tw_etf_aum_column(
+    frame: pd.DataFrame,
+    *,
+    code_col_candidates: tuple[str, ...] = ("代碼", "ETF代碼"),
+    column_name: str = "ETF規模(億)",
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    code_col = next((col for col in code_col_candidates if col in frame.columns), "")
+    if not code_col:
+        return frame
+
+    out = frame.copy()
+    out[column_name] = out[code_col].map(_format_tw_etf_aum_billion)
+
+    anchor_col = next((col for col in ("管理費", "ETF", "ETF名稱", "代碼", "ETF代碼") if col in out.columns), "")
+    if not anchor_col:
+        return out
+    cols = list(out.columns)
+    if column_name in cols:
+        cols.remove(column_name)
+        insert_at = cols.index(anchor_col) + 1
+        cols.insert(insert_at, column_name)
+        out = out[cols]
+    return out
+
+
+def _load_tw_etf_management_fee_whitelist() -> dict[str, str]:
+    out = dict(TW_ETF_MANAGEMENT_FEE_FALLBACK)
+    cfg_path = Path(__file__).resolve().parent / "conf" / "tw_etf_management_fees.json"
+    try:
+        payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return out
+    raw = payload.get("fees") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        code = str(key or "").strip().upper()
+        if not code:
+            continue
+        label = _normalize_tw_etf_management_fee_label(value)
+        if not label:
+            continue
+        out[code] = label
+    return out
+
+
+TW_ETF_MANAGEMENT_FEE_WHITELIST: dict[str, str] = _load_tw_etf_management_fee_whitelist()
+
+
+def _lookup_tw_etf_management_fee_label(code: object) -> str:
+    token = str(code or "").strip().upper()
+    if not token or token.startswith("^"):
+        return ""
+    value = TW_ETF_MANAGEMENT_FEE_WHITELIST.get(token)
+    if value is None:
+        return ""
+    return _normalize_tw_etf_management_fee_label(value)
+
+
+def _lookup_tw_etf_management_fee_pct(code: object) -> Optional[float]:
+    label = _lookup_tw_etf_management_fee_label(code)
+    if not label:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)", label)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+
+def _format_tw_etf_management_fee(code: object) -> str:
+    label = _lookup_tw_etf_management_fee_label(code)
+    if not label:
+        return "—"
+    return label
+
+
+def _attach_tw_etf_management_fee_column(
+    frame: pd.DataFrame,
+    *,
+    code_col_candidates: tuple[str, ...] = ("代碼", "ETF代碼"),
+    column_name: str = "管理費",
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    code_col = next((col for col in code_col_candidates if col in frame.columns), "")
+    if not code_col:
+        return frame
+
+    out = frame.copy()
+    out[column_name] = out[code_col].map(_format_tw_etf_management_fee)
+
+    anchor_col = next((col for col in ("ETF", "ETF名稱", "代碼", "ETF代碼") if col in out.columns), "")
+    if not anchor_col:
+        return out
+    cols = list(out.columns)
+    if column_name in cols:
+        cols.remove(column_name)
+        insert_at = cols.index(anchor_col) + 1
+        cols.insert(insert_at, column_name)
+        out = out[cols]
+    return _attach_tw_etf_aum_column(out, code_col_candidates=code_col_candidates)
+
+
 def _classify_tw_etf(name: str, code: str = "") -> str:
     text = str(name or "").strip()
     code_text = str(code or "").strip().upper()
@@ -2982,6 +3420,7 @@ def _build_tw_etf_top10_between(
     out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
     out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
     out["復權事件"] = out["復權事件"].replace("", "—")
+    out = _attach_tw_etf_management_fee_column(out, code_col_candidates=("代碼",))
     return out, start_used, end_used, universe_count
 
 
@@ -3112,6 +3551,7 @@ def _build_tw_active_etf_ytd_between(
     out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
     out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
     out["復權事件"] = out["復權事件"].replace("", "—")
+    out = _attach_tw_etf_management_fee_column(out, code_col_candidates=("代碼",))
     return out, start_used, end_used
 
 
@@ -3224,12 +3664,15 @@ def _decorate_tw_etf_top10_ytd_table(
     if underperform_label:
         benchmark_row[underperform_label] = 0.0 if market_return_pct is not None else np.nan
     table_df = pd.concat([pd.DataFrame([benchmark_row]), etf_df], ignore_index=True)
+    table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
     if "排名" in table_df.columns:
         table_df["排名"] = table_df["排名"].map(lambda v: str(v) if pd.notna(v) else "")
     columns_order = [
         "排名",
         "代碼",
         "ETF",
+        "管理費",
+        "ETF規模(億)",
         "類型",
         "期初收盤",
         "復權期初",
@@ -3311,6 +3754,8 @@ def _build_tw_etf_all_types_performance_table(
         "排名",
         "代碼",
         "ETF",
+        "管理費",
+        "ETF規模(億)",
         "類型",
         "2025績效(%)",
         "2026YTD績效(%)",
@@ -3357,6 +3802,13 @@ def _safe_weight_pct(value: object) -> Optional[float]:
     if number is None or number < 0:
         return None
     return float(number)
+
+
+def _format_weight_pct_label(value: object) -> str:
+    weight = _safe_weight_pct(value)
+    if weight is None:
+        return "—"
+    return f"{weight:.2f}%"
 
 
 def _consensus_threshold_candidates(etf_count: int) -> list[int]:
@@ -4169,12 +4621,83 @@ def _render_tw_etf_all_types_view():
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
         st.caption("排序規則：先依 ETF 類型，再依 2026 YTD 績效由高到低。")
 
+        table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(table_df)
+        if table_link_config:
+            st.caption("可直接點擊 `ETF` 中文名稱，在新分頁開啟對應熱力圖（內容同 00935 熱力圖）。")
         st.dataframe(
-            table_df,
+            table_with_links,
             use_container_width=True,
             hide_index=True,
-            height=min(_full_table_height(table_df), 1200),
+            height=min(_full_table_height(table_with_links), 1200),
+            column_config=table_link_config if table_link_config else None,
         )
+        hub_col1, hub_col2 = st.columns([2, 1])
+        with hub_col1:
+            st.caption("已開啟/已快取的 ETF 熱力圖可在 `熱力圖總表` 分頁集中管理。")
+        with hub_col2:
+            if st.button("前往 熱力圖總表", key="go_heatmap_hub_page", use_container_width=True):
+                st.session_state["active_page"] = "熱力圖總表"
+                st.rerun()
+
+
+def _render_heatmap_hub_view():
+    st.subheader("熱力圖總表")
+    with st.container(border=True):
+        _render_card_section_header("已快取 ETF 熱力圖", "集中管理你曾開啟過的 ETF 熱力圖，並可釘選成獨立卡片。")
+        entries = _load_heatmap_hub_entries(pinned_only=False)
+        if not entries:
+            st.caption("目前尚無已開啟的 ETF 熱力圖紀錄。先到「台股 ETF 全類型總表」點擊 ETF 名稱即可新增。")
+            return
+
+        total_count = len(entries)
+        pinned_count = int(sum(1 for row in entries if bool(getattr(row, "pin_as_card", False))))
+        opened_total = int(sum(max(0, int(getattr(row, "open_count", 0) or 0)) for row in entries))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("已快取 ETF 熱力圖", str(total_count))
+        m2.metric("釘選成獨立卡片", str(pinned_count))
+        m3.metric("累計開啟次數", str(opened_total))
+
+        h1, h2, h3, h4, h5, h6 = st.columns([1.1, 2.6, 1.6, 1.0, 1.0, 1.0])
+        h1.caption("ETF代碼")
+        h2.caption("ETF名稱（新分頁）")
+        h3.caption("最近開啟")
+        h4.caption("開啟次數")
+        h5.caption("釘選卡片")
+        h6.caption("本頁開啟")
+
+        for entry in entries:
+            code = _normalize_heatmap_etf_code(getattr(entry, "etf_code", ""))
+            if not code:
+                continue
+            name = _clean_heatmap_name_for_query(getattr(entry, "etf_name", "")) or code
+            last_opened = getattr(entry, "last_opened_at", None)
+            if isinstance(last_opened, datetime):
+                if last_opened.tzinfo is None:
+                    last_opened = last_opened.replace(tzinfo=timezone.utc)
+                last_opened_text = last_opened.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                last_opened_text = str(last_opened or "—").strip() or "—"
+            open_count = int(getattr(entry, "open_count", 0) or 0)
+            pinned = bool(getattr(entry, "pin_as_card", False))
+            open_url = _build_heatmap_drill_url(code, name, src="heatmap_hub")
+            pin_key = f"heatmap_hub_pin:{code}"
+            if pin_key not in st.session_state:
+                st.session_state[pin_key] = pinned
+
+            c1, c2, c3, c4, c5, c6 = st.columns([1.1, 2.6, 1.6, 1.0, 1.0, 1.0])
+            c1.markdown(f"`{code}`")
+            c2.link_button(label=name, url=open_url, use_container_width=True)
+            c3.caption(last_opened_text)
+            c4.caption(str(open_count))
+            pin_now = c5.checkbox("釘選", key=pin_key, label_visibility="collapsed")
+            if bool(pin_now) != pinned:
+                _set_heatmap_hub_pin(etf_code=code, pin_as_card=bool(pin_now))
+                st.rerun()
+            if c6.button("開啟", key=f"heatmap_hub_open:{code}", use_container_width=True):
+                _upsert_heatmap_hub_entry(etf_code=code, etf_name=name, opened=True)
+                st.session_state[HEATMAP_HUB_SESSION_ACTIVE_KEY] = {"code": code, "name": name}
+                st.session_state["active_page"] = f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}"
+                st.rerun()
 
 
 def _render_bottom20_etf_2025_view():
@@ -4686,6 +5209,7 @@ def _render_consensus_representative_etf_view():
 
     alternatives_df = payload.get("alternatives_df")
     if isinstance(alternatives_df, pd.DataFrame) and not alternatives_df.empty:
+        alternatives_df = _attach_tw_etf_management_fee_column(alternatives_df, code_col_candidates=("ETF代碼",))
         with st.container(border=True):
             _render_card_section_header("代表性排名（建議 + 備選）", "以交集權重覆蓋率排序，前3檔可作為核心與備選。")
             show_cols = [
@@ -4694,6 +5218,8 @@ def _render_consensus_representative_etf_view():
                     "排名",
                     "ETF代碼",
                     "ETF名稱",
+                    "管理費",
+                    "ETF規模(億)",
                     "交集股數",
                     "交集權重總和(%)",
                     "可用權重總和(%)",
@@ -4717,6 +5243,7 @@ def _render_consensus_representative_etf_view():
 
     representative_df = payload.get("representative_df")
     if isinstance(representative_df, pd.DataFrame) and not representative_df.empty:
+        representative_df = _attach_tw_etf_management_fee_column(representative_df, code_col_candidates=("ETF代碼",))
         with st.container(border=True):
             _render_card_section_header("完整代表性排名", "若前3檔分數接近，可在此比較完整名單。")
             show_cols = [
@@ -4725,6 +5252,8 @@ def _render_consensus_representative_etf_view():
                     "排名",
                     "ETF代碼",
                     "ETF名稱",
+                    "管理費",
+                    "ETF規模(億)",
                     "交集股數",
                     "交集權重總和(%)",
                     "可用權重總和(%)",
@@ -4858,13 +5387,15 @@ def _render_two_etf_pick_view():
 
     recommendation_df = payload.get("recommendation_df")
     if isinstance(recommendation_df, pd.DataFrame) and not recommendation_df.empty:
+        recommendation_df = _attach_tw_etf_management_fee_column(recommendation_df, code_col_candidates=("ETF代碼",))
         with st.container(border=True):
             _render_card_section_header("推薦結果", "核心檔重代表性，衛星檔重低重疊動能。")
-            show_cols = [col for col in ["角色", "ETF代碼", "ETF名稱", "ETF類型", "YTD報酬(%)", "與核心重疊度(%)", "說明"] if col in recommendation_df.columns]
+            show_cols = [col for col in ["角色", "ETF代碼", "ETF名稱", "管理費", "ETF規模(億)", "ETF類型", "YTD報酬(%)", "與核心重疊度(%)", "說明"] if col in recommendation_df.columns]
             st.dataframe(recommendation_df[show_cols], use_container_width=True, hide_index=True)
 
     candidate_df = payload.get("candidate_df")
     if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
+        candidate_df = _attach_tw_etf_management_fee_column(candidate_df, code_col_candidates=("ETF代碼",))
         with st.container(border=True):
             _render_card_section_header("候選比較", "顯示前10候選的報酬、重疊度與是否納入本次推薦。")
             show_cols = [
@@ -4873,6 +5404,8 @@ def _render_two_etf_pick_view():
                     "前10排名",
                     "ETF代碼",
                     "ETF名稱",
+                    "管理費",
+                    "ETF規模(億)",
                     "ETF類型",
                     "YTD報酬(%)",
                     "與核心重疊度(%)",
@@ -4978,12 +5511,15 @@ def _render_active_etf_2026_ytd_view():
             "贏輸台股大盤(%)": 0.0 if market_return_pct is not None else np.nan,
         }
         table_df = pd.concat([pd.DataFrame([benchmark_row]), etf_df], ignore_index=True)
+        table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
         if "排名" in table_df.columns:
             table_df["排名"] = table_df["排名"].map(lambda v: str(v) if pd.notna(v) else "")
         columns_order = [
             "排名",
             "代碼",
             "ETF",
+            "管理費",
+            "ETF規模(億)",
             "期初收盤",
             "復權期初",
             "期末收盤",
@@ -8798,16 +9334,17 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         z[r, c] = float(row["excess_pct"])
         label = str(row["symbol"]).strip()
         name_text = str(row.get("name", "")).strip()
+        weight_text = _format_weight_pct_label(row.get("weight_pct"))
         if name_text and not _is_unresolved_symbol_name(label, name_text):
-            txt[r, c] = f"<b>{label}</b><br>{name_text}<br>{row['excess_pct']:+.2f}%"
+            txt[r, c] = f"<b>{label}</b><br>{name_text}<br>權重 {weight_text}<br>{row['excess_pct']:+.2f}%"
         else:
-            txt[r, c] = f"<b>{label}</b><br>{row['excess_pct']:+.2f}%"
+            txt[r, c] = f"<b>{label}</b><br>權重 {weight_text}<br>{row['excess_pct']:+.2f}%"
         custom[r, c, 0] = float(row["asset_return_pct"])
         custom[r, c, 1] = float(row["benchmark_return_pct"])
         custom[r, c, 2] = str(row.get("benchmark_symbol", ""))
         custom[r, c, 3] = int(row.get("bars", 0))
         custom[r, c, 4] = str(row.get("market_tag", ""))
-        custom[r, c, 5] = str(row.get("weight_pct", ""))
+        custom[r, c, 5] = weight_text
         custom[r, c, 6] = name_text
 
     max_abs = _heatmap_max_abs(z)
@@ -9170,7 +9707,7 @@ def _render_00910_global_ytd_block(
     _render_excess_heatmap_panel(tw_df, title="國內成分股（TW vs 台股基準）")
     _render_excess_heatmap_panel(overseas_df, title="海外成分股（Overseas vs 對應海外基準）")
 
-def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
+def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_missing: bool = False):
     store = _history_store()
     service = _market_service()
     perf_timer = PerfTimer(enabled=perf_debug_enabled())
@@ -9365,6 +9902,19 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         symbols=symbol_options,
         full_rows=full_rows_for_name_lookup,
     )
+    symbol_weight_map_for_pick: dict[str, float] = {}
+    for row in full_rows_for_name_lookup:
+        if not isinstance(row, dict):
+            continue
+        symbol_token = _normalize_constituent_symbol(row.get("symbol"), row.get("tw_code"))
+        if not symbol_token:
+            continue
+        weight_pct = _safe_weight_pct(row.get("weight_pct"))
+        if weight_pct is None:
+            continue
+        old_value = symbol_weight_map_for_pick.get(symbol_token)
+        if old_value is None or float(weight_pct) > float(old_value):
+            symbol_weight_map_for_pick[symbol_token] = float(weight_pct)
 
     def _format_symbol_option(sym: str) -> str:
         code = str(sym)
@@ -9408,29 +9958,114 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
         f"{fee_rate}:{sell_tax}:{slippage}:{','.join(selected_symbols)}"
     )
-    if st.button(f"執行 {etf_text} 熱力圖回測", type="primary", use_container_width=True):
+    run_clicked = st.button(f"執行 {etf_text} 熱力圖回測", type="primary", use_container_width=True)
+    payload_before_run = st.session_state.get(payload_key)
+
+    def _should_auto_refresh_cached_heatmap(payload_obj: object) -> bool:
+        if not isinstance(payload_obj, dict) or not payload_obj:
+            return False
+        if start_dt is None or end_dt is None:
+            return False
+
+        generated_ts = pd.to_datetime(str(payload_obj.get("generated_at", "")).strip(), utc=True, errors="coerce")
+        if snapshot is not None:
+            snapshot_ts = pd.Timestamp(snapshot.fetched_at)
+            if snapshot_ts.tzinfo is None:
+                snapshot_ts = snapshot_ts.tz_localize("UTC")
+            else:
+                snapshot_ts = snapshot_ts.tz_convert("UTC")
+            if not pd.isna(generated_ts) and snapshot_ts > generated_ts:
+                return True
+
+        payload_end_ts = pd.to_datetime(str(payload_obj.get("end_date", "")).strip(), utc=True, errors="coerce")
+        if pd.isna(payload_end_ts):
+            return False
+
+        selected_end_ts = pd.Timestamp(end_dt)
+        if selected_end_ts.tzinfo is None:
+            selected_end_ts = selected_end_ts.tz_localize("UTC")
+        else:
+            selected_end_ts = selected_end_ts.tz_convert("UTC")
+
+        benchmark_symbol_for_check = str(
+            payload_obj.get("benchmark_symbol")
+            or {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(benchmark_choice, "^TWII")
+        ).strip().upper()
+        if not benchmark_symbol_for_check:
+            return False
+
+        benchmark_bars_for_check = _normalize_ohlcv_frame(
+            store.load_daily_bars(
+                symbol=benchmark_symbol_for_check,
+                market="TW",
+                start=start_dt,
+                end=end_dt,
+            )
+        )
+        if benchmark_bars_for_check.empty:
+            return False
+
+        latest_local_ts = pd.Timestamp(benchmark_bars_for_check.index.max())
+        if latest_local_ts.tzinfo is None:
+            latest_local_ts = latest_local_ts.tz_localize("UTC")
+        else:
+            latest_local_ts = latest_local_ts.tz_convert("UTC")
+
+        return (
+            latest_local_ts.normalize() <= selected_end_ts.normalize()
+            and latest_local_ts.normalize() > payload_end_ts.normalize()
+        )
+
+    auto_trigger_reason = ""
+    if auto_run_if_missing and not run_clicked and date_is_valid:
+        if not isinstance(payload_before_run, dict) or not payload_before_run:
+            auto_trigger_reason = "missing_payload"
+        elif _should_auto_refresh_cached_heatmap(payload_before_run):
+            auto_trigger_reason = "market_updated"
+
+    if run_clicked or auto_trigger_reason:
         if not date_is_valid:
             st.error("日期區間無效，請先修正起訖日期。")
             return
-        if not symbol_options:
-            st.error(f"尚未載入 {etf_text} 成分股，請先按「更新 {etf_text} 成分股」。")
-            return
-        if not selected_symbols:
-            st.error("請至少選擇 1 檔成分股。")
-            return
 
         run_symbols = list(selected_symbols)
-        with st.spinner("同步最新成分股中..."):
-            symbols_latest, source_latest = service.get_tw_etf_constituents(etf_text, limit=None)
-            if symbols_latest:
-                store.save_universe_snapshot(universe_id=universe_id, symbols=symbols_latest, source=source_latest)
-                snapshot = store.load_universe_snapshot(universe_id)
-                if set(selected_symbols) == set(symbol_options):
-                    run_symbols = symbols_latest
-                else:
-                    run_symbols = [s for s in selected_symbols if s in symbols_latest]
-                    if not run_symbols:
-                        run_symbols = symbols_latest
+        symbol_options_before_refresh = list(symbol_options)
+        selected_all_before = bool(symbol_options_before_refresh) and set(selected_symbols) == set(symbol_options_before_refresh)
+        should_refresh_snapshot = bool(run_clicked or auto_trigger_reason == "missing_payload")
+
+        if should_refresh_snapshot:
+            with st.spinner("同步最新成分股中..."):
+                symbols_latest, source_latest = service.get_tw_etf_constituents(etf_text, limit=None)
+                if symbols_latest:
+                    store.save_universe_snapshot(universe_id=universe_id, symbols=symbols_latest, source=source_latest)
+                    snapshot = store.load_universe_snapshot(universe_id)
+                    symbol_options = list(snapshot.symbols) if snapshot and snapshot.symbols else []
+                    if selected_all_before or not selected_symbols:
+                        run_symbols = list(symbols_latest)
+                    else:
+                        run_symbols = [s for s in selected_symbols if s in symbols_latest]
+                        if not run_symbols:
+                            run_symbols = list(symbols_latest)
+
+        if not symbol_options:
+            if auto_trigger_reason:
+                st.warning(f"尚未載入 {etf_text} 成分股，請先按「更新 {etf_text} 成分股」。")
+            else:
+                st.error(f"尚未載入 {etf_text} 成分股，請先按「更新 {etf_text} 成分股」。")
+            return
+        if not run_symbols:
+            if auto_trigger_reason:
+                run_symbols = list(symbol_options)
+            else:
+                st.error("請至少選擇 1 檔成分股。")
+                return
+
+        if auto_trigger_reason == "missing_payload":
+            st.caption(f"首次開啟 {etf_text} 熱力圖：已自動更新成分股並建立快取。")
+            st.caption("自動建圖僅使用本地資料，不主動打外部同步；若要補齊缺資料，請手動按「執行熱力圖回測」。")
+        elif auto_trigger_reason == "market_updated":
+            st.caption(f"{etf_text} 市場資料較快取更新，已自動重算熱力圖。")
+            st.caption("自動重算僅使用本地資料，不主動打外部同步；若要補齊缺資料，請手動按「執行熱力圖回測」。")
 
         run_key = (
             f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
@@ -9446,6 +10081,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                 min_required=min_required,
                 sync_before_run=bool(sync_before_run),
                 parallel_sync=bool(parallel_sync),
+                lazy_sync_on_insufficient=not bool(auto_trigger_reason),
                 normalize_ohlcv_frame=_normalize_ohlcv_frame,
             )
         bars_cache = dict(prepared.bars_cache)
@@ -9484,6 +10120,11 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
             min_required=min_required,
             progress_callback=lambda ratio: progress.progress(float(ratio)),
         )
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            symbol_token = str(item.get("symbol", "")).strip().upper()
+            item["weight_pct"] = symbol_weight_map_for_pick.get(symbol_token)
 
         progress.empty()
         perf_timer.mark("heatmap_rows_computed")
@@ -9531,6 +10172,9 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         name_col="name",
     )
     rows_df["name"] = rows_df["name"].astype(str).str.strip()
+    if "weight_pct" not in rows_df.columns:
+        rows_df["weight_pct"] = np.nan
+    rows_df["weight_pct"] = rows_df["weight_pct"].where(rows_df["weight_pct"].notna(), rows_df["symbol"].map(symbol_weight_map_for_pick))
 
     rows_df = rows_df.sort_values("excess_pct", ascending=False).reset_index(drop=True)
     winners = int((rows_df["excess_pct"] > 0).sum())
@@ -9581,7 +10225,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     tile_rows = int(math.ceil(len(rows_df) / tiles_per_row))
     z = np.full((tile_rows, tiles_per_row), np.nan)
     txt = np.full((tile_rows, tiles_per_row), "", dtype=object)
-    custom = np.empty((tile_rows, tiles_per_row, 4), dtype=object)
+    custom = np.empty((tile_rows, tiles_per_row, 5), dtype=object)
     custom[:, :, :] = None
 
     for i, row in rows_df.iterrows():
@@ -9590,14 +10234,16 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
         z[r, c] = float(row["excess_pct"])
         label = str(row["symbol"]).strip()
         name_text = str(row.get("name", "")).strip()
+        weight_text = _format_weight_pct_label(row.get("weight_pct"))
         if name_text and not _is_unresolved_symbol_name(label, name_text):
-            txt[r, c] = f"<b>{label}</b><br>{name_text}<br>{row['excess_pct']:+.2f}%"
+            txt[r, c] = f"<b>{label}</b><br>{name_text}<br>權重 {weight_text}<br>{row['excess_pct']:+.2f}%"
         else:
-            txt[r, c] = f"<b>{label}</b><br>{row['excess_pct']:+.2f}%"
+            txt[r, c] = f"<b>{label}</b><br>權重 {weight_text}<br>{row['excess_pct']:+.2f}%"
         custom[r, c, 0] = float(row["strategy_return_pct"])
         custom[r, c, 1] = float(row["benchmark_return_pct"])
         custom[r, c, 2] = str(row["status"])
         custom[r, c, 3] = str(row["name"])
+        custom[r, c, 4] = weight_text
 
     max_abs = _heatmap_max_abs(z)
     fig_heat = go.Figure(
@@ -9621,7 +10267,8 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
                     "策略報酬：%{customdata[0]:+.2f}%<br>"
                     "大盤報酬：%{customdata[1]:+.2f}%<br>"
                     "超額：%{z:+.2f}%<br>"
-                    "狀態：%{customdata[2]}"
+                    "狀態：%{customdata[2]}<br>"
+                    "權重：%{customdata[4]}"
                     "<extra></extra>"
                 ),
             )
@@ -9651,27 +10298,24 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str):
     )
 
     out_df = rows_df.copy()
+    if "weight_pct" in out_df.columns:
+        out_df["weight_pct"] = out_df["weight_pct"].map(_format_weight_pct_label)
     out_df["strategy_return_pct"] = out_df["strategy_return_pct"].map(lambda v: round(float(v), 2))
     out_df["benchmark_return_pct"] = out_df["benchmark_return_pct"].map(lambda v: round(float(v), 2))
     out_df["excess_pct"] = out_df["excess_pct"].map(lambda v: round(float(v), 2))
+    output_cols = [col for col in ["symbol", "name", "weight_pct", "strategy_return_pct", "benchmark_return_pct", "excess_pct", "status", "bars"] if col in out_df.columns]
     st.dataframe(
-        out_df[["symbol", "name", "strategy_return_pct", "benchmark_return_pct", "excess_pct", "status", "bars"]],
+        out_df[output_cols],
         use_container_width=True,
         hide_index=True,
     )
 
-    if etf_text in {"00935", "00993A", "0050", "0052"} and snapshot and snapshot.symbols:
-        st.markdown("---")
-        _render_tw_constituent_intro_table(
+    if snapshot and snapshot.symbols:
+        _render_heatmap_constituent_intro_sections(
             etf_code=etf_text,
-            symbols=list(snapshot.symbols),
+            snapshot_symbols=list(snapshot.symbols),
             service=service,
-        )
-    elif etf_text == "00910":
-        st.markdown("---")
-        _render_00910_constituent_intro_table(
-            service=service,
-            full_rows=full_rows_00910,
+            full_rows_00910=full_rows_00910,
         )
 
     perf_timer.mark("heatmap_render_complete")
@@ -10397,6 +11041,7 @@ def _render_db_browser_view():
 def main():
     st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
     _inject_ui_styles()
+    _consume_heatmap_drilldown_query()
     _consume_backtest_drilldown_query()
     _auto_run_daily_incremental_refresh(_history_store())
     st.title("即時走勢 / 多來源資料 / 回測平台")
@@ -10414,6 +11059,7 @@ def main():
         "兩檔 ETF 推薦": _render_two_etf_pick_view,
         "2026 YTD 主動式 ETF": _render_active_etf_2026_ytd_view,
         "ETF 輪動策略": _render_tw_etf_rotation_view,
+        "熱力圖總表": _render_heatmap_hub_view,
         "00910 熱力圖": _render_00910_heatmap_view,
         "00935 熱力圖": _render_00935_heatmap_view,
         "00993A 熱力圖": _render_00993a_heatmap_view,
@@ -10422,6 +11068,7 @@ def main():
         "資料庫檢視": _render_db_browser_view,
         "新手教學": _render_tutorial_view,
     }
+    page_renderers.update(_dynamic_heatmap_page_renderers())
     render_fn = page_renderers.get(active_page)
     if render_fn is None:
         st.error("頁面載入失敗，請重新整理後再試。")

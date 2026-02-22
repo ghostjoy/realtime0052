@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import parse_qs
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -12,10 +13,14 @@ from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
     _apply_unified_benchmark_hover,
+    _attach_tw_etf_aum_column,
     _benchmark_candidates_tw,
+    _attach_tw_etf_management_fee_column,
     _build_tw_etf_all_types_performance_table,
+    _build_heatmap_drill_url,
     _fill_unresolved_tw_names,
     _decorate_dataframe_backtest_links,
+    _decorate_tw_etf_name_heatmap_links,
     _decorate_tw_etf_top10_ytd_table,
     _build_data_health,
     _build_snapshot_health,
@@ -36,7 +41,12 @@ from app import (
     _load_tw_benchmark_bars,
     _snapshot_fallback_depth,
     _classify_tw_etf,
+    _format_weight_pct_label,
+    _normalize_heatmap_etf_code,
     _parse_drill_symbol,
+    _consume_heatmap_drilldown_query,
+    _dynamic_heatmap_page_renderers,
+    _render_heatmap_constituent_intro_sections,
 )
 
 
@@ -125,6 +135,188 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertTrue(str(out.iloc[1]["代碼"]).startswith("?bt_symbol=8069&bt_market=OTC"))
         self.assertTrue(str(out.iloc[2]["代碼"]).startswith("?bt_symbol=AAPL&bt_market=US"))
         self.assertTrue(pd.isna(out.iloc[3]["代碼"]))
+
+    def test_normalize_heatmap_etf_code(self):
+        self.assertEqual(_normalize_heatmap_etf_code("00935"), "00935")
+        self.assertEqual(_normalize_heatmap_etf_code("00993a"), "00993A")
+        self.assertEqual(_normalize_heatmap_etf_code("AAPL"), "")
+        self.assertEqual(_normalize_heatmap_etf_code(""), "")
+
+    def test_build_heatmap_drill_url(self):
+        url = _build_heatmap_drill_url("00935", "野村臺灣新科技50")
+        self.assertIn("hm_etf=00935", url)
+        self.assertIn("hm_open=1", url)
+        self.assertIn("hm_src=all_types_table", url)
+
+    def test_decorate_tw_etf_name_heatmap_links(self):
+        source = pd.DataFrame(
+            [
+                {"代碼": "00935", "ETF": "野村臺灣新科技50", "類型": "科技型"},
+                {"代碼": "0050", "ETF": "元大台灣50", "類型": "市值型"},
+            ]
+        )
+        out, cfg = _decorate_tw_etf_name_heatmap_links(source)
+        self.assertIn("ETF", cfg)
+        self.assertTrue(str(out.iloc[0]["ETF"]).startswith("?hm_etf=00935&hm_name="))
+        self.assertIn("hm_open=1", str(out.iloc[0]["ETF"]))
+
+    def test_render_heatmap_constituent_intro_sections_generic_etf(self):
+        fake_service = SimpleNamespace()
+        with patch("app.st.markdown") as markdown_mock, patch(
+            "app._render_tw_constituent_intro_table"
+        ) as tw_intro_mock, patch("app._render_00910_constituent_intro_table") as intro_00910_mock:
+            _render_heatmap_constituent_intro_sections(
+                etf_code="00735",
+                snapshot_symbols=["00735", "2330"],
+                service=fake_service,  # type: ignore[arg-type]
+                full_rows_00910=[],
+            )
+
+        intro_00910_mock.assert_not_called()
+        tw_intro_mock.assert_called_once_with(
+            etf_code="00735",
+            symbols=["00735", "2330"],
+            service=fake_service,
+        )
+        markdown_texts = [str(call.args[0]) for call in markdown_mock.call_args_list]
+        self.assertEqual(markdown_texts, ["---", "#### 成分股公司簡介"])
+
+    def test_render_heatmap_constituent_intro_sections_for_00910(self):
+        fake_service = SimpleNamespace()
+        full_rows = [{"symbol": "AAPL.US", "market": "US"}]
+        with patch("app.st.markdown") as markdown_mock, patch(
+            "app._render_tw_constituent_intro_table"
+        ) as tw_intro_mock, patch("app._render_00910_constituent_intro_table") as intro_00910_mock:
+            _render_heatmap_constituent_intro_sections(
+                etf_code="00910",
+                snapshot_symbols=["2330", "2454"],
+                service=fake_service,  # type: ignore[arg-type]
+                full_rows_00910=full_rows,
+            )
+
+        intro_00910_mock.assert_called_once_with(service=fake_service, full_rows=full_rows)
+        tw_intro_mock.assert_called_once_with(
+            etf_code="00910",
+            symbols=["2330", "2454"],
+            service=fake_service,
+        )
+        markdown_texts = [str(call.args[0]) for call in markdown_mock.call_args_list]
+        self.assertEqual(
+            markdown_texts,
+            [
+                "---",
+                "#### 00910 全球成分股公司簡介",
+                "#### 成分股公司簡介",
+            ],
+        )
+
+    def test_render_heatmap_constituent_intro_sections_skip_when_no_symbols(self):
+        fake_service = SimpleNamespace()
+        with patch("app.st.markdown") as markdown_mock, patch(
+            "app._render_tw_constituent_intro_table"
+        ) as tw_intro_mock, patch("app._render_00910_constituent_intro_table") as intro_00910_mock:
+            _render_heatmap_constituent_intro_sections(
+                etf_code="00735",
+                snapshot_symbols=[],
+                service=fake_service,  # type: ignore[arg-type]
+                full_rows_00910=[],
+            )
+
+        markdown_mock.assert_not_called()
+        tw_intro_mock.assert_not_called()
+        intro_00910_mock.assert_not_called()
+
+    def test_heatmap_drilldown_query_routes_to_dynamic_heatmap_renderer(self):
+        url = _build_heatmap_drill_url("00735", "國泰臺韓科技", src="all_types_table")
+        self.assertTrue(url.startswith("?"))
+        query = parse_qs(url.lstrip("?"))
+
+        def _query_value(name: str) -> str:
+            values = query.get(name, [])
+            return str(values[0]) if values else ""
+
+        old_active_page = None
+        old_active_payload = None
+        has_old_active_page = False
+        has_old_active_payload = False
+
+        import app
+
+        if "active_page" in app.st.session_state:
+            has_old_active_page = True
+            old_active_page = app.st.session_state.get("active_page")
+        if "heatmap_hub_active_etf" in app.st.session_state:
+            has_old_active_payload = True
+            old_active_payload = app.st.session_state.get("heatmap_hub_active_etf")
+
+        try:
+            with patch("app._query_param_first", side_effect=_query_value), patch(
+                "app._upsert_heatmap_hub_entry"
+            ) as upsert_mock, patch("app._clear_query_params") as clear_mock:
+                _consume_heatmap_drilldown_query()
+
+            self.assertEqual(str(app.st.session_state.get("active_page", "")), "ETF熱力圖:00735")
+            active_payload = app.st.session_state.get("heatmap_hub_active_etf")
+            self.assertIsInstance(active_payload, dict)
+            assert isinstance(active_payload, dict)
+            self.assertEqual(str(active_payload.get("code", "")), "00735")
+            self.assertEqual(str(active_payload.get("name", "")), "國泰臺韓科技")
+
+            upsert_mock.assert_called_once_with(
+                etf_code="00735",
+                etf_name="國泰臺韓科技",
+                opened=True,
+            )
+            clear_mock.assert_called_once()
+
+            with patch("app._load_heatmap_hub_entries", return_value=[]), patch(
+                "app._render_tw_etf_heatmap_view"
+            ) as render_mock:
+                renderers = _dynamic_heatmap_page_renderers()
+                self.assertIn("ETF熱力圖:00735", renderers)
+                renderers["ETF熱力圖:00735"]()
+
+            render_mock.assert_called_once_with("00735", page_desc="國泰臺韓科技", auto_run_if_missing=True)
+        finally:
+            if has_old_active_page:
+                app.st.session_state["active_page"] = old_active_page
+            else:
+                app.st.session_state.pop("active_page", None)
+            if has_old_active_payload:
+                app.st.session_state["heatmap_hub_active_etf"] = old_active_payload
+            else:
+                app.st.session_state.pop("heatmap_hub_active_etf", None)
+
+    def test_attach_management_fee_column(self):
+        source = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "^TWII", "ETF": "台股大盤"},
+            ]
+        )
+        out = _attach_tw_etf_management_fee_column(source)
+        self.assertIn("管理費", out.columns)
+        self.assertIn("ETF規模(億)", out.columns)
+        self.assertEqual(str(out.loc[out["代碼"] == "0050", "管理費"].iloc[0]), "0.15%起")
+        self.assertEqual(str(out.loc[out["代碼"] == "^TWII", "管理費"].iloc[0]), "—")
+
+    def test_attach_aum_column(self):
+        source = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "^TWII", "ETF": "台股大盤"},
+            ]
+        )
+        with patch("app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64}):
+            out = _attach_tw_etf_aum_column(source)
+        self.assertIn("ETF規模(億)", out.columns)
+        self.assertEqual(str(out.loc[out["代碼"] == "0050", "ETF規模(億)"].iloc[0]), "12,491.64")
+        self.assertEqual(str(out.loc[out["代碼"] == "^TWII", "ETF規模(億)"].iloc[0]), "—")
+
+    def test_format_weight_pct_label(self):
+        self.assertEqual(_format_weight_pct_label(3.456), "3.46%")
+        self.assertEqual(_format_weight_pct_label(""), "—")
+        self.assertEqual(_format_weight_pct_label(None), "—")
 
     def test_load_tw_benchmark_bars_fallback_chain(self):
         idx = pd.to_datetime(["2026-01-02", "2026-01-03"], utc=True)
