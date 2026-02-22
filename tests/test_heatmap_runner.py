@@ -73,6 +73,29 @@ class HeatmapRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(len(prepared.bars_cache["2330"]), 20)
         self.assertEqual(store.sync_calls, ["0050", "2330"])
 
+    def test_prepare_heatmap_bars_can_disable_lazy_sync(self):
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2025, 3, 1, tzinfo=timezone.utc)
+        store = _FakeStore(
+            bars_map={"0050": _bars(5, seed=11), "2330": pd.DataFrame()},
+            sync_map={"2330": _bars(40, seed=12)},
+        )
+        prepared = prepare_heatmap_bars(
+            store=store,
+            symbols=["0050", "2330"],
+            start_dt=start,
+            end_dt=end,
+            min_required=20,
+            sync_before_run=False,
+            parallel_sync=False,
+            lazy_sync_on_insufficient=False,
+            normalize_ohlcv_frame=_normalize,
+        )
+        self.assertIn("0050", prepared.bars_cache)
+        self.assertIn("2330", prepared.bars_cache)
+        self.assertEqual(len(prepared.bars_cache["2330"]), 0)
+        self.assertEqual(store.sync_calls, [])
+
     def test_compute_heatmap_rows(self):
         bars_0050 = _bars(80, seed=3)
         bars_2330 = _bars(80, seed=4)

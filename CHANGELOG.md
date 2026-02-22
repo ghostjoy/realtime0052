@@ -98,6 +98,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated conf/tw_etf_management_fees.json, services/heatmap_runner.py, storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_heatmap_runner.py, ... (+1) [id:4bc6c67a8b]
 - Auto: updated app.py, tests/test_active_etf_page.py [id:14cbfe2554]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, backtest/adjustments.py, tests/test_active_etf_page.py, tests/test_split_adjustments.py [id:a69a023b1b]
 - 分頁調整：原 `2025 前十大 ETF` 改為 `2026 YTD 前十大股利型、配息型 ETF`（台股），並沿用 `2026 YTD 前十大 ETF` 的同級內容（`2025績效`、`贏輸台股大盤`、Benchmark 對照圖與績效表）。
@@ -105,6 +106,13 @@
 - 新增 `ETF代碼 -> 類型` 白名單，分類時優先採用白名單，再回退名稱關鍵字，降低大量落入 `其他` 的情況。
 - 新增 `台股 ETF 全類型總表` 卡片：列出台股 ETF 全名單與類型，並同時顯示 `2025績效(%)`、`2026YTD績效(%)`、`贏輸台股大盤2025(%)`、`贏輸台股大盤2026YTD(%)`（僅表格，不含 Benchmark 圖）。
 - 新增全域表格「代碼可點擊回測」：所有含代碼欄位的表格都可直接點擊代碼，系統會自動跳轉到 `回測工作台`，帶入標的與市場並自動執行回測。
+- `台股 ETF 全類型總表` 新增 `ETF` 中文名稱點擊開啟熱力圖：點擊後可在新分頁以動態 ETF 代碼載入完整熱力圖內容（同 `00935` 卡片等級）。
+- 動態 ETF 熱力圖頁補齊自動建置快取流程：從 `台股 ETF 全類型總表` 點擊名稱開啟時，若該 ETF 尚無熱力圖快取，會自動更新成分股並直接執行回測；若已有快取則預設重用，僅在成分股或本地市場資料較快取更新時才自動重算。
+- ETF 相關卡片表格統一新增 `管理費` 欄位（白名單可維護，支援 `0.15%起` 級距格式；已預填核心 ETF 費率，未收錄顯示 `—`），涵蓋 Top10/全類型/主動式/共識代表/兩檔推薦等頁面。
+- ETF 相關卡片表格同步新增 `ETF規模(億)` 欄位：資料來源為 TWSE `etfExcel` 的資產規模欄位，快取載入；缺值顯示 `—`。
+- 新增 `conf/tw_etf_management_fees.json` 作為管理費公開資料快照來源，`app.py` 會自動載入 `fees` 映射（目前快照覆蓋 75/216 檔，其餘維持 `—`）。
+- 熱力圖方塊新增 `權重` 資訊：方塊文字與 hover 同步顯示；若有成分股權重資料會帶入，否則顯示 `—`。
+- 新增「熱力圖總表」區塊與持久化：記錄已開啟 ETF、開啟次數、最近開啟時間，並支援勾選「釘選為獨立卡片」動態加入導覽卡片。
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, conf/config.yaml, conf/features/default.yaml, conf/storage/duckdb.yaml, ... (+20) [id:1c648218cb]
 - 預設技術線切換為 `Hydra + DuckDB/Parquet`：
   - `conf/config.yaml` 預設 storage 改為 `duckdb`

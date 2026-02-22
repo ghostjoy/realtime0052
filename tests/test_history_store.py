@@ -193,6 +193,30 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(latest.universe_id, "TW:00935")
             self.assertEqual(latest.payload.get("generated_at"), "2026-01-02T00:00:00+00:00")
 
+    def test_upsert_and_list_heatmap_hub_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            store.upsert_heatmap_hub_entry(etf_code="00935", etf_name="野村臺灣新科技50", opened=True)
+            store.upsert_heatmap_hub_entry(etf_code="00935", etf_name="野村臺灣新科技50", opened=True, pin_as_card=True)
+            store.upsert_heatmap_hub_entry(etf_code="0050", etf_name="元大台灣50", opened=False)
+
+            all_rows = store.list_heatmap_hub_entries()
+            self.assertEqual(len(all_rows), 2)
+            top = all_rows[0]
+            self.assertEqual(top.etf_code, "00935")
+            self.assertTrue(top.pin_as_card)
+            self.assertEqual(top.open_count, 2)
+
+            pinned_rows = store.list_heatmap_hub_entries(pinned_only=True)
+            self.assertEqual(len(pinned_rows), 1)
+            self.assertEqual(pinned_rows[0].etf_code, "00935")
+
+            ok = store.set_heatmap_hub_pin(etf_code="0050", pin_as_card=True)
+            self.assertTrue(ok)
+            pinned_rows = store.list_heatmap_hub_entries(pinned_only=True)
+            self.assertEqual({row.etf_code for row in pinned_rows}, {"0050", "00935"})
+
     def test_save_and_load_latest_rotation_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"

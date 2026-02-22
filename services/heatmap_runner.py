@@ -57,6 +57,7 @@ def prepare_heatmap_bars(
     min_required: int,
     sync_before_run: bool,
     parallel_sync: bool,
+    lazy_sync_on_insufficient: bool = True,
     normalize_ohlcv_frame: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> HeatmapBarsPreparationResult:
     symbol_sync_issues: list[str] = []
@@ -79,7 +80,7 @@ def prepare_heatmap_bars(
         if len(bars_local) < int(min_required):
             symbols_need_sync.append(symbol)
 
-    if symbols_need_sync and not sync_before_run:
+    if symbols_need_sync and (not sync_before_run) and bool(lazy_sync_on_insufficient):
         _, lazy_sync_issues = sync_symbols_history(
             store=store,
             market="TW",

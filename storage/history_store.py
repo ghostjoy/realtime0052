@@ -89,6 +89,17 @@ class HeatmapRun:
 
 
 @dataclass(frozen=True)
+class HeatmapHubEntry:
+    etf_code: str
+    etf_name: str
+    pin_as_card: bool
+    open_count: int
+    last_opened_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class RotationRun:
     universe_id: str
     run_key: str
@@ -239,6 +250,16 @@ class HistoryStore:
                     payload_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS heatmap_hub_entries (
+                    etf_code TEXT PRIMARY KEY,
+                    etf_name TEXT NOT NULL,
+                    pin_as_card INTEGER NOT NULL DEFAULT 0,
+                    open_count INTEGER NOT NULL DEFAULT 0,
+                    last_opened_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS rotation_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     universe_id TEXT NOT NULL,
@@ -287,6 +308,9 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_heatmap_runs_universe_created_at
                     ON heatmap_runs(universe_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_heatmap_hub_entries_pin_updated
+                    ON heatmap_hub_entries(pin_as_card DESC, updated_at DESC);
 
                 CREATE INDEX IF NOT EXISTS idx_rotation_runs_universe_created_at
                     ON rotation_runs(universe_id, created_at DESC);
@@ -1175,6 +1199,108 @@ class HistoryStore:
             payload=payload,
             created_at=created_at,
         )
+
+    def upsert_heatmap_hub_entry(
+        self,
+        *,
+        etf_code: str,
+        etf_name: str,
+        opened: bool = False,
+        pin_as_card: Optional[bool] = None,
+    ) -> None:
+        code = self._normalize_symbol_token(etf_code)
+        if not code:
+            return
+        name = self._normalize_text(etf_name) or code
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT etf_name, pin_as_card, open_count, last_opened_at, created_at
+                FROM heatmap_hub_entries
+                WHERE etf_code=?
+                """,
+                (code,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO heatmap_hub_entries(
+                        etf_code, etf_name, pin_as_card, open_count, last_opened_at, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        code,
+                        name,
+                        1 if bool(pin_as_card) else 0,
+                        1 if bool(opened) else 0,
+                        now if bool(opened) else "",
+                        now,
+                        now,
+                    ),
+                )
+                return
+
+            existing_name = self._normalize_text(row[0]) or code
+            existing_pin = 1 if int(row[1] or 0) else 0
+            existing_open = int(row[2] or 0)
+            existing_last_opened = self._normalize_text(row[3])
+            created_at = self._normalize_text(row[4]) or now
+            next_pin = existing_pin if pin_as_card is None else (1 if bool(pin_as_card) else 0)
+            next_open = existing_open + (1 if bool(opened) else 0)
+            next_last_opened = now if bool(opened) else existing_last_opened
+            next_name = name or existing_name
+            conn.execute(
+                """
+                UPDATE heatmap_hub_entries
+                SET etf_name=?, pin_as_card=?, open_count=?, last_opened_at=?, created_at=?, updated_at=?
+                WHERE etf_code=?
+                """,
+                (next_name, next_pin, next_open, next_last_opened, created_at, now, code),
+            )
+
+    def list_heatmap_hub_entries(self, *, pinned_only: bool = False) -> list[HeatmapHubEntry]:
+        where_sql = "WHERE pin_as_card=1" if bool(pinned_only) else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT etf_code, etf_name, pin_as_card, open_count, last_opened_at, created_at, updated_at
+                FROM heatmap_hub_entries
+                {where_sql}
+                ORDER BY pin_as_card DESC, last_opened_at DESC, updated_at DESC, etf_code ASC
+                """
+            ).fetchall()
+        out: list[HeatmapHubEntry] = []
+        now = datetime.now(tz=timezone.utc)
+        for row in rows:
+            last_opened_at = self._parse_iso_datetime(row[4]) or now
+            created_at = self._parse_iso_datetime(row[5]) or now
+            updated_at = self._parse_iso_datetime(row[6]) or now
+            out.append(
+                HeatmapHubEntry(
+                    etf_code=self._normalize_symbol_token(row[0]),
+                    etf_name=self._normalize_text(row[1]) or self._normalize_symbol_token(row[0]),
+                    pin_as_card=bool(int(row[2] or 0)),
+                    open_count=max(0, int(row[3] or 0)),
+                    last_opened_at=last_opened_at,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                )
+            )
+        return out
+
+    def set_heatmap_hub_pin(self, *, etf_code: str, pin_as_card: bool) -> bool:
+        code = self._normalize_symbol_token(etf_code)
+        if not code:
+            return False
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE heatmap_hub_entries SET pin_as_card=?, updated_at=? WHERE etf_code=?",
+                (1 if bool(pin_as_card) else 0, now, code),
+            )
+            return int(cur.rowcount or 0) > 0
 
     def save_rotation_run(
         self,
