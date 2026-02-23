@@ -953,6 +953,21 @@ ETF_INDEX_METHOD_SUMMARY: dict[str, dict[str, object]] = {
             ("TWSE ETF e添富：00935 新上市資訊", "https://www.twse.com.tw/zh/ETFortune/newsDetail/ff8080818b7e232e018b83ab7de9002b"),
         ],
     },
+    "00735": {
+        "title": "00735 指數編製標準（官方摘要）",
+        "index_name": "臺韓資訊科技指數",
+        "provider": "臺灣指數公司（ETF e添富商品頁揭露）",
+        "rules": [
+            "追蹤臺灣與韓國資訊科技主題股票，跨市場布局台韓科技供應鏈。",
+            "成分股調整與檔數以臺灣指數公司與基金公司最新公告為準。",
+            "熱力圖頁會將完整成分股（含海外）與台股可回測子集合分開呈現。",
+        ],
+        "sources": [
+            ("TWSE ETF e添富：00735 商品資訊", "https://www.twse.com.tw/zh/ETFortune/etfInfo/00735"),
+            ("TWSE ETF e添富：ETF 商品總覽（含 00735 指數名稱）", "https://www.twse.com.tw/zh/ETFortune/products"),
+            ("臺灣指數公司：臺韓資訊科技指數定期審核公告（00735）", "https://taiwanindex.com.tw/news/366"),
+        ],
+    },
     "00910": {
         "title": "00910 指數編製標準（官方摘要）",
         "index_name": "Solactive 太空衛星指數（Solactive Aerospace and Satellite Index）",
@@ -968,6 +983,8 @@ ETF_INDEX_METHOD_SUMMARY: dict[str, dict[str, object]] = {
         ],
     },
 }
+
+ETF_FORCE_GLOBAL_HEATMAP = {"00910", "00735"}
 
 
 def _render_etf_index_method_summary(etf_code: str):
@@ -1189,7 +1206,9 @@ def _extract_tw_code_from_row(row: dict[str, object]) -> str:
     raw_symbol = str(row.get("symbol", "")).strip().upper()
     if not raw_symbol:
         return ""
-    match = re.search(r"(\d{4})", raw_symbol)
+    if re.fullmatch(r"\d{4}", raw_symbol):
+        return raw_symbol
+    match = re.fullmatch(r"(\d{4})\.(TW|TWO)", raw_symbol)
     if not match:
         return ""
     return str(match.group(1)).strip().upper()
@@ -1228,6 +1247,47 @@ def _enrich_rows_with_tw_names(
     return out_rows
 
 
+def _render_full_constituents_if_has_overseas(
+    *,
+    etf_code: str,
+    full_rows: list[dict[str, object]],
+    source: str,
+) -> bool:
+    if not full_rows:
+        return False
+    tw_subset_count = sum(
+        1
+        for row in full_rows
+        if isinstance(row, dict) and bool(_extract_tw_code_from_row(row))
+    )
+    total_count = len(full_rows)
+    overseas_count = max(0, total_count - tw_subset_count)
+    if overseas_count <= 0:
+        return False
+
+    etf_text = str(etf_code or "").strip().upper()
+    st.caption(
+        f"{etf_text} 完整成分股（含海外）共 {total_count} 檔 | 來源：{source} | "
+        f"其中台股可回測 {tw_subset_count} 檔。"
+    )
+    with st.expander(f"查看完整成分股（含海外，共 {total_count} 檔）", expanded=False):
+        out_df = pd.DataFrame(full_rows).rename(
+            columns={
+                "rank": "排名",
+                "symbol": "代號",
+                "name": "名稱",
+                "market": "市場",
+                "weight_pct": "權重(%)",
+                "shares": "持有股數",
+                "tw_code": "台股代碼(可回測)",
+            }
+        )
+        if "權重(%)" in out_df.columns:
+            out_df["權重(%)"] = pd.to_numeric(out_df["權重(%)"], errors="coerce").round(2)
+        st.dataframe(out_df, use_container_width=True, hide_index=True)
+    return True
+
+
 def _is_unresolved_symbol_name(symbol: str, name: str) -> bool:
     sym = str(symbol or "").strip().upper()
     nm = str(name or "").strip().upper()
@@ -1239,6 +1299,9 @@ def _is_unresolved_symbol_name(symbol: str, name: str) -> bool:
 def _extract_tw_symbol_code(value: object) -> str:
     text = str(value or "").strip().upper()
     if not text:
+        return ""
+    suffix_match = re.fullmatch(r".+\.([A-Z]+)", text)
+    if suffix_match and str(suffix_match.group(1)) not in {"TW", "TWO"}:
         return ""
     text = re.sub(r"\.(TW|TWO)$", "", text)
     if re.fullmatch(r"\d{4,6}[A-Z]?", text):
@@ -1472,6 +1535,98 @@ def _render_00910_constituent_intro_table(
     )
 
 
+def _rows_have_overseas_constituents(rows: list[dict[str, object]]) -> bool:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        market = str(row.get("market", "")).strip().upper()
+        if market and market not in {"TW", "TWO"}:
+            return True
+        symbol = str(row.get("symbol", "")).strip().upper()
+        tw_code = _extract_tw_code_from_row(row)
+        if "." in symbol and not tw_code:
+            return True
+    return False
+
+
+def _company_brief_for_global_generic(symbol: str, name: str, market_tag: str) -> str:
+    market = str(market_tag or "").strip().upper()
+    if market == "TW":
+        return "台灣科技供應鏈公司，主要布局半導體、電子零組件、網通或系統整合。"
+    if market == "KS":
+        return "韓國科技產業公司，常見於記憶體、半導體、平台服務與高階製造供應鏈。"
+    if market == "US":
+        return "美國科技公司，重點涵蓋雲端平台、軟體、晶片設計或數位服務。"
+    if market == "JP":
+        return "日本科技公司，常見於電子零組件、精密製造與工業自動化供應鏈。"
+    return f"{name or symbol} 為海外科技成分股，實際業務請以公司最新公開資訊為準。"
+
+
+def _render_global_constituent_intro_table(
+    *,
+    etf_code: str,
+    service: MarketDataService,
+    full_rows: list[dict[str, object]],
+):
+    rows_full_for_intro = list(full_rows)
+    if not rows_full_for_intro:
+        rows_full_for_intro, _ = service.get_etf_constituents_full(str(etf_code or "").strip().upper(), limit=None, force_refresh=False)
+    if not rows_full_for_intro:
+        return
+
+    rows_full_for_intro = _enrich_rows_with_tw_names(rows=rows_full_for_intro, service=service)
+    intro_df = pd.DataFrame(rows_full_for_intro)
+    if intro_df.empty:
+        return
+    if "rank" in intro_df.columns:
+        intro_df["rank"] = pd.to_numeric(intro_df["rank"], errors="coerce")
+        intro_df = intro_df.sort_values("rank", ascending=True, na_position="last")
+    intro_df["symbol"] = intro_df.get("symbol", pd.Series(dtype=str)).astype(str)
+    intro_df["tw_code"] = intro_df.get("tw_code", pd.Series(dtype=str)).astype(str).str.upper()
+    intro_df["name"] = intro_df.get("name", pd.Series(dtype=str)).astype(str)
+    intro_df["market"] = intro_df.get("market", pd.Series(dtype=str)).astype(str).str.upper()
+    tw_mask = intro_df["tw_code"].str.fullmatch(r"\d{4}", na=False)
+    if tw_mask.any():
+        intro_df.loc[tw_mask, "symbol"] = intro_df.loc[tw_mask, "tw_code"]
+        intro_df.loc[tw_mask & (intro_df["market"] == ""), "market"] = "TW"
+    if "market" in intro_df.columns:
+        intro_df = intro_df[intro_df["market"] != ""]
+        # Filter to overseas list for global introduction.
+        intro_df = intro_df[intro_df["market"] != "TW"].copy()
+    if intro_df.empty:
+        return
+    intro_df["weight_pct"] = pd.to_numeric(intro_df.get("weight_pct"), errors="coerce").round(2)
+    etf_text = str(etf_code or "").strip().upper()
+    briefs: list[str] = []
+    for _, row in intro_df.iterrows():
+        symbol = str(row.get("symbol", "")).strip()
+        name = str(row.get("name", "")).strip()
+        market = str(row.get("market", "")).strip().upper()
+        if etf_text == "00910":
+            brief = _company_brief_for_00910(symbol=symbol, name=name, market_tag=market)
+        else:
+            brief = _company_brief_for_global_generic(symbol=symbol, name=name, market_tag=market)
+        briefs.append(brief)
+    intro_df["brief"] = briefs
+    show_cols = [c for c in ["rank", "symbol", "name", "market", "weight_pct", "brief"] if c in intro_df.columns]
+    out_intro = intro_df[show_cols].rename(
+        columns={
+            "rank": "排名",
+            "symbol": "代號",
+            "name": "名稱",
+            "market": "市場",
+            "weight_pct": "權重(%)",
+            "brief": "公司簡介",
+        }
+    )
+    st.dataframe(
+        out_intro,
+        use_container_width=True,
+        hide_index=True,
+        height=_full_table_height(out_intro),
+    )
+
+
 def _render_heatmap_constituent_intro_sections(
     *,
     etf_code: str,
@@ -1485,12 +1640,20 @@ def _render_heatmap_constituent_intro_sections(
 
     etf_text = str(etf_code or "").strip().upper()
     st.markdown("---")
-    if etf_text == "00910":
-        st.markdown("#### 00910 全球成分股公司簡介")
-        _render_00910_constituent_intro_table(
-            service=service,
-            full_rows=full_rows_00910,
-        )
+    has_global_intro = _rows_have_overseas_constituents(full_rows_00910)
+    if has_global_intro:
+        st.markdown(f"#### {etf_text} 全球成分股公司簡介")
+        if etf_text == "00910":
+            _render_00910_constituent_intro_table(
+                service=service,
+                full_rows=full_rows_00910,
+            )
+        else:
+            _render_global_constituent_intro_table(
+                etf_code=etf_text,
+                service=service,
+                full_rows=full_rows_00910,
+            )
         st.markdown("#### 成分股公司簡介")
     else:
         st.markdown("#### 成分股公司簡介")
@@ -1516,6 +1679,7 @@ PAGE_CARDS = [
     {"key": "熱力圖總表", "desc": "集中管理你開啟過的 ETF 熱力圖與釘選卡片。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
     {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
+    {"key": "00735 熱力圖", "desc": "00735 成分股回測的相對大盤熱力圖。"},
     {"key": "00993A 熱力圖", "desc": "00993A 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "0052 熱力圖", "desc": "0052 成分股回測的相對大盤熱力圖。"},
@@ -9145,6 +9309,7 @@ def _render_tutorial_view():
             {"分頁": "ETF 輪動策略", "你會看到什麼": "固定 ETF 池月調倉回測、調倉明細、持有最久排名", "什麼時候用": "看規則化輪動是否優於基準"},
             {"分頁": "00910 熱力圖", "你會看到什麼": "全球成分股 YTD 分組熱力圖 + 台股子集合進階回測", "什麼時候用": "同時看國內/海外成分股相對表現"},
             {"分頁": "00935 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 00935 內部強弱分布"},
+            {"分頁": "00735 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 00735 內部強弱分布"},
             {"分頁": "00993A 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 00993A 內部強弱分布"},
             {"分頁": "0050 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介（依權重排序）", "什麼時候用": "看台灣 50 內部強弱"},
             {"分頁": "0052 熱力圖", "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介", "什麼時候用": "看 0052 內部強弱分布"},
@@ -9161,7 +9326,7 @@ def _render_tutorial_view():
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
                 "3. 再到 `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
-                "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00993A / 0050 / 0052 熱力圖`。",
+                "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00735 / 00993A / 0050 / 0052 熱力圖`。",
                 "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
             ]
         )
@@ -9449,9 +9614,11 @@ def _render_00910_global_ytd_block(
     store: HistoryStore,
     service: MarketDataService,
     page_key: str,
+    etf_code: str,
     full_rows: list[dict[str, object]],
 ):
-    st.markdown("### 00910 全球成分股 YTD 熱力圖（Buy & Hold）")
+    etf_text = str(etf_code or "").strip().upper()
+    st.markdown(f"### {etf_text} 全球成分股 YTD 熱力圖（Buy & Hold）")
     today = date.today()
     ytd_start_date = date(today.year, 1, 1)
     ytd_end_date = today
@@ -9459,30 +9626,30 @@ def _render_00910_global_ytd_block(
     end_dt = datetime.combine(ytd_end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
 
     c1, c2, c3, c4 = st.columns(4)
-    tw_benchmark = c1.selectbox("台股基準", options=["^TWII", "0050"], index=0, key=f"{page_key}_00910_bench_tw")
-    us_benchmark = c2.selectbox("美股基準", options=["QQQ", "^IXIC"], index=0, key=f"{page_key}_00910_bench_us")
-    jp_benchmark = c3.selectbox("日股基準", options=["^N225"], index=0, key=f"{page_key}_00910_bench_jp")
-    ks_benchmark = c4.selectbox("韓股基準", options=["^KS11"], index=0, key=f"{page_key}_00910_bench_ks")
+    tw_benchmark = c1.selectbox("台股基準", options=["^TWII", "0050"], index=0, key=f"{page_key}_global_bench_tw")
+    us_benchmark = c2.selectbox("美股基準", options=["QQQ", "^IXIC"], index=0, key=f"{page_key}_global_bench_us")
+    jp_benchmark = c3.selectbox("日股基準", options=["^N225"], index=0, key=f"{page_key}_global_bench_jp")
+    ks_benchmark = c4.selectbox("韓股基準", options=["^KS11"], index=0, key=f"{page_key}_global_bench_ks")
     s1, s2 = st.columns(2)
     sync_before_run = s1.checkbox(
         "執行前同步最新日K（推薦）",
         value=True,
-        key=f"{page_key}_00910_sync_ytd",
+        key=f"{page_key}_global_sync_ytd",
     )
     parallel_sync = s2.checkbox(
         "平行同步",
         value=True,
-        key=f"{page_key}_00910_parallel_ytd",
+        key=f"{page_key}_global_parallel_ytd",
     )
     st.caption(
         f"YTD 區間：{ytd_start_date.isoformat()} ~ {ytd_end_date.isoformat()}。"
         "台股成分對台股基準；海外成分依市場對應基準（US/JP/KS）。"
     )
 
-    universe_id = "TW:00910:GLOBAL_YTD"
+    universe_id = f"TW:{etf_text}:GLOBAL_YTD"
     payload_key = f"{page_key}_global_ytd_payload"
     run_key = (
-        f"00910_global_ytd:{ytd_start_date}:{ytd_end_date}:{tw_benchmark}:"
+        f"{etf_text}_global_ytd:{ytd_start_date}:{ytd_end_date}:{tw_benchmark}:"
         f"{us_benchmark}:{jp_benchmark}:{ks_benchmark}"
     )
     cached_run = store.load_latest_heatmap_run(universe_id)
@@ -9499,13 +9666,13 @@ def _render_00910_global_ytd_block(
                 out.append(text)
         return out
 
-    run_now = st.button("執行 00910 YTD 全球熱力圖", type="primary", use_container_width=True, key=f"{page_key}_00910_run_ytd")
+    run_now = st.button(f"執行 {etf_text} YTD 全球熱力圖", type="primary", use_container_width=True, key=f"{page_key}_global_run_ytd")
     if run_now:
         rows_full = list(full_rows)
         if not rows_full:
-            rows_full, _ = service.get_etf_constituents_full("00910", limit=None, force_refresh=True)
+            rows_full, _ = service.get_etf_constituents_full(etf_text, limit=None, force_refresh=True)
         if not rows_full:
-            st.error("目前抓不到 00910 完整成分股（含海外），請稍後重試。")
+            st.error(f"目前抓不到 {etf_text} 完整成分股（含海外），請稍後重試。")
             return
         rows_full = _enrich_rows_with_tw_names(rows=rows_full, service=service)
 
@@ -9559,7 +9726,7 @@ def _render_00910_global_ytd_block(
             )
 
         if not universe_items:
-            st.error("00910 成分股清單為空，無法執行。")
+            st.error(f"{etf_text} 成分股清單為空，無法執行。")
             return
 
         sync_issues: list[str] = []
@@ -9576,7 +9743,7 @@ def _render_00910_global_ytd_block(
                     *[str(it["benchmark_symbol"]) for it in universe_items if str(it["benchmark_market"]) == "US"],
                 ]
             )
-            with st.spinner("同步 00910 YTD 所需資料中..."):
+            with st.spinner(f"同步 {etf_text} YTD 所需資料中..."):
                 if tw_symbols:
                     _, issues_tw = _sync_symbols_history(
                         store,
@@ -9683,7 +9850,7 @@ def _render_00910_global_ytd_block(
 
     payload = st.session_state.get(payload_key)
     if not payload:
-        st.info("按下「執行 00910 YTD 全球熱力圖」後，會顯示國內/海外分組結果。")
+        st.info(f"按下「執行 {etf_text} YTD 全球熱力圖」後，會顯示國內/海外分組結果。")
         return
     if payload.get("run_key") != run_key:
         st.caption("目前顯示的是上一次執行結果；若要套用目前基準設定，請重新執行。")
@@ -9824,6 +9991,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
 
     full_rows_00910: list[dict[str, object]] = []
     full_rows_for_name_lookup: list[dict[str, object]] = []
+    has_overseas_constituents = False
     snapshot = store.load_universe_snapshot(universe_id)
     u1, u2 = st.columns([1, 4])
     refresh_constituents = u1.button(f"更新 {etf_text} 成分股", use_container_width=True)
@@ -9846,48 +10014,31 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
             f"快取時間：{snapshot.fetched_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
-        if etf_text == "00910":
-            full_rows, full_source = service.get_etf_constituents_full(
-                etf_text, limit=None, force_refresh=bool(refresh_constituents)
+        try:
+            rows_full, full_source = service.get_etf_constituents_full(
+                etf_text,
+                limit=None,
+                force_refresh=bool(refresh_constituents),
             )
-            full_rows_00910 = _enrich_rows_with_tw_names(rows=list(full_rows), service=service)
-            full_rows_for_name_lookup = list(full_rows_00910)
-            if full_rows:
-                full_df = pd.DataFrame(full_rows_00910)
-                tw_subset_count = int((full_df["tw_code"].astype(str) != "").sum()) if "tw_code" in full_df.columns else 0
-                st.caption(
-                    f"00910 完整成分股（含海外）共 {len(full_rows)} 檔 | 來源：{full_source} | "
-                    f"其中台股可回測 {tw_subset_count} 檔。"
-                )
-                with st.expander(f"查看完整成分股（含海外，共 {len(full_rows)} 檔）", expanded=False):
-                    out_df = full_df.rename(
-                        columns={
-                            "rank": "排名",
-                            "symbol": "代號",
-                            "name": "名稱",
-                            "market": "市場",
-                            "weight_pct": "權重(%)",
-                            "shares": "持有股數",
-                            "tw_code": "台股代碼(可回測)",
-                        }
-                    )
-                    if "權重(%)" in out_df.columns:
-                        out_df["權重(%)"] = pd.to_numeric(out_df["權重(%)"], errors="coerce").round(2)
-                    st.dataframe(out_df, use_container_width=True, hide_index=True)
-            else:
+        except Exception:
+            rows_full = []
+            full_source = "unavailable"
+        full_rows_for_name_lookup = _enrich_rows_with_tw_names(rows=list(rows_full), service=service)
+        if etf_text == "00910":
+            full_rows_00910 = list(full_rows_for_name_lookup)
+            if not full_rows_00910:
                 st.caption("00910 完整成分股（含海外）目前抓取失敗，請稍後按「更新 00910 成分股」重試。")
-        else:
-            try:
-                rows_full, _ = service.get_etf_constituents_full(
-                    etf_text,
-                    limit=None,
-                    force_refresh=bool(refresh_constituents),
-                )
-            except Exception:
-                rows_full = []
-            full_rows_for_name_lookup = _enrich_rows_with_tw_names(rows=list(rows_full), service=service)
+        has_overseas_constituents = _render_full_constituents_if_has_overseas(
+            etf_code=etf_text,
+            full_rows=full_rows_for_name_lookup,
+            source=full_source,
+        )
+        has_overseas_constituents = bool(has_overseas_constituents or etf_text in ETF_FORCE_GLOBAL_HEATMAP)
 
-        with st.expander(f"查看全部成分股（{len(snapshot.symbols)}）", expanded=False):
+        snapshot_expander_title = (
+            f"查看台股可回測成分股（{len(snapshot.symbols)}）" if has_overseas_constituents else f"查看全部成分股（{len(snapshot.symbols)}）"
+        )
+        with st.expander(snapshot_expander_title, expanded=False):
             name_map_all = _resolve_tw_symbol_names(
                 service=service,
                 symbols=snapshot.symbols,
@@ -9898,16 +10049,17 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
     else:
         u2.caption(f"尚未載入 {etf_text} 成分股快取。你仍可先查看上次回測結果，或按「更新 {etf_text} 成分股」後再重新回測。")
 
-    if etf_text == "00910":
+    if has_overseas_constituents:
         _render_00910_global_ytd_block(
             store=store,
             service=service,
             page_key=page_key,
-            full_rows=full_rows_00910,
+            etf_code=etf_text,
+            full_rows=full_rows_for_name_lookup,
         )
         st.markdown("---")
         st.markdown("#### 台股子集合進階熱力圖（自訂區間/策略）")
-        st.caption("下方為 00910 台股子集合回測，僅比較可回測的台股成分。")
+        st.caption(f"下方為 {etf_text} 台股子集合回測，僅比較可回測的台股成分。")
 
     symbol_options = list(snapshot.symbols) if snapshot and snapshot.symbols else []
     symbol_key = f"{page_key}_symbol_pick"
@@ -10336,7 +10488,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
             etf_code=etf_text,
             snapshot_symbols=list(snapshot.symbols),
             service=service,
-            full_rows_00910=full_rows_00910,
+            full_rows_00910=full_rows_for_name_lookup,
         )
 
     perf_timer.mark("heatmap_render_complete")
@@ -10794,6 +10946,10 @@ def _render_00935_heatmap_view():
     _render_tw_etf_heatmap_view("00935", page_desc="科技類")
 
 
+def _render_00735_heatmap_view():
+    _render_tw_etf_heatmap_view("00735", page_desc="科技類")
+
+
 def _render_00910_heatmap_view():
     _render_tw_etf_heatmap_view("00910", page_desc="第一金太空衛星")
 
@@ -11083,6 +11239,7 @@ def main():
         "熱力圖總表": _render_heatmap_hub_view,
         "00910 熱力圖": _render_00910_heatmap_view,
         "00935 熱力圖": _render_00935_heatmap_view,
+        "00735 熱力圖": _render_00735_heatmap_view,
         "00993A 熱力圖": _render_00993a_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
         "0052 熱力圖": _render_0052_heatmap_view,
