@@ -100,6 +100,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated data_sources.py, tests/test_data_sources.py [id:b435b20941]
 - Auto: updated services/sync_orchestrator.py, tests/test_sync_orchestrator.py [id:2487a039f8]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, ui/core/__init__.py, ui/core/charts.py, ui/core/health.py, ... (+4) [id:2c82b8503d]
 - 架構重構（第一波，瘦身 `app.py`）：
@@ -190,6 +191,10 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正回測/同步時 Yahoo 缺資料的終端噪音洗版：
+  - `data_sources.fetch_yf_ohlcv` 改為優先使用 `Ticker.history(...)` 取單一標的日K
+  - 對 `yfinance` logger 加入靜音保護，避免 `$XXXX.TW: possibly delisted` 與 `Failed downloads` 重複訊息刷屏
+  - 無資料時仍維持回傳空 DataFrame，交由既有 fallback 與同步錯誤摘要處理
 - 修正 DuckDB 平行同步偶發 `Binder Error: Unique file handle conflict`：
   - `services/sync_orchestrator.py` 新增可重試判斷（`Unique file handle conflict` / `Cannot attach market_history`）
   - 平行同步若遇到上述錯誤，僅針對失敗 symbol 自動做一次序列重試，其他 symbol 維持原平行流程

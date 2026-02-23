@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +17,21 @@ TAIPEI_TZ = ZoneInfo("Asia/Taipei") if ZoneInfo else timezone.utc
 
 class DataSourceError(RuntimeError):
     pass
+
+
+class _YfQuiet:
+    def __init__(self):
+        self._logger = logging.getLogger("yfinance")
+        self._prev_level = self._logger.level
+
+    def __enter__(self):
+        self._prev_level = self._logger.level
+        self._logger.setLevel(logging.CRITICAL + 1)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._logger.setLevel(self._prev_level)
+        return False
 
 
 def _to_float(value: str | None) -> Optional[float]:
@@ -205,24 +221,14 @@ def fetch_yf_ohlcv(symbol: str, period: str, interval: str):
     import pandas as pd
     import yfinance as yf
 
+    # Avoid noisy yfinance "Failed downloads" stderr output by preferring
+    # per-symbol history API instead of batch download API.
     try:
-        df = yf.download(
-            symbol,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=False,
-            threads=False,
-        )
-    except Exception:
-        df = pd.DataFrame()
-
-    if df is None or df.empty:
-        try:
+        with _YfQuiet():
             ticker = yf.Ticker(symbol)
             df = ticker.history(period=period, interval=interval, auto_adjust=False)
-        except Exception:
-            df = pd.DataFrame()
+    except Exception:
+        df = pd.DataFrame()
 
     if df is None or df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
