@@ -100,6 +100,12 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated PROJECT_CONTEXT.md, README.md, app.py, ui/core/__init__.py, ui/core/charts.py, ui/core/health.py, ... (+4) [id:2c82b8503d]
+- 架構重構（第一波，瘦身 `app.py`）：
+  - 新增 `ui/pages/live.py`、`ui/pages/backtest.py`，將 `即時看盤` 與 `回測工作台` 主流程搬離 `app.py`
+  - 新增 `ui/core/charts.py`，集中管理 Benchmark / Live / 指標副圖渲染函式
+  - 新增 `ui/core/page_registry.py`、`ui/core/health.py`，抽離頁面導覽與資料健康度 helper
+  - `app.py` 相關函式改為 thin wrapper，頁面路由與核心流程維持既有行為
 - Auto: updated storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_history_store.py [id:0e867bc138]
 - Auto: updated README.md, app.py, conf/tw_etf_management_fees.json, scripts/manage_tw_etf_fees.py [id:e82c0cab0d]
 - Auto: updated conf/tw_etf_management_fees.json, services/heatmap_runner.py, storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_heatmap_runner.py, ... (+1) [id:4bc6c67a8b]

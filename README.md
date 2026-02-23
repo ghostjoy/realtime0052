@@ -371,7 +371,12 @@ uv run python -m unittest discover -s tests -v
 
 ## 專案結構（主要）
 
-- `app.py`：Streamlit UI 主流程（即時看盤 / 回測工作台 / 2026 YTD 前十大股利型、配息型 ETF / 2026 YTD 前十大 ETF / 2025 後20大最差勁 ETF / 共識代表 ETF / 兩檔 ETF 推薦 / 2026 YTD 主動式 ETF / ETF 輪動策略 / 00910 熱力圖 / 00935 熱力圖 / 00735 熱力圖 / 00993A 熱力圖 / 0050 熱力圖 / 0052 熱力圖 / 資料庫檢視 / 新手教學）
+- `app.py`：Streamlit 啟動入口 + 全域樣式 + 頁面路由（其餘分頁渲染已逐步抽離）
+- `ui/pages/live.py`：`即時看盤` 分頁主流程
+- `ui/pages/backtest.py`：`回測工作台` 分頁主流程
+- `ui/core/charts.py`：共用圖表渲染（Live / Indicator / Benchmark）
+- `ui/core/health.py`：資料健康度與同步錯誤摘要 helper
+- `ui/core/page_registry.py`：功能卡片導覽組裝與切頁 helper
 - `services/market_data_service.py`：多來源 provider chain 與資料品質封裝
 - `providers/`：各資料來源 adapter
 - `storage/history_store.py`：SQLite schema、增量同步、回測紀錄

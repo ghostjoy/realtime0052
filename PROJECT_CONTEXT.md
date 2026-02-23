@@ -27,8 +27,18 @@
 ## 2) 核心模組
 
 - `app.py`
-  - Streamlit UI 主流程與互動狀態管理
-  - 各分頁渲染函式
+  - Streamlit 啟動入口、全域樣式、查詢參數處理與頁面路由
+  - 第一波瘦身後，`即時看盤/回測工作台` 主渲染已搬到 `ui/pages/*`
+- `ui/pages/live.py`
+  - `即時看盤` 分頁主流程（sidebar 控制、live fragment、即時圖卡與指標）
+- `ui/pages/backtest.py`
+  - `回測工作台` 分頁主流程（參數卡、回測執行、回放、Benchmark 對照與 DCA 比較）
+- `ui/core/charts.py`
+  - 共用圖表渲染（Benchmark 多線圖、Live K 線、指標副圖）
+- `ui/core/health.py`
+  - 共用資料健康度與同步錯誤摘要 helper
+- `ui/core/page_registry.py`
+  - 共用導覽卡片組裝與頁面切換渲染 helper
 - `services/market_data_service.py`
   - 多來源市場資料邏輯（含 fallback）
   - 台股即時來源：`Fugle WS -> TW MIS -> TW OpenAPI -> TPEx OpenAPI`
