@@ -100,6 +100,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated services/sync_orchestrator.py, tests/test_sync_orchestrator.py [id:2487a039f8]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, ui/core/__init__.py, ui/core/charts.py, ui/core/health.py, ... (+4) [id:2c82b8503d]
 - 架構重構（第一波，瘦身 `app.py`）：
   - 新增 `ui/pages/live.py`、`ui/pages/backtest.py`，將 `即時看盤` 與 `回測工作台` 主流程搬離 `app.py`
@@ -189,6 +190,10 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正 DuckDB 平行同步偶發 `Binder Error: Unique file handle conflict`：
+  - `services/sync_orchestrator.py` 新增可重試判斷（`Unique file handle conflict` / `Cannot attach market_history`）
+  - 平行同步若遇到上述錯誤，僅針對失敗 symbol 自動做一次序列重試，其他 symbol 維持原平行流程
+  - 降低熱力圖回測（如 `009803`）在部分成分股同步時的隨機失敗率
 - 修正 Benchmark 同步在 `^TWII` 等台股指數代碼的來源路由：
   - `storage/history_store.py` 與 `storage/duck_store.py` 會先判斷是否為台股本地股票/ETF代碼（4~6碼，可含尾碼字母）
   - 非本地代碼（如 `^TWII`）改為直接走 `yahoo`，避免先觸發 `tw_fugle_rest:UNSUPPORTED`、`tw_openapi:EMPTY` 等預期性錯誤噪音

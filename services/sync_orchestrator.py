@@ -12,6 +12,15 @@ if TYPE_CHECKING:
     from storage import HistoryStore
 
 
+def _is_retryable_duckdb_handle_conflict(message: object) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    if "unique file handle conflict" in text:
+        return True
+    return ("cannot attach" in text) and ("market_history" in text)
+
+
 def normalize_symbols(symbols: list[str]) -> list[str]:
     ordered: list[str] = []
     for symbol in symbols:
@@ -44,9 +53,9 @@ def sync_symbols_history(
 ) -> tuple[dict[str, object], list[str]]:
     ordered_symbols = normalize_symbols(symbols)
     reports: dict[str, object] = {}
-    issues: list[str] = []
+    issues_by_symbol: dict[str, str] = {}
     if not ordered_symbols:
-        return reports, issues
+        return reports, []
 
     def _run_one(symbol: str) -> object:
         return store.sync_symbol_history(symbol=symbol, market=market, start=start, end=end)
@@ -59,13 +68,15 @@ def sync_symbols_history(
                 reports[symbol] = report
                 err = str(getattr(report, "error", "") or "").strip()
                 if err:
-                    issues.append(f"{symbol}: {err}")
+                    issues_by_symbol[symbol] = f"{symbol}: {err}"
             except Exception as exc:
                 reports[symbol] = None
-                issues.append(f"{symbol}: {exc}")
+                issues_by_symbol[symbol] = f"{symbol}: {exc}"
+        issues = [issues_by_symbol[symbol] for symbol in ordered_symbols if symbol in issues_by_symbol]
         return reports, issues
 
     workers = max(1, min(int(max_workers), len(ordered_symbols)))
+    retry_symbols: set[str] = set()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_run_one, symbol): symbol for symbol in ordered_symbols}
         for future in as_completed(futures):
@@ -75,10 +86,31 @@ def sync_symbols_history(
                 reports[symbol] = report
                 err = str(getattr(report, "error", "") or "").strip()
                 if err:
-                    issues.append(f"{symbol}: {err}")
+                    issues_by_symbol[symbol] = f"{symbol}: {err}"
+                    if _is_retryable_duckdb_handle_conflict(err):
+                        retry_symbols.add(symbol)
             except Exception as exc:
                 reports[symbol] = None
-                issues.append(f"{symbol}: {exc}")
+                issues_by_symbol[symbol] = f"{symbol}: {exc}"
+                if _is_retryable_duckdb_handle_conflict(exc):
+                    retry_symbols.add(symbol)
+
+    for symbol in ordered_symbols:
+        if symbol not in retry_symbols:
+            continue
+        try:
+            report = _run_one(symbol)
+            reports[symbol] = report
+            err = str(getattr(report, "error", "") or "").strip()
+            if err:
+                issues_by_symbol[symbol] = f"{symbol}: {err}"
+            else:
+                issues_by_symbol.pop(symbol, None)
+        except Exception as exc:
+            reports[symbol] = None
+            issues_by_symbol[symbol] = f"{symbol}: {exc}"
+
+    issues = [issues_by_symbol[symbol] for symbol in ordered_symbols if symbol in issues_by_symbol]
     return reports, issues
 
 

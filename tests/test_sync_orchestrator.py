@@ -7,7 +7,7 @@ from typing import Optional
 
 import pandas as pd
 
-from services.sync_orchestrator import bars_need_backfill, sync_symbols_if_needed
+from services.sync_orchestrator import bars_need_backfill, sync_symbols_history, sync_symbols_if_needed
 
 
 def _bars(start: str, periods: int) -> pd.DataFrame:
@@ -38,6 +38,26 @@ class _FakeStore:
         self.sync_calls.append(code)
         err = self._errors.get(code, "")
         return SimpleNamespace(error=err, rows_upserted=5, source="unit", fallback_depth=0)
+
+
+class _DuckConflictOnceStore(_FakeStore):
+    def __init__(self, bars_map: dict[str, pd.DataFrame]):
+        super().__init__(bars_map=bars_map, errors=None)
+        self._attempts: dict[str, int] = {}
+
+    def sync_symbol_history(self, symbol, market, start=None, end=None):
+        code = str(symbol).upper()
+        self.sync_calls.append(code)
+        attempt = int(self._attempts.get(code, 0)) + 1
+        self._attempts[code] = attempt
+        if attempt == 1:
+            return SimpleNamespace(
+                error='Binder Error: Unique file handle conflict: Cannot attach "market_history"',
+                rows_upserted=0,
+                source="unit",
+                fallback_depth=0,
+            )
+        return SimpleNamespace(error="", rows_upserted=5, source="unit", fallback_depth=0)
 
 
 class SyncOrchestratorTests(unittest.TestCase):
@@ -95,6 +115,25 @@ class SyncOrchestratorTests(unittest.TestCase):
         self.assertEqual(plan.synced_symbols, ["AAA"])
         self.assertEqual(plan.skipped_symbols, ["BBB"])
         self.assertIn("AAA", reports)
+
+    def test_sync_symbols_history_retries_duckdb_attach_conflict(self):
+        start = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        end = datetime(2026, 1, 8, tzinfo=timezone.utc)
+        store = _DuckConflictOnceStore(bars_map={})
+        reports, issues = sync_symbols_history(
+            store=store,
+            market="TW",
+            symbols=["2882", "6781"],
+            start=start,
+            end=end,
+            parallel=True,
+            max_workers=2,
+        )
+        self.assertEqual(issues, [])
+        self.assertIn("2882", reports)
+        self.assertIn("6781", reports)
+        self.assertEqual(store.sync_calls.count("2882"), 2)
+        self.assertEqual(store.sync_calls.count("6781"), 2)
 
 
 if __name__ == "__main__":
