@@ -294,6 +294,21 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(report.source, "tw_fugle_rest")
             self.assertEqual(service.last_provider_name, "tw_fugle_rest")
 
+    def test_sync_history_tw_index_uses_yahoo_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            service = _CaptureService()
+            service.tw_fugle_rest.api_key = "fake-key"
+            store = HistoryStore(db_path=db_path, service=service)
+            start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            end = datetime(2024, 1, 31, tzinfo=timezone.utc)
+
+            report = store.sync_symbol_history(symbol="^TWII", market="TW", start=start, end=end)
+            self.assertEqual(report.source, "yahoo")
+            self.assertEqual(service.last_provider_name, "yahoo")
+            assert service.last_request is not None
+            self.assertEqual(service.last_request.symbol, "^TWII")
+
     def test_sync_history_normalizes_duplicate_ohlcv_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"

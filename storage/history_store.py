@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 from dataclasses import dataclass
@@ -350,6 +351,11 @@ class HistoryStore:
     @staticmethod
     def _normalize_text(value: object) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _is_tw_local_security_symbol(symbol: str) -> bool:
+        token = str(symbol or "").strip().upper()
+        return bool(re.fullmatch(r"\d{4,6}[A-Z]?", token))
 
     def upsert_symbol_metadata(self, rows: list[Dict[str, object]]) -> int:
         payload: list[tuple[str, str, str, str, str, str, str, str, str]] = []
@@ -744,21 +750,28 @@ class HistoryStore:
             )
 
         request = ProviderRequest(symbol=symbol, market=market, interval="1d", start=fetch_start, end=end)
+        is_tw_local_symbol = self._is_tw_local_security_symbol(symbol)
 
         if market == "US":
             providers = [self.service.us_twelve, self.service.yahoo, self.service.us_stooq]
         elif market == "OTC":
-            providers = []
-            fugle_rest = getattr(self.service, "tw_fugle_rest", None)
-            if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
-                providers.append(fugle_rest)
-            providers.extend([self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo])
+            if is_tw_local_symbol:
+                providers = []
+                fugle_rest = getattr(self.service, "tw_fugle_rest", None)
+                if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
+                    providers.append(fugle_rest)
+                providers.extend([self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo])
+            else:
+                providers = [self.service.yahoo]
         else:
-            providers = []
-            fugle_rest = getattr(self.service, "tw_fugle_rest", None)
-            if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
-                providers.append(fugle_rest)
-            providers.extend([self.service.tw_openapi, self.service.yahoo])
+            if is_tw_local_symbol:
+                providers = []
+                fugle_rest = getattr(self.service, "tw_fugle_rest", None)
+                if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
+                    providers.append(fugle_rest)
+                providers.extend([self.service.tw_openapi, self.service.yahoo])
+            else:
+                providers = [self.service.yahoo]
         source = "unknown"
         fallback_depth = 0
         stale = False

@@ -3,7 +3,9 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -14,6 +16,43 @@ from storage.duck_store import DuckHistoryStore
 class _NoopService:
     def set_metadata_store(self, store):
         self.store = store
+
+
+class _Provider:
+    def __init__(self, name: str, api_key: str | None = None):
+        self.name = name
+        self.api_key = api_key
+
+
+class _CaptureSyncService:
+    def __init__(self):
+        self.us_twelve = _Provider("twelvedata")
+        self.yahoo = _Provider("yahoo")
+        self.us_stooq = _Provider("stooq")
+        self.tw_fugle_rest = _Provider("tw_fugle_rest", api_key="fake-key")
+        self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex = _Provider("tw_tpex")
+        self.last_request = None
+        self.last_provider_name: str | None = None
+
+    def set_metadata_store(self, store):
+        self.store = store
+
+    def _try_ohlcv_chain(self, providers, request):
+        self.last_request = request
+        self.last_provider_name = str(getattr(providers[0], "name", "") or "")
+        idx = pd.date_range("2024-01-01", periods=5, freq="B", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "volume": 1000.0,
+            },
+            index=idx,
+        )
+        return SimpleNamespace(df=df, source=self.last_provider_name)
 
 
 def _seed_legacy_sqlite(path: Path):
@@ -168,6 +207,24 @@ class DuckStoreTests(unittest.TestCase):
             self.assertTrue(ok)
             pinned_rows = store.list_heatmap_hub_entries(pinned_only=True)
             self.assertEqual({row.etf_code for row in pinned_rows}, {"0050", "00935"})
+
+    def test_sync_tw_index_uses_yahoo_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            service = _CaptureSyncService()
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=service,
+                auto_migrate_legacy_sqlite=False,
+            )
+            start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            end = datetime(2024, 1, 31, tzinfo=timezone.utc)
+
+            report = store.sync_symbol_history(symbol="^TWII", market="TW", start=start, end=end)
+            self.assertEqual(report.source, "yahoo")
+            self.assertEqual(service.last_provider_name, "yahoo")
+            self.assertEqual(str(getattr(service.last_request, "symbol", "")), "^TWII")
 
 
 if __name__ == "__main__":

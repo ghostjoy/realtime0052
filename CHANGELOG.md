@@ -100,6 +100,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_history_store.py [id:0e867bc138]
 - Auto: updated README.md, app.py, conf/tw_etf_management_fees.json, scripts/manage_tw_etf_fees.py [id:e82c0cab0d]
 - Auto: updated conf/tw_etf_management_fees.json, services/heatmap_runner.py, storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_heatmap_runner.py, ... (+1) [id:4bc6c67a8b]
 - Auto: updated app.py, tests/test_active_etf_page.py [id:14cbfe2554]
@@ -182,6 +183,10 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正 Benchmark 同步在 `^TWII` 等台股指數代碼的來源路由：
+  - `storage/history_store.py` 與 `storage/duck_store.py` 會先判斷是否為台股本地股票/ETF代碼（4~6碼，可含尾碼字母）
+  - 非本地代碼（如 `^TWII`）改為直接走 `yahoo`，避免先觸發 `tw_fugle_rest:UNSUPPORTED`、`tw_openapi:EMPTY` 等預期性錯誤噪音
+  - 保留既有台股本地代碼鏈路（Fugle/OpenAPI/TPEx/Yahoo fallback）
 - 修正回測工作台 `bt_fee_rate / bt_sell_tax / bt_slippage` widget 初始化方式：
   - 避免同時使用 `Session State API` 指定值與 `number_input(..., value=..., key=...)` 造成 `StreamlitAPIException`
   - 改為先正規化 `session_state` 浮點值，再由 widget 透過 `key` 讀取
