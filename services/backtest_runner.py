@@ -9,6 +9,7 @@ import pandas as pd
 
 from backtest import CostModel, apply_split_adjustment, run_backtest, run_portfolio_backtest, walk_forward_portfolio, walk_forward_single
 from services.benchmark_loader import benchmark_candidates_tw
+from utils import normalize_ohlcv_frame
 
 
 class HistoryStoreLike(Protocol):
@@ -95,47 +96,6 @@ def benchmark_candidates(market_code: str, choice: str) -> list[str]:
     return mapping.get(selected, ["^GSPC"])
 
 
-def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-
-    out = df.copy()
-    if isinstance(out.columns, pd.MultiIndex):
-        renamed: list[str] = []
-        for col in out.columns:
-            parts = [str(part).strip().lower() for part in col if str(part).strip()]
-            candidate = ""
-            for item in reversed(parts):
-                if item in {"open", "high", "low", "close", "adj close", "adj_close", "volume", "price"}:
-                    candidate = item
-                    break
-            renamed.append(candidate or (parts[-1] if parts else ""))
-        out.columns = renamed
-    else:
-        out.columns = [str(col).strip().lower() for col in out.columns]
-
-    if "adj close" in out.columns and "adj_close" not in out.columns:
-        out = out.rename(columns={"adj close": "adj_close"})
-    if "price" in out.columns and "close" not in out.columns:
-        out["close"] = out["price"]
-    if "close" not in out.columns:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-
-    close = pd.to_numeric(out["close"], errors="coerce")
-    for col in ["open", "high", "low"]:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(close)
-        else:
-            out[col] = close
-    if "volume" in out.columns:
-        out["volume"] = pd.to_numeric(out["volume"], errors="coerce").fillna(0.0)
-    else:
-        out["volume"] = 0.0
-    out["close"] = close
-    out = out.dropna(subset=["open", "high", "low", "close"], how="any").sort_index()
-    return out
-
-
 def load_benchmark_from_store(
     *,
     store: HistoryStoreLike,
@@ -149,12 +109,12 @@ def load_benchmark_from_store(
         return pd.DataFrame(columns=["close"])
 
     for bench_symbol in candidates:
-        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end))
+        bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end))
         end_ts = pd.Timestamp(end).tz_convert("UTC")
         needs_sync = bars.empty or pd.Timestamp(bars.index.max()).tz_convert("UTC") < end_ts
         if needs_sync:
             store.sync_symbol_history(symbol=bench_symbol, market=market_code, start=start, end=end)
-            bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end))
+            bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end))
         if bars.empty or "close" not in bars.columns:
             continue
 

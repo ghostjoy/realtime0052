@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import warnings
+
 _CTX_BOUND = False
 
 
 def _bind_ctx(ctx: object):
+    """Deprecated: Use explicit imports instead of ctx injection."""
+    warnings.warn(
+        "_bind_ctx is deprecated. Pass dependencies explicitly instead of using ctx=globals()",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     global _CTX_BOUND
     if _CTX_BOUND:
         return
@@ -165,7 +173,7 @@ def _render_benchmark_lines_chart(
         chart_key=f"plotly:{chart_key}",
         filename=safe_name,
         scale=2,
-        use_container_width=True,
+        width="stretch",
         watermark_text=str(watermark_text),
         palette=palette,
     )
@@ -258,7 +266,7 @@ def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = 
         chart_key="plotly:live_chart_main",
         filename="live_chart",
         scale=2,
-        use_container_width=True,
+        width="stretch",
         watermark_text=str(watermark_text),
         palette=palette,
     )
@@ -477,7 +485,7 @@ def _render_indicator_panels(
         chart_key=str(chart_key),
         filename=str(chart_key),
         scale=2,
-        use_container_width=True,
+        width="stretch",
         watermark_text=str(watermark_text),
         palette=palette,
     )

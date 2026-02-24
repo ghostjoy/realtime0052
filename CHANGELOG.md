@@ -100,6 +100,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated .githooks/pre-commit, app.py, pyproject.toml, services/backtest_runner.py, services/benchmark_loader.py, storage/duck_store.py, ... (+10) [id:74fc551790]
 - Auto: updated README.md, providers/us_twelve.py, tests/test_us_twelve_provider.py [id:c44e63caba]
 - Auto: updated data_sources.py, tests/test_data_sources.py [id:b435b20941]
 - Auto: updated services/sync_orchestrator.py, tests/test_sync_orchestrator.py [id:2487a039f8]
@@ -242,6 +243,19 @@
 - 修正回測工作台「投組分項策略績效卡 / 交易明細卡」文字發糊體感：
   - 新增清晰表格渲染樣式（CJK 字型與字體平滑）
   - 兩張卡改用清晰表格呈現，保留大量資料時自動回退高效模式
+- Python 相容性升級：
+  - `pyproject.toml` 改為 `>=3.10`（移除 3.9 支援）
+  - `numpy` 改為 `>=2.1`（相容 Python 3.13+）
+  - `streamlit` 改為 `>=1.50`（相容 Python 3.14）
+- 新增 `ruff` 與 `mypy` 開發依賴到 `pyproject.toml`
+- 新增 `utils/__init__.py`：`normalize_ohlcv_frame()` 統一 OHLCV 標準化邏輯
+- 抽出 `app.py`、`services/backtest_runner.py`、`services/benchmark_loader.py` 的重複 OHLCV 正規化到 `utils/` 共用
+- 新增 `ui/helpers/`：抽出 `symbol_utils.py`、`url_utils.py` 作為頁面共用工具
+- `_bind_ctx` 與 `ctx=globals()` 模式新增 deprecation warnings，預備未來移除過渡設計
+- `use_container_width` 改為 `width='stretch'`（85 處），相容未來 Streamlit 版本
+- SQLite/DuckDB 連線關閉問題修復：
+  - `storage/history_store.py` 與 `storage/duck_store.py` 新增 `_connect_ctx()` context manager
+  - 確保交易 commit/rollback 與連線關閉的正確順序，避免測試環境 `:memory:` 庫關閉後無法重用
 
 ### Docs
 - 文件一致性整理：

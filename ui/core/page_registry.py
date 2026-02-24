@@ -39,7 +39,7 @@ def render_page_cards_nav(*, cards: list[dict[str, str]], default_active_page: s
             clicked = st.button(
                 "已開啟" if is_active else "開啟",
                 key=f"page-card:{key}",
-                use_container_width=True,
+                width="stretch",
                 type="primary" if is_active else "secondary",
             )
             if clicked and not is_active:

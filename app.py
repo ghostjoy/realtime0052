@@ -46,6 +46,7 @@ from backtest.adjustments import known_split_events
 from config_loader import cfg_or_env, cfg_or_env_bool, cfg_or_env_str, get_config_source
 from indicators import add_indicators
 from market_data_types import DataHealth
+from utils import normalize_ohlcv_frame
 from providers import TwMisProvider
 from services import LiveOptions, MarketDataService
 from services.backtest_cache import (
@@ -1193,7 +1194,7 @@ def _render_tw_constituent_intro_table(
     out_df = pd.DataFrame(rows)
     st.dataframe(
         out_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=_full_table_height(out_df),
     )
@@ -1284,7 +1285,7 @@ def _render_full_constituents_if_has_overseas(
         )
         if "權重(%)" in out_df.columns:
             out_df["權重(%)"] = pd.to_numeric(out_df["權重(%)"], errors="coerce").round(2)
-        st.dataframe(out_df, use_container_width=True, hide_index=True)
+        st.dataframe(out_df, width="stretch", hide_index=True)
     return True
 
 
@@ -1529,7 +1530,7 @@ def _render_00910_constituent_intro_table(
     )
     st.dataframe(
         out_intro,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=_full_table_height(out_intro),
     )
@@ -1621,7 +1622,7 @@ def _render_global_constituent_intro_table(
     )
     st.dataframe(
         out_intro,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=_full_table_height(out_intro),
     )
@@ -1896,7 +1897,7 @@ def _resolve_live_change_metrics(
     market_tz = _market_tz(str(getattr(quote, "market", "")))
     quote_local_date = quote_ts.tz_convert(market_tz).date()
 
-    daily_norm = _normalize_ohlcv_frame(daily)
+    daily_norm = normalize_ohlcv_frame(daily)
     if (prev_close is None or abs(prev_close) < 1e-12) and not daily_norm.empty and "close" in daily_norm.columns:
         closes = pd.to_numeric(daily_norm["close"], errors="coerce").dropna().sort_index()
         # For daily snapshot quotes (e.g. Stooq / delayed daily feeds), price often equals
@@ -1920,7 +1921,7 @@ def _resolve_live_change_metrics(
                 prev_close = _safe_float(closes.iloc[-1])
                 prev_close_basis = "daily_latest"
 
-    intraday_norm = _normalize_ohlcv_frame(intraday)
+    intraday_norm = normalize_ohlcv_frame(intraday)
     if (prev_close is None or abs(prev_close) < 1e-12) and not intraday_norm.empty and "close" in intraday_norm.columns:
         closes = pd.to_numeric(intraday_norm["close"], errors="coerce").dropna().sort_index()
         prior = closes[closes.index < quote_ts]
@@ -1945,52 +1946,6 @@ def _resolve_live_change_metrics(
     source_name = str(getattr(quote, "source", "unknown") or "unknown")
     basis_text = f"source={source_name}, prev_close={prev_close_basis}"
     return change, change_pct, basis_text
-
-
-def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
-    base_cols = ["open", "high", "low", "close", "volume"]
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return pd.DataFrame(columns=base_cols)
-
-    out = df.copy()
-    if isinstance(out.columns, pd.MultiIndex):
-        renamed: list[str] = []
-        for col in out.columns:
-            parts = [str(part).strip().lower() for part in col if str(part).strip()]
-            candidate = ""
-            for item in reversed(parts):
-                if item in {"open", "high", "low", "close", "adj close", "adj_close", "volume", "price"}:
-                    candidate = item
-                    break
-            renamed.append(candidate or (parts[-1] if parts else ""))
-        out.columns = renamed
-    else:
-        out.columns = [str(col).strip().lower() for col in out.columns]
-
-    if "adj close" in out.columns and "adj_close" not in out.columns:
-        out = out.rename(columns={"adj close": "adj_close"})
-
-    if "price" in out.columns and "close" not in out.columns:
-        out["close"] = out["price"]
-
-    if "close" not in out.columns:
-        return pd.DataFrame(columns=base_cols)
-
-    close = pd.to_numeric(out["close"], errors="coerce")
-    for col in ["open", "high", "low"]:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(close)
-        else:
-            out[col] = close
-    if "volume" in out.columns:
-        out["volume"] = pd.to_numeric(out["volume"], errors="coerce").fillna(0.0)
-    else:
-        out["volume"] = 0.0
-    out["close"] = close
-
-    out = out[base_cols].dropna(subset=["open", "high", "low", "close"], how="any")
-    out = out.sort_index()
-    return out
 
 
 def _apply_total_return_adjustment(
@@ -2180,7 +2135,7 @@ def _render_plotly_chart(
     chart_key: str = "",
     filename: str = "",
     scale: int = 2,
-    use_container_width: bool = True,
+    width: str = "stretch",
     watermark_text: str = "",
     palette: Optional[dict[str, object]] = None,
 ) -> None:
@@ -2191,7 +2146,7 @@ def _render_plotly_chart(
     resolved_name = _safe_export_filename(filename, fallback=_safe_export_filename(chart_key, fallback="chart"))
     st.plotly_chart(
         fig,
-        use_container_width=bool(use_container_width),
+        width=width,
         config=_plotly_chart_config(filename=resolved_name, scale=int(scale)),
         **plot_kwargs,
     )
@@ -2346,12 +2301,12 @@ def _compute_tw_equal_weight_compare_payload(
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     skipped_symbols: list[str] = []
     for symbol in symbols:
-        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+        bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
         if len(bars) < 2 and not sync_before_run:
             report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
             if report.error:
                 symbol_sync_issues.append(f"{symbol}: {report.error}")
-            bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+            bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
         if len(bars) < 2:
             skipped_symbols.append(symbol)
             continue
@@ -2891,7 +2846,7 @@ def _render_crisp_table(
         st.caption("目前沒有可顯示的資料。")
         return
     if len(df) > max(50, int(max_html_rows)):
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         st.caption("資料筆數較多，已切換為高效表格模式。")
         return
     safe_height = max(220, int(max_height))
@@ -2932,11 +2887,11 @@ def _render_design_toolbox():
             data=_design_tokens_payload(),
             file_name="realtime0052-design-tokens.json",
             mime="application/json",
-            use_container_width=True,
+            width="stretch",
         )
         c1, c2 = st.columns(2)
-        c1.link_button("Figma", "https://www.figma.com", use_container_width=True)
-        c2.link_button("Pencil", "https://pencil.evolus.vn", use_container_width=True)
+        c1.link_button("Figma", "https://www.figma.com", width="stretch")
+        c2.link_button("Pencil", "https://pencil.evolus.vn", width="stretch")
 
 
 def _render_page_cards_nav() -> str:
@@ -3596,7 +3551,7 @@ def _build_tw_active_etf_ytd_between(
 
     rows: list[dict[str, object]] = []
     for symbol in universe_symbols:
-        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+        bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
         need_sync = True
         if isinstance(bars, pd.DataFrame) and not bars.empty:
             idx = pd.to_datetime(bars.index, utc=True, errors="coerce").dropna()
@@ -3605,7 +3560,7 @@ def _build_tw_active_etf_ytd_between(
                 need_sync = last_ts < end_dt
         if need_sync:
             store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
-            bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+            bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
         if bars.empty or "close" not in bars.columns:
             continue
 
@@ -3711,13 +3666,13 @@ def _load_tw_market_return_between(
             if err:
                 issues.append(f"{symbol}: {err}")
 
-        bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+        bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
         if _bars_need_backfill(bars, start=start_dt, end=end_dt):
             report = store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
             err = str(getattr(report, "error", "") or "").strip()
             if err:
                 issues.append(f"{symbol}: {err}")
-            bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
+            bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt))
         if len(bars) < 2 or "close" not in bars.columns:
             continue
 
@@ -4650,7 +4605,7 @@ def _render_tw_etf_top10_page(
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
         st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
         st.caption("報酬計算：以復權期初（套用已知 split 事件）對比期末收盤。")
-        st.dataframe(top10, use_container_width=True, hide_index=True)
+        st.dataframe(top10, width="stretch", hide_index=True)
 
         with st.expander("分類說明", expanded=False):
             st.markdown(
@@ -4683,7 +4638,7 @@ def _render_tw_etf_all_types_view():
         refresh_market = st.button(
             "更新最新市況",
             key="tw_etf_all_types_update_market",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
     if refresh_market:
@@ -4760,7 +4715,7 @@ def _render_tw_etf_all_types_view():
             st.caption("可直接點擊 `ETF` 中文名稱，在新分頁開啟對應熱力圖（內容同 00935 熱力圖）。")
         st.dataframe(
             table_with_links,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(_full_table_height(table_with_links), 1200),
             column_config=table_link_config if table_link_config else None,
@@ -4769,7 +4724,7 @@ def _render_tw_etf_all_types_view():
         with hub_col1:
             st.caption("已開啟/已快取的 ETF 熱力圖可在 `熱力圖總表` 分頁集中管理。")
         with hub_col2:
-            if st.button("前往 熱力圖總表", key="go_heatmap_hub_page", use_container_width=True):
+            if st.button("前往 熱力圖總表", key="go_heatmap_hub_page", width="stretch"):
                 st.session_state["active_page"] = "熱力圖總表"
                 st.rerun()
 
@@ -4820,14 +4775,14 @@ def _render_heatmap_hub_view():
 
             c1, c2, c3, c4, c5, c6 = st.columns([1.1, 2.6, 1.6, 1.0, 1.0, 1.0])
             c1.markdown(f"`{code}`")
-            c2.link_button(label=name, url=open_url, use_container_width=True)
+            c2.link_button(label=name, url=open_url, width="stretch")
             c3.caption(last_opened_text)
             c4.caption(str(open_count))
             pin_now = c5.checkbox("釘選", key=pin_key, label_visibility="collapsed")
             if bool(pin_now) != pinned:
                 _set_heatmap_hub_pin(etf_code=code, pin_as_card=bool(pin_now))
                 st.rerun()
-            if c6.button("開啟", key=f"heatmap_hub_open:{code}", use_container_width=True):
+            if c6.button("開啟", key=f"heatmap_hub_open:{code}", width="stretch"):
                 _upsert_heatmap_hub_entry(etf_code=code, etf_name=name, opened=True)
                 st.session_state[HEATMAP_HUB_SESSION_ACTIVE_KEY] = {"code": code, "name": name}
                 st.session_state["active_page"] = f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}"
@@ -4896,7 +4851,7 @@ def _render_top10_etf_2026_ytd_view(
         refresh_market = st.button(
             "更新最新市況",
             key=f"{page_key_prefix}_update_market",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
     if refresh_market:
@@ -5033,7 +4988,7 @@ def _render_top10_etf_2026_ytd_view(
         st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
         st.caption(f"`{compare_col_label}` 採對照區間內首個可交易日計算；若空白代表該檔對照區間無可用日K。")
         st.caption(f"報酬計算：`贏輸台股大盤(%) = {performance_col_label} - 大盤報酬`。")
-        st.dataframe(table_df, use_container_width=True, hide_index=True)
+        st.dataframe(table_df, width="stretch", hide_index=True)
 
         with st.expander("分類說明", expanded=False):
             st.markdown(
@@ -5086,7 +5041,7 @@ def _render_top10_etf_2026_ytd_view(
             value=False,
             key=f"{page_key_prefix}_sync_before_run",
         )
-        force_refresh = c3.button("重新計算", use_container_width=True, key=f"{page_key_prefix}_refresh")
+        force_refresh = c3.button("重新計算", width="stretch", key=f"{page_key_prefix}_refresh")
 
         start_dt = datetime.combine(datetime.strptime(start_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
         end_dt = datetime.combine(datetime.strptime(end_used, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
@@ -5241,7 +5196,7 @@ def _render_top10_etf_2026_ytd_view(
             )
 
         if summary_rows:
-            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
         used_symbols = payload.get("used_symbols", [])
         skipped_symbols = payload.get("skipped_symbols", [])
         if isinstance(used_symbols, list) and isinstance(skipped_symbols, list):
@@ -5255,7 +5210,7 @@ def _render_consensus_representative_etf_view():
         force_recompute = st.button(
             "重新計算",
             key="consensus_etf_refresh",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
 
@@ -5361,7 +5316,7 @@ def _render_consensus_representative_etf_view():
                 ]
                 if col in alternatives_df.columns
             ]
-            st.dataframe(alternatives_df[show_cols], use_container_width=True, hide_index=True)
+            st.dataframe(alternatives_df[show_cols], width="stretch", hide_index=True)
 
     consensus_df = payload.get("consensus_df")
     if isinstance(consensus_df, pd.DataFrame) and not consensus_df.empty:
@@ -5370,7 +5325,7 @@ def _render_consensus_representative_etf_view():
             show_cols = [col for col in ["代號", "名稱", "被持有檔數", "平均權重(%)", "權重離散度(%)", "持有ETF"] if col in consensus_df.columns]
             st.dataframe(
                 consensus_df[show_cols],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=_full_table_height(consensus_df),
             )
@@ -5396,7 +5351,7 @@ def _render_consensus_representative_etf_view():
                 ]
                 if col in representative_df.columns
             ]
-            st.dataframe(representative_df[show_cols], use_container_width=True, hide_index=True)
+            st.dataframe(representative_df[show_cols], width="stretch", hide_index=True)
             st.caption("註：代表性分數高，代表該 ETF 對共識交集股的權重覆蓋率更高；不等於未來報酬保證。")
 
 
@@ -5408,7 +5363,7 @@ def _render_two_etf_pick_view():
         force_recompute = st.button(
             "重新計算",
             key="two_etf_pick_refresh",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
 
@@ -5525,7 +5480,7 @@ def _render_two_etf_pick_view():
         with st.container(border=True):
             _render_card_section_header("推薦結果", "核心檔重代表性，衛星檔重低重疊動能。")
             show_cols = [col for col in ["角色", "ETF代碼", "ETF名稱", "管理費", "ETF規模(億)", "ETF類型", "YTD報酬(%)", "與核心重疊度(%)", "說明"] if col in recommendation_df.columns]
-            st.dataframe(recommendation_df[show_cols], use_container_width=True, hide_index=True)
+            st.dataframe(recommendation_df[show_cols], width="stretch", hide_index=True)
 
     candidate_df = payload.get("candidate_df")
     if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
@@ -5550,7 +5505,7 @@ def _render_two_etf_pick_view():
                 ]
                 if col in candidate_df.columns
             ]
-            st.dataframe(candidate_df[show_cols], use_container_width=True, hide_index=True)
+            st.dataframe(candidate_df[show_cols], width="stretch", hide_index=True)
             st.caption("註：此卡為選股規則透明化，非未來報酬保證；請搭配資金配置與風險控管。")
 
 
@@ -5560,7 +5515,7 @@ def _render_active_etf_2026_ytd_view():
     with title_col:
         st.subheader("2026 年主動式 ETF YTD（Buy & Hold）")
     with refresh_col:
-        refresh_market = st.button("更新最新市況", key="active_etf_ytd_update_market", use_container_width=True, type="primary")
+        refresh_market = st.button("更新最新市況", key="active_etf_ytd_update_market", width="stretch", type="primary")
     if refresh_market:
         _fetch_twse_snapshot_with_fallback.clear()
         _build_tw_active_etf_ytd_between.clear()
@@ -5688,7 +5643,7 @@ def _render_active_etf_2026_ytd_view():
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）。主動式規則：代碼結尾 A 且名稱含「主動」。")
         st.caption("`2025績效(%)` 採各檔在 2025 區間內首個可交易日計算；若空白代表該檔 2025 區間無可用日K。")
         st.caption("報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`贏輸台股大盤(%) = YTD報酬 - 大盤報酬`。")
-        st.dataframe(table_df, use_container_width=True, hide_index=True)
+        st.dataframe(table_df, width="stretch", hide_index=True)
 
     symbols = [str(x).strip().upper() for x in etf_df["代碼"].astype(str).tolist() if str(x).strip()]
     if not symbols:
@@ -5733,7 +5688,7 @@ def _render_active_etf_2026_ytd_view():
                 value=False,
                 key=f"{key_prefix}_sync_before_run",
             )
-            force_refresh = c3.button("重新計算", use_container_width=True, key=f"{key_prefix}_refresh")
+            force_refresh = c3.button("重新計算", width="stretch", key=f"{key_prefix}_refresh")
 
             try:
                 start_dt = datetime.combine(datetime.strptime(date_start, "%Y%m%d").date(), datetime.min.time()).replace(tzinfo=timezone.utc)
@@ -5901,7 +5856,7 @@ def _render_active_etf_2026_ytd_view():
                 )
 
             if summary_rows:
-                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
             used_symbols = payload.get("used_symbols", [])
             skipped_symbols = payload.get("skipped_symbols", [])
             if isinstance(used_symbols, list) and isinstance(skipped_symbols, list):
@@ -6001,9 +5956,21 @@ def _render_quality_bar(ctx, refresh_sec: int):
     st.caption(f"最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}（fragment 局部刷新）")
 
 
+import warnings
+
+
+def _warn_ctx_deprecated():
+    warnings.warn(
+        "Passing ctx=globals() is deprecated. Refactor pages to use explicit imports.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 def _render_benchmark_lines_chart(*args, **kwargs):
     from ui.core.charts import _render_benchmark_lines_chart as impl
 
+    _warn_ctx_deprecated()
     return impl(ctx=globals(), *args, **kwargs)
 
 
@@ -6011,6 +5978,7 @@ def _render_benchmark_lines_chart(*args, **kwargs):
 def _render_live_chart(*args, **kwargs):
     from ui.core.charts import _render_live_chart as impl
 
+    _warn_ctx_deprecated()
     return impl(ctx=globals(), *args, **kwargs)
 
 
@@ -6018,6 +5986,7 @@ def _render_live_chart(*args, **kwargs):
 def _render_indicator_panels(*args, **kwargs):
     from ui.core.charts import _render_indicator_panels as impl
 
+    _warn_ctx_deprecated()
     return impl(ctx=globals(), *args, **kwargs)
 
 
@@ -6025,6 +5994,7 @@ def _render_indicator_panels(*args, **kwargs):
 def _render_live_view():
     from ui.pages.live import _render_live_view as impl
 
+    _warn_ctx_deprecated()
     return impl(ctx=globals())
 
 
@@ -6489,6 +6459,7 @@ def _load_cached_backtest_payload(
 def _render_backtest_view():
     from ui.pages.backtest import _render_backtest_view as impl
 
+    _warn_ctx_deprecated()
     return impl(ctx=globals())
 
 
@@ -6520,7 +6491,7 @@ def _render_tutorial_view():
             {"分頁": "新手教學", "你會看到什麼": "名詞解釋、快取邏輯、操作順序、常見誤解", "什麼時候用": "剛上手或看不懂數字時"},
         ]
     )
-    st.dataframe(page_df, use_container_width=True, hide_index=True)
+    st.dataframe(page_df, width="stretch", hide_index=True)
 
     st.markdown("### 1) 第一次使用，建議照這個順序")
     st.markdown(
@@ -6547,7 +6518,7 @@ def _render_tutorial_view():
             {"項目": "重新計算（Benchmark 對照卡）", "作用": "在目前參數下重算曲線與績效表", "不按會怎樣": "沿用本頁已算過結果"},
         ]
     )
-    st.dataframe(cache_df, use_container_width=True, hide_index=True)
+    st.dataframe(cache_df, width="stretch", hide_index=True)
 
     st.markdown("### 3) 資料會存在哪裡？")
     storage_df = pd.DataFrame(
@@ -6561,7 +6532,7 @@ def _render_tutorial_view():
             {"項目": "即時資料", "位置": "Session 記憶體 + Parquet `intraday_ticks`", "用途": "即時看盤與補圖"},
         ]
     )
-    st.dataframe(storage_df, use_container_width=True, hide_index=True)
+    st.dataframe(storage_df, width="stretch", hide_index=True)
 
     st.markdown("### 4) 回測流程（工作台核心）")
     flow_df = pd.DataFrame(
@@ -6575,7 +6546,7 @@ def _render_tutorial_view():
             {"步驟": "G. 需要時再開 Walk-Forward", "說明": "用 Train/Test 檢查穩健性。"},
         ]
     )
-    st.dataframe(flow_df, use_container_width=True, hide_index=True)
+    st.dataframe(flow_df, width="stretch", hide_index=True)
 
     st.markdown("### 5) 回測安全門檻（資料筆數）")
     threshold_df = pd.DataFrame(
@@ -6586,7 +6557,7 @@ def _render_tutorial_view():
             {"模式": "Walk-Forward", "最少K數": "至少 80（長視窗策略更高）", "原因": "Train/Test 都要有足夠樣本。"},
         ]
     )
-    st.dataframe(threshold_df, use_container_width=True, hide_index=True)
+    st.dataframe(threshold_df, width="stretch", hide_index=True)
 
     st.markdown("### 6) 指標怎麼讀（Top10/主動式/Benchmark）")
     metric_df = pd.DataFrame(
@@ -6598,7 +6569,7 @@ def _render_tutorial_view():
             {"欄位": "Benchmark Equity", "意思": "同初始資產下，基準標的的資產曲線"},
         ]
     )
-    st.dataframe(metric_df, use_container_width=True, hide_index=True)
+    st.dataframe(metric_df, width="stretch", hide_index=True)
     st.caption(
         "你若看到同一檔 ETF 在上方表格與下方 Benchmark 對照卡數值略有差異，通常是因為比較區間對齊方式不同（快照區間 vs 共同比較區間）。"
     )
@@ -6613,7 +6584,7 @@ def _render_tutorial_view():
             {"欄位": "excess_pct", "代表": "超額報酬 = 策略報酬 - 基準報酬"},
         ]
     )
-    st.dataframe(heatmap_df, use_container_width=True, hide_index=True)
+    st.dataframe(heatmap_df, width="stretch", hide_index=True)
 
     st.markdown("### 8) 常見混淆（會不會改回測結果）")
     confusion_df = pd.DataFrame(
@@ -6624,7 +6595,7 @@ def _render_tutorial_view():
             {"控制項": "回放視窗 / 生長位置", "會不會改回測結果": "不會", "重點": "只改視覺呈現"},
         ]
     )
-    st.dataframe(confusion_df, use_container_width=True, hide_index=True)
+    st.dataframe(confusion_df, width="stretch", hide_index=True)
 
     st.markdown("### 9) 訊號點 vs 實際成交點")
     point_df = pd.DataFrame(
@@ -6633,7 +6604,7 @@ def _render_tutorial_view():
             {"類型": "實際成交點（資產圖）", "代表意思": "回測規則真正成交位置", "適合用途": "檢查績效計算合理性"},
         ]
     )
-    st.dataframe(point_df, use_container_width=True, hide_index=True)
+    st.dataframe(point_df, width="stretch", hide_index=True)
     st.caption("本系統成交規則：`T 日收盤出訊號，T+1 開盤成交`。")
 
     st.markdown("### 10) 參數白話解釋（常用）")
@@ -6653,7 +6624,7 @@ def _render_tutorial_view():
             {"參數": "參數挑選目標", "白話意思": "Train 區選最佳參數指標", "單位/格式": "sharpe/cagr/total_return/mdd", "新手建議": "sharpe"},
         ]
     )
-    st.dataframe(params_df, use_container_width=True, hide_index=True)
+    st.dataframe(params_df, width="stretch", hide_index=True)
 
     st.markdown("### 11) 技術指標速讀（RSI / MACD / 布林通道 / KD）")
     indicators_df = pd.DataFrame(
@@ -6664,7 +6635,7 @@ def _render_tutorial_view():
             {"指標": "KD", "白話解釋": "看短線動能轉折速度", "常見看法": "K 上穿 D 偏多、K 下穿 D 偏空", "新手提醒": "在強趨勢中容易過早反向判斷"},
         ]
     )
-    st.dataframe(indicators_df, use_container_width=True, hide_index=True)
+    st.dataframe(indicators_df, width="stretch", hide_index=True)
     st.caption("建議做法：先用趨勢類指標（如 MACD）判方向，再用 RSI/KD 找節奏，最後用布林通道觀察波動風險。")
 
     st.markdown("### 12) 新手建議操作（先簡單再進階）")
@@ -6785,7 +6756,7 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
         chart_key=f"plotly:heatmap:{title}",
         filename=f"heatmap_{title}",
         scale=2,
-        use_container_width=True,
+        width="stretch",
         watermark_text=str(title),
         palette=palette,
     )
@@ -6809,7 +6780,7 @@ def _render_excess_heatmap_panel(rows_df: pd.DataFrame, *, title: str, colorbar_
     }
     keep_cols = [c for c in rename_map.keys() if c in out_df.columns]
     out_df = out_df[keep_cols].rename(columns={k: v for k, v in rename_map.items() if k in keep_cols})
-    st.dataframe(out_df, use_container_width=True, hide_index=True)
+    st.dataframe(out_df, width="stretch", hide_index=True)
 
 
 def _render_00910_global_ytd_block(
@@ -6869,7 +6840,7 @@ def _render_00910_global_ytd_block(
                 out.append(text)
         return out
 
-    run_now = st.button(f"執行 {etf_text} YTD 全球熱力圖", type="primary", use_container_width=True, key=f"{page_key}_global_run_ytd")
+    run_now = st.button(f"執行 {etf_text} YTD 全球熱力圖", type="primary", width="stretch", key=f"{page_key}_global_run_ytd")
     if run_now:
         rows_full = list(full_rows)
         if not rows_full:
@@ -6975,13 +6946,13 @@ def _render_00910_global_ytd_block(
             if key in close_cache:
                 return close_cache[key]
             bars = store.load_daily_bars(symbol=symbol, market=market, start=start_dt, end=end_dt)
-            bars = _normalize_ohlcv_frame(bars)
+            bars = normalize_ohlcv_frame(bars)
             if bars.empty and not sync_before_run:
                 report = store.sync_symbol_history(symbol=symbol, market=market, start=start_dt, end=end_dt)
                 if report.error:
                     sync_issues.append(f"{symbol}: {report.error}")
                 bars = store.load_daily_bars(symbol=symbol, market=market, start=start_dt, end=end_dt)
-                bars = _normalize_ohlcv_frame(bars)
+                bars = normalize_ohlcv_frame(bars)
             if bars.empty:
                 close_cache[key] = pd.Series(dtype=float)
                 return close_cache[key]
@@ -7197,7 +7168,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
     has_overseas_constituents = False
     snapshot = store.load_universe_snapshot(universe_id)
     u1, u2 = st.columns([1, 4])
-    refresh_constituents = u1.button(f"更新 {etf_text} 成分股", use_container_width=True)
+    refresh_constituents = u1.button(f"更新 {etf_text} 成分股", width="stretch")
     if refresh_constituents:
         with st.spinner(f"抓取 {etf_text} 成分股中..."):
             symbols_new, source_new = service.get_tw_etf_constituents(etf_text, limit=None)
@@ -7248,7 +7219,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
                 full_rows=full_rows_for_name_lookup,
             )
             const_rows = [{"symbol": sym, "name": name_map_all.get(sym, sym)} for sym in snapshot.symbols]
-            st.dataframe(pd.DataFrame(const_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(const_rows), width="stretch", hide_index=True)
     else:
         u2.caption(f"尚未載入 {etf_text} 成分股快取。你仍可先查看上次回測結果，或按「更新 {etf_text} 成分股」後再重新回測。")
 
@@ -7334,7 +7305,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
         f"{page_key}_heatmap:{start_date}:{end_date}:{benchmark_choice}:{strategy}:{strategy_token}:"
         f"{fee_rate}:{sell_tax}:{slippage}:{','.join(selected_symbols)}"
     )
-    run_clicked = st.button(f"執行 {etf_text} 熱力圖回測", type="primary", use_container_width=True)
+    run_clicked = st.button(f"執行 {etf_text} 熱力圖回測", type="primary", width="stretch")
     payload_before_run = st.session_state.get(payload_key)
 
     def _should_auto_refresh_cached_heatmap(payload_obj: object) -> bool:
@@ -7370,7 +7341,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
         if not benchmark_symbol_for_check:
             return False
 
-        benchmark_bars_for_check = _normalize_ohlcv_frame(
+        benchmark_bars_for_check = normalize_ohlcv_frame(
             store.load_daily_bars(
                 symbol=benchmark_symbol_for_check,
                 market="TW",
@@ -7458,7 +7429,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
                 sync_before_run=bool(sync_before_run),
                 parallel_sync=bool(parallel_sync),
                 lazy_sync_on_insufficient=not bool(auto_trigger_reason),
-                normalize_ohlcv_frame=_normalize_ohlcv_frame,
+                normalize_ohlcv_frame=normalize_ohlcv_frame,
             )
         bars_cache = dict(prepared.bars_cache)
         symbol_sync_issues = list(prepared.sync_issues)
@@ -7668,7 +7639,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
         chart_key=f"plotly:heatmap:{etf_text}",
         filename=f"heatmap_{etf_text}",
         scale=2,
-        use_container_width=True,
+        width="stretch",
         watermark_text=f"{etf_text} 熱力圖",
         palette=palette,
     )
@@ -7682,7 +7653,7 @@ def _render_tw_etf_heatmap_view(etf_code: str, page_desc: str, *, auto_run_if_mi
     output_cols = [col for col in ["symbol", "name", "weight_pct", "strategy_return_pct", "benchmark_return_pct", "excess_pct", "status", "bars"] if col in out_df.columns]
     st.dataframe(
         out_df[output_cols],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -7809,7 +7780,7 @@ def _render_tw_etf_rotation_view():
         f"{top_n}:{fee_rate}:{sell_tax}:{slippage}:{initial_capital}"
     )
 
-    if st.button("執行 ETF 輪動策略回測", type="primary", use_container_width=True):
+    if st.button("執行 ETF 輪動策略回測", type="primary", width="stretch"):
         if not date_is_valid:
             st.error("日期區間無效，請先修正起訖日期。")
             return
@@ -7823,7 +7794,7 @@ def _render_tw_etf_rotation_view():
                 end_dt=end_dt,
                 sync_before_run=bool(sync_before_run),
                 parallel_sync=bool(parallel_sync),
-                normalize_ohlcv_frame=_normalize_ohlcv_frame,
+                normalize_ohlcv_frame=normalize_ohlcv_frame,
                 min_required=ROTATION_MIN_BARS,
                 progress_callback=lambda ratio: progress.progress(float(ratio)),
             )
@@ -8130,7 +8101,7 @@ def _render_tw_etf_rotation_view():
         st.markdown("#### 每月調倉明細")
         st.dataframe(
             rebalance_df[["signal_date", "effective_date", "market_filter", "selected", "scores"]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -8138,7 +8109,7 @@ def _render_tw_etf_rotation_view():
     if not trades_df.empty:
         st.markdown("#### 成交紀錄（前200筆）")
         show_cols = [c for c in ["date", "symbol", "side", "qty", "price", "notional", "fee", "tax", "slippage", "pnl", "target_weight"] if c in trades_df.columns]
-        st.dataframe(trades_df[show_cols].head(200), use_container_width=True, hide_index=True)
+        st.dataframe(trades_df[show_cols].head(200), width="stretch", hide_index=True)
 
     perf_timer.mark("rotation_render_complete")
     if perf_timer.enabled:
@@ -8230,7 +8201,7 @@ def _render_db_browser_view():
     tw_limit = None if tw_limit_input <= 0 else tw_limit_input
 
     a1, a2 = st.columns([1, 1])
-    if a1.button("啟動基礎資料預載", type="primary", use_container_width=True, key="db_run_bootstrap"):
+    if a1.button("啟動基礎資料預載", type="primary", width="stretch", key="db_run_bootstrap"):
         with st.spinner("預載中（會同步 metadata 與日線歷史）..."):
             summary = run_market_data_bootstrap(
                 store=store,
@@ -8247,7 +8218,7 @@ def _render_db_browser_view():
         else:
             st.warning(f"預載完成，但有部分失敗（狀態：{summary.get('status', 'unknown')}）。")
 
-    if a2.button("執行一次增量更新", use_container_width=True, key="db_run_incremental_refresh"):
+    if a2.button("執行一次增量更新", width="stretch", key="db_run_incremental_refresh"):
         with st.spinner("增量更新中（只補缺漏或最新區間）..."):
             summary = run_incremental_refresh(
                 store=store,
@@ -8275,7 +8246,7 @@ def _render_db_browser_view():
             "狀態": manual_summary.get("status", ""),
         }
         st.caption("最近一次手動預載摘要")
-        st.dataframe(pd.DataFrame([preview]), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame([preview]), width="stretch", hide_index=True)
         issues = manual_summary.get("issues")
         if isinstance(issues, list) and issues:
             _render_sync_issues("手動預載有部分同步錯誤", [str(item) for item in issues], preview_limit=3)
@@ -8291,7 +8262,7 @@ def _render_db_browser_view():
             "狀態": incremental_summary.get("status", ""),
         }
         st.caption("最近一次增量更新摘要")
-        st.dataframe(pd.DataFrame([preview]), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame([preview]), width="stretch", hide_index=True)
         issues = incremental_summary.get("issues")
         if isinstance(issues, list) and issues:
             _render_sync_issues("增量更新有部分同步錯誤", [str(item) for item in issues], preview_limit=3)
@@ -8342,7 +8313,7 @@ def _render_db_browser_view():
             summary_rows.append({"資料表": table, "筆數": count})
 
         st.markdown("#### 資料表總覽")
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
 
         c1, c2, c3 = st.columns([2, 1, 1])
         selected_table = c1.selectbox("選擇資料表", options=table_names, key="db_view_table")
@@ -8392,7 +8363,7 @@ def _render_db_browser_view():
         if data_df.empty:
             st.info("此頁沒有資料。")
         else:
-            st.dataframe(data_df, use_container_width=True, hide_index=True)
+            st.dataframe(data_df, width="stretch", hide_index=True)
 
         with st.expander("欄位結構（Schema）", expanded=False):
             if schema_df.empty:
@@ -8408,7 +8379,7 @@ def _render_db_browser_view():
                     }
                 )
                 show_cols = [c for c in ["cid", "欄位", "型別", "不可為空", "預設值", "主鍵"] if c in schema_out.columns]
-                st.dataframe(schema_out[show_cols], use_container_width=True, hide_index=True)
+                st.dataframe(schema_out[show_cols], width="stretch", hide_index=True)
     except Exception as exc:
         st.error(f"讀取資料庫失敗：{exc}")
     finally:

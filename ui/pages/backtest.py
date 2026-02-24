@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import warnings
+
 _CTX_BOUND = False
 
 
 def _bind_ctx(ctx: object):
+    """Deprecated: Use explicit imports instead of ctx injection."""
+    warnings.warn(
+        "_bind_ctx is deprecated. Pass dependencies explicitly instead of using ctx=globals()",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     global _CTX_BOUND
     if _CTX_BOUND:
         return
@@ -474,7 +482,7 @@ def _render_backtest_view(*, ctx: object):
             st.caption(f"已從表格帶入 `{req_symbol}`，自動執行回測。")
     with st.container(border=True):
         _render_card_section_header("回測執行", "按下按鈕後才會執行；同條件會優先讀取本地快取。")
-        run_clicked = st.button("執行回測", type="primary", use_container_width=True, key="bt_execute_run")
+        run_clicked = st.button("執行回測", type="primary", width="stretch", key="bt_execute_run")
     if run_clicked:
         st.session_state[BACKTEST_RUN_REQUEST_KEY] = run_key
     run_requested = st.session_state.get(BACKTEST_RUN_REQUEST_KEY) == run_key
@@ -523,7 +531,7 @@ def _render_backtest_view(*, ctx: object):
                 enabled=tw_symbol_label_enabled,
                 columns=["symbol"],
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -550,12 +558,12 @@ def _render_backtest_view(*, ctx: object):
                     enabled=tw_symbol_label_enabled,
                     columns=["symbol"],
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         st.session_state[gapfill_key] = True
 
-    if st.button("同步歷史資料", use_container_width=True):
+    if st.button("同步歷史資料", width="stretch"):
         reports, plan = sync_symbols_if_needed(
             store=store,
             market=market_code,
@@ -578,7 +586,7 @@ def _render_backtest_view(*, ctx: object):
                 enabled=tw_symbol_label_enabled,
                 columns=["symbol"],
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -608,7 +616,7 @@ def _render_backtest_view(*, ctx: object):
                 enabled=tw_symbol_label_enabled,
                 columns=["symbol"],
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     if not bars_by_symbol:
@@ -630,7 +638,7 @@ def _render_backtest_view(*, ctx: object):
                 enabled=tw_symbol_label_enabled,
                 columns=["symbol"],
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     base_min_bars = get_strategy_min_bars(strategy)
@@ -940,7 +948,7 @@ def _render_backtest_view(*, ctx: object):
                     ascending=[False, True],
                     na_position="last",
                 )
-                st.dataframe(comp_rel_df, use_container_width=True, hide_index=True)
+                st.dataframe(comp_rel_df, width="stretch", hide_index=True)
             else:
                 st.caption("目前沒有可顯示的分項相對 Benchmark 資料。")
 
@@ -964,7 +972,7 @@ def _render_backtest_view(*, ctx: object):
                 st.markdown("**最佳參數**")
                 if isinstance(best_params, dict) and all(isinstance(v, dict) for v in best_params.values()):
                     rows = [{"symbol": _tw_label(s), "params": str(p)} for s, p in best_params.items()]
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
                 else:
                     st.code(str(best_params))
 
@@ -1028,11 +1036,11 @@ def _render_backtest_view(*, ctx: object):
         with st.container(border=True):
             _render_card_section_header("回放控制卡", "播放速度、標記模式與視窗控制。")
             c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 2, 2, 3])
-            if c1.button("Play", use_container_width=True):
+            if c1.button("Play", width="stretch"):
                 st.session_state[play_key] = True
-            if c2.button("Pause", use_container_width=True):
+            if c2.button("Pause", width="stretch"):
                 st.session_state[play_key] = False
-            if c3.button("Reset", use_container_width=True):
+            if c3.button("Reset", width="stretch"):
                 st.session_state[play_key] = False
                 st.session_state[idx_key] = replay_reset_idx
             c4.selectbox("速度", options=["0.5x", "1x", "2x", "5x", "10x"], key=speed_key)
@@ -1411,7 +1419,7 @@ def _render_backtest_view(*, ctx: object):
             chart_key=f"playback_chart:{run_key}",
             filename=f"playback_{playback_file}",
             scale=2,
-            use_container_width=True,
+            width="stretch",
             watermark_text=str(playback_symbol_label),
             palette=palette,
         )
@@ -1719,7 +1727,7 @@ def _render_backtest_view(*, ctx: object):
                         enabled=tw_symbol_label_enabled,
                         columns=["Series", "Definition"],
                     ),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -1884,7 +1892,7 @@ def _render_backtest_view(*, ctx: object):
                 enabled=tw_symbol_label_enabled,
                 columns=["比較項目"],
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -2013,7 +2021,7 @@ def _render_backtest_view(*, ctx: object):
                     else f"{dca_bench_ret * 100.0:+.2f}%",
                 }
             )
-        st.dataframe(pd.DataFrame(dca_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(dca_rows), width="stretch", hide_index=True)
         if benchmark_choice == "off":
             st.caption("你已關閉 Benchmark，因此本卡僅顯示 DCA策略結果。")
         elif not dca_benchmark_metrics:
@@ -2022,7 +2030,7 @@ def _render_backtest_view(*, ctx: object):
     _render_card_section_header("逐年報酬卡")
     if result.yearly_returns:
         yr = pd.DataFrame([{"年度": y, "報酬率%": round(v * 100.0, 2)} for y, v in result.yearly_returns.items()])
-        st.dataframe(yr.sort_values("年度"), use_container_width=True, hide_index=True)
+        st.dataframe(yr.sort_values("年度"), width="stretch", hide_index=True)
     else:
         st.caption("樣本不足，無逐年報酬。")
 

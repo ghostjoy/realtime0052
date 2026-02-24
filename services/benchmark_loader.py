@@ -7,57 +7,10 @@ import pandas as pd
 
 from backtest import apply_split_adjustment
 from market_data_types import BenchmarkLoadResult
+from utils import normalize_ohlcv_frame
 
 if TYPE_CHECKING:
     from storage import HistoryStore
-
-
-_BASE_OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
-
-
-def _empty_bars() -> pd.DataFrame:
-    return pd.DataFrame(columns=_BASE_OHLCV_COLUMNS)
-
-
-def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return _empty_bars()
-
-    out = df.copy()
-    if isinstance(out.columns, pd.MultiIndex):
-        renamed: list[str] = []
-        for col in out.columns:
-            parts = [str(part).strip().lower() for part in col if str(part).strip()]
-            candidate = ""
-            for item in reversed(parts):
-                if item in {"open", "high", "low", "close", "adj close", "adj_close", "volume", "price"}:
-                    candidate = item
-                    break
-            renamed.append(candidate or (parts[-1] if parts else ""))
-        out.columns = renamed
-    else:
-        out.columns = [str(col).strip().lower() for col in out.columns]
-
-    if "adj close" in out.columns and "adj_close" not in out.columns:
-        out = out.rename(columns={"adj close": "adj_close"})
-    if "price" in out.columns and "close" not in out.columns:
-        out["close"] = out["price"]
-    if "close" not in out.columns:
-        return _empty_bars()
-
-    close = pd.to_numeric(out["close"], errors="coerce")
-    for col in ["open", "high", "low"]:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(close)
-        else:
-            out[col] = close
-    if "volume" in out.columns:
-        out["volume"] = pd.to_numeric(out["volume"], errors="coerce").fillna(0.0)
-    else:
-        out["volume"] = 0.0
-    out["close"] = close
-    out = out[_BASE_OHLCV_COLUMNS].dropna(subset=["open", "high", "low", "close"], how="any")
-    return out.sort_index()
 
 
 def benchmark_candidates_tw(choice: str, *, allow_twii_fallback: bool = False) -> list[str]:
@@ -96,12 +49,12 @@ def load_tw_benchmark_bars(
             if report.error:
                 sync_issues.append(f"{benchmark_symbol}: {report.error}")
 
-        bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
+        bench_bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
         if bench_bars.empty and not sync_first:
             report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
             if report.error:
                 sync_issues.append(f"{benchmark_symbol}: {report.error}")
-            bench_bars = _normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
+            bench_bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
         if bench_bars.empty:
             source_chain.append(f"{benchmark_symbol}:empty")
             continue
@@ -129,7 +82,7 @@ def load_tw_benchmark_bars(
         )
 
     return BenchmarkLoadResult(
-        bars=_empty_bars(),
+        bars=normalize_ohlcv_frame(pd.DataFrame()),
         close=pd.Series(dtype=float),
         symbol_used="",
         sync_issues=sync_issues,

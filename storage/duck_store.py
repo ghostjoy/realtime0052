@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import json
 import os
 import re
@@ -121,6 +123,28 @@ class DuckHistoryStore:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
+
+    @contextmanager
+    def _connect_ctx(self):
+        db_path = str(self.db_path)
+        is_memory = db_path == ":memory:" or db_path.startswith("file::")
+        
+        if is_memory and hasattr(self, '_memory_conn') and self._memory_conn:
+            yield self._memory_conn
+            return
+        
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if not is_memory:
+                conn.close()
+            else:
+                self._memory_conn = conn
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         conn = duckdb.connect(str(self.db_path))

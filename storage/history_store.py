@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import json
 import os
 import re
@@ -161,6 +163,28 @@ class HistoryStore:
             except Exception:
                 pass
 
+    @contextmanager
+    def _connect_ctx(self):
+        db_path = str(self.db_path)
+        is_memory = db_path == ":memory:" or db_path.startswith("file::")
+        
+        if is_memory and hasattr(self, '_memory_conn') and self._memory_conn:
+            yield self._memory_conn
+            return
+        
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if not is_memory:
+                conn.close()
+            else:
+                self._memory_conn = conn
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -168,7 +192,7 @@ class HistoryStore:
         return conn
 
     def _init_db(self):
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS instruments (
@@ -382,7 +406,7 @@ class HistoryStore:
             )
         if not payload:
             return 0
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.executemany(
                 """
                 INSERT INTO symbol_metadata(
@@ -421,7 +445,7 @@ class HistoryStore:
             WHERE market=? AND symbol IN ({placeholders})
         """
         params: list[object] = [market_token, *normalized_symbols]
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             rows = conn.execute(sql, params).fetchall()
         out: dict[str, dict[str, object]] = {}
         for row in rows:
@@ -450,7 +474,7 @@ class HistoryStore:
         if limit is not None:
             limit_sql = " LIMIT ?"
             params.append(max(1, int(limit)))
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             rows = conn.execute(
                 f"""
                 SELECT symbol
@@ -469,7 +493,7 @@ class HistoryStore:
         if limit is not None:
             instrument_limit_sql = " LIMIT ?"
             instrument_params.append(max(1, int(limit)))
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             fallback_rows = conn.execute(
                 f"""
                 SELECT symbol
@@ -484,7 +508,7 @@ class HistoryStore:
 
     def start_bootstrap_run(self, scope: str, params: Dict[str, object]) -> str:
         run_id = f"bootstrap:{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S%f')}"
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 INSERT INTO bootstrap_runs(
@@ -516,7 +540,7 @@ class HistoryStore:
         key = self._normalize_text(run_id)
         if not key:
             return
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 UPDATE bootstrap_runs
@@ -543,7 +567,7 @@ class HistoryStore:
             )
 
     def load_latest_bootstrap_run(self) -> Optional[BootstrapRun]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT run_id, scope, status, started_at, finished_at,
@@ -649,7 +673,7 @@ class HistoryStore:
         return norm
 
     def _load_first_bar_date(self, instrument_id: int) -> Optional[datetime]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute("SELECT MIN(date) FROM daily_bars WHERE instrument_id=?", (instrument_id,)).fetchone()
         if not row or not row[0]:
             return None
@@ -662,7 +686,7 @@ class HistoryStore:
         return symbol
 
     def _get_or_create_instrument(self, symbol: str, market: str, name: Optional[str] = None) -> int:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 INSERT INTO instruments(symbol, market, name, timezone)
@@ -677,7 +701,7 @@ class HistoryStore:
             return int(row[0])
 
     def _load_last_success_date(self, instrument_id: int) -> Optional[datetime]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 "SELECT last_success_date FROM sync_state WHERE instrument_id=?",
                 (instrument_id,),
@@ -693,7 +717,7 @@ class HistoryStore:
         source: Optional[str],
         error: Optional[str],
     ):
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 INSERT INTO sync_state(instrument_id, last_success_date, last_source, last_error, updated_at)
@@ -825,7 +849,7 @@ class HistoryStore:
             )
 
         rows_upserted = 0
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             for dt, row in df.iterrows():
                 conn.execute(
                     """
@@ -892,7 +916,7 @@ class HistoryStore:
             WHERE {" AND ".join(where)}
             ORDER BY date ASC
         """
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             df = pd.read_sql_query(sql, conn, params=params)
         if df.empty:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "adj_close", "source"])
@@ -933,7 +957,7 @@ class HistoryStore:
         retain = resolve_intraday_retain_days(self.intraday_retain_days if retain_days is None else retain_days)
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         rows = sorted(normalized.items(), key=lambda item: item[0])
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.executemany(
                 """
                 INSERT INTO intraday_ticks(instrument_id, ts_utc, price, cum_volume, source, fetched_at)
@@ -996,7 +1020,7 @@ class HistoryStore:
             WHERE {" AND ".join(where)}
             ORDER BY ts_utc ASC
         """
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             df = pd.read_sql_query(sql, conn, params=params)
         if df.empty:
             return pd.DataFrame(columns=["price", "cum_volume", "source"])
@@ -1013,7 +1037,7 @@ class HistoryStore:
         cost: Dict[str, object],
         result: Dict[str, object],
     ) -> int:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO backtest_runs(created_at, symbol, market, strategy, params_json, cost_json, result_json)
@@ -1041,7 +1065,7 @@ class HistoryStore:
         if not key:
             raise ValueError("run_key is required")
         now = datetime.now(tz=timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO backtest_replay_runs(run_key, created_at, params_json, payload_json)
@@ -1060,7 +1084,7 @@ class HistoryStore:
         key = str(run_key or "").strip()
         if not key:
             return None
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT run_key, created_at, params_json, payload_json
@@ -1113,7 +1137,7 @@ class HistoryStore:
         norm_symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
         payload = json.dumps(norm_symbols, ensure_ascii=False)
         now = datetime.now(tz=timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 INSERT INTO universe_snapshots(universe_id, symbols_json, source, fetched_at, updated_at)
@@ -1128,7 +1152,7 @@ class HistoryStore:
             )
 
     def load_universe_snapshot(self, universe_id: str) -> Optional[UniverseSnapshot]:
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT universe_id, symbols_json, source, fetched_at
@@ -1163,7 +1187,7 @@ class HistoryStore:
 
     def save_heatmap_run(self, universe_id: str, payload: Dict[str, object]) -> int:
         now = datetime.now(tz=timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO heatmap_runs(universe_id, created_at, payload_json)
@@ -1177,7 +1201,7 @@ class HistoryStore:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
             return None
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT universe_id, created_at, payload_json
@@ -1226,7 +1250,7 @@ class HistoryStore:
             return
         name = self._normalize_text(etf_name) or code
         now = datetime.now(tz=timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT etf_name, pin_as_card, open_count, last_opened_at, created_at
@@ -1275,7 +1299,7 @@ class HistoryStore:
 
     def list_heatmap_hub_entries(self, *, pinned_only: bool = False) -> list[HeatmapHubEntry]:
         where_sql = "WHERE pin_as_card=1" if bool(pinned_only) else ""
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             rows = conn.execute(
                 f"""
                 SELECT etf_code, etf_name, pin_as_card, open_count, last_opened_at, created_at, updated_at
@@ -1308,7 +1332,7 @@ class HistoryStore:
         if not code:
             return False
         now = datetime.now(tz=timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cur = conn.execute(
                 "UPDATE heatmap_hub_entries SET pin_as_card=?, updated_at=? WHERE etf_code=?",
                 (1 if bool(pin_as_card) else 0, now, code),
@@ -1326,7 +1350,7 @@ class HistoryStore:
         if not universe_key:
             raise ValueError("universe_id is required")
         now = datetime.now(tz=timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO rotation_runs(universe_id, run_key, created_at, params_json, payload_json)
@@ -1346,7 +1370,7 @@ class HistoryStore:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
             return None
-        with self._connect() as conn:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT universe_id, run_key, created_at, params_json, payload_json

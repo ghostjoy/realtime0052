@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import warnings
+
 _CTX_BOUND = False
 
 
 def _bind_ctx(ctx: object):
+    """Deprecated: Use explicit imports instead of ctx injection."""
+    warnings.warn(
+        "_bind_ctx is deprecated. Pass dependencies explicitly instead of using ctx=globals()",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     global _CTX_BOUND
     if _CTX_BOUND:
         return
@@ -304,7 +312,7 @@ def _render_live_view(*, ctx: object):
                     "atr_14",
                 ]
                 with st.expander("查看完整指標表", expanded=False):
-                    st.dataframe(ind.iloc[-1][show_cols].to_frame("value").T, use_container_width=True)
+                    st.dataframe(ind.iloc[-1][show_cols].to_frame("value").T, width="stretch")
 
             if market == "台股(TWSE)":
                 with st.container(border=True):
@@ -321,11 +329,11 @@ def _render_live_view(*, ctx: object):
                             "ask_size": ask_sizes[:5] + [np.nan] * max(0, 5 - len(ask_sizes)),
                         }
                     )
-                    st.dataframe(ob, use_container_width=True, hide_index=True)
+                    st.dataframe(ob, width="stretch", hide_index=True)
             elif ctx.fundamentals:
                 with st.container(border=True):
                     st.markdown("#### 基本面快照（Yahoo）")
-                    st.dataframe(pd.DataFrame([ctx.fundamentals]), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame([ctx.fundamentals]), width="stretch", hide_index=True)
 
             with st.container(border=True):
                 st.markdown("#### 外部參考")
@@ -333,7 +341,7 @@ def _render_live_view(*, ctx: object):
                 if refs.empty:
                     st.caption("目前無法取得外部參考資料。")
                 else:
-                    st.dataframe(refs, use_container_width=True, hide_index=True)
+                    st.dataframe(refs, width="stretch", hide_index=True)
 
     live_fragment()
 
