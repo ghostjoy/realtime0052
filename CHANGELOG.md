@@ -192,6 +192,9 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正熱力圖平行同步偶發 DuckDB 交易衝突（例如 `TransactionContext Error: Conflict on tuple deletion!`）：
+  - `services/sync_orchestrator.py` 的可重試錯誤判斷新增 `tuple deletion/update conflict`
+  - 平行同步遇到此類衝突時，會對失敗 symbol 自動做一次序列重試，降低 00735/00910 海外成分同步噪音
 - Twelve Data API key 讀取新增 key file fallback：
   - 預設讀取 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/twelvedatakey`
   - 可用 `TWELVE_DATA_API_KEY_FILE` / `TWELVEDATA_API_KEY_FILE` 覆蓋

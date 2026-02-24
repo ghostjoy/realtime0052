@@ -60,6 +60,26 @@ class _DuckConflictOnceStore(_FakeStore):
         return SimpleNamespace(error="", rows_upserted=5, source="unit", fallback_depth=0)
 
 
+class _DuckTxnConflictOnceStore(_FakeStore):
+    def __init__(self, bars_map: dict[str, pd.DataFrame]):
+        super().__init__(bars_map=bars_map, errors=None)
+        self._attempts: dict[str, int] = {}
+
+    def sync_symbol_history(self, symbol, market, start=None, end=None):
+        code = str(symbol).upper()
+        self.sync_calls.append(code)
+        attempt = int(self._attempts.get(code, 0)) + 1
+        self._attempts[code] = attempt
+        if attempt == 1:
+            return SimpleNamespace(
+                error="TransactionContext Error: Conflict on tuple deletion!",
+                rows_upserted=0,
+                source="unit",
+                fallback_depth=0,
+            )
+        return SimpleNamespace(error="", rows_upserted=5, source="unit", fallback_depth=0)
+
+
 class SyncOrchestratorTests(unittest.TestCase):
     def test_bars_need_backfill(self):
         start = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -134,6 +154,25 @@ class SyncOrchestratorTests(unittest.TestCase):
         self.assertIn("6781", reports)
         self.assertEqual(store.sync_calls.count("2882"), 2)
         self.assertEqual(store.sync_calls.count("6781"), 2)
+
+    def test_sync_symbols_history_retries_duckdb_txn_tuple_conflict(self):
+        start = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        end = datetime(2026, 1, 8, tzinfo=timezone.utc)
+        store = _DuckTxnConflictOnceStore(bars_map={})
+        reports, issues = sync_symbols_history(
+            store=store,
+            market="US",
+            symbols=["018260.KS", "099320.KS"],
+            start=start,
+            end=end,
+            parallel=True,
+            max_workers=2,
+        )
+        self.assertEqual(issues, [])
+        self.assertIn("018260.KS", reports)
+        self.assertIn("099320.KS", reports)
+        self.assertEqual(store.sync_calls.count("018260.KS"), 2)
+        self.assertEqual(store.sync_calls.count("099320.KS"), 2)
 
 
 if __name__ == "__main__":

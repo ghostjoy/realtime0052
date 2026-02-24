@@ -18,6 +18,10 @@ def _is_retryable_duckdb_handle_conflict(message: object) -> bool:
         return False
     if "unique file handle conflict" in text:
         return True
+    if ("transactioncontext error" in text) and ("conflict on tuple deletion" in text):
+        return True
+    if ("transactioncontext error" in text) and ("conflict on tuple update" in text):
+        return True
     return ("cannot attach" in text) and ("market_history" in text)
 
 
