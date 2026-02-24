@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
@@ -39,8 +39,8 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     return frame[required + ["volume"]]
 
 
-def _coerce_symbols(bars_by_symbol: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-    out: Dict[str, pd.DataFrame] = {}
+def _coerce_symbols(bars_by_symbol: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    out: dict[str, pd.DataFrame] = {}
     for symbol, bars in bars_by_symbol.items():
         sym = str(symbol or "").strip().upper()
         if not sym:
@@ -53,7 +53,7 @@ def _coerce_symbols(bars_by_symbol: Dict[str, pd.DataFrame]) -> Dict[str, pd.Dat
 
 
 def _union_index(frames: Iterable[pd.DataFrame]) -> pd.DatetimeIndex:
-    idx: Optional[pd.DatetimeIndex] = None
+    idx: pd.DatetimeIndex | None = None
     for frame in frames:
         if frame.empty:
             continue
@@ -78,12 +78,12 @@ def _monthly_first_trading_days(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
 
 
 def run_tw_etf_rotation_backtest(
-    bars_by_symbol: Dict[str, pd.DataFrame],
+    bars_by_symbol: dict[str, pd.DataFrame],
     benchmark_bars: pd.DataFrame,
     *,
     top_n: int = 3,
     initial_capital: float = 1_000_000.0,
-    cost_model: Optional[CostModel] = None,
+    cost_model: CostModel | None = None,
     momentum_w20: float = 0.2,
     momentum_w60: float = 0.5,
     momentum_w120: float = 0.3,
@@ -107,7 +107,9 @@ def run_tw_etf_rotation_backtest(
 
     all_index = _union_index([benchmark, *symbols_bars.values()])
     if len(all_index) < ROTATION_MIN_BARS:
-        raise ValueError(f"not enough aligned bars for rotation backtest (need >= {ROTATION_MIN_BARS})")
+        raise ValueError(
+            f"not enough aligned bars for rotation backtest (need >= {ROTATION_MIN_BARS})"
+        )
 
     symbols = sorted(symbols_bars.keys())
     close_df = pd.DataFrame(index=all_index, columns=symbols, dtype=float)
@@ -132,7 +134,7 @@ def run_tw_etf_rotation_backtest(
     score_df = momentum_w20 * ret20 + momentum_w60 * ret60 + momentum_w120 * ret120
     symbol_sma60 = close_df.rolling(window=60, min_periods=60).mean()
 
-    schedule: Dict[pd.Timestamp, Dict[str, float]] = {}
+    schedule: dict[pd.Timestamp, dict[str, float]] = {}
     rebalance_records: list[RotationRebalanceRecord] = []
     for signal_date in signal_dates:
         next_candidates = all_index[all_index > signal_date]
@@ -187,8 +189,8 @@ def run_tw_etf_rotation_backtest(
     slippage_rate = float(cost.slippage_rate)
 
     cash = float(initial_capital)
-    position_qty = {symbol: 0.0 for symbol in symbols}
-    position_cost = {symbol: 0.0 for symbol in symbols}
+    position_qty = dict.fromkeys(symbols, 0.0)
+    position_cost = dict.fromkeys(symbols, 0.0)
     trade_rows: list[dict[str, object]] = []
     realized_pnls: list[float] = []
     equity_rows: list[dict[str, object]] = []
@@ -331,7 +333,7 @@ def run_tw_etf_rotation_backtest(
                 )
 
         equity = cash
-        value_by_symbol: Dict[str, float] = {}
+        value_by_symbol: dict[str, float] = {}
         for symbol in symbols:
             px = pd.to_numeric(close_px.get(symbol), errors="coerce")
             if pd.isna(px) or float(px) <= 0:

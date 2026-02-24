@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import re
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 import requests
@@ -16,24 +16,35 @@ from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind,
 class TwFugleHistoricalProvider(MarketDataProvider):
     name = "tw_fugle_rest"
     default_base_url = "https://api.fugle.tw/marketdata/v1.0/stock"
-    default_key_file = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "codexapp" / "fuglekey"
+    default_key_file = (
+        Path.home()
+        / "Library"
+        / "Mobile Documents"
+        / "com~apple~CloudDocs"
+        / "codexapp"
+        / "fuglekey"
+    )
     # Fugle historical candles endpoint is documented for 1-year query range per request (daily).
     max_days_per_request = 360
     # Intraday candles endpoint range is shorter; keep each request within 5 days.
     max_days_per_intraday_request = 5
 
     @classmethod
-    def _resolve_api_key(cls, api_key: Optional[str] = None) -> Optional[str]:
+    def _resolve_api_key(cls, api_key: str | None = None) -> str | None:
         direct = str(api_key or "").strip()
         if direct:
             return direct
 
-        env_key = str(os.getenv("FUGLE_MARKETDATA_API_KEY") or os.getenv("FUGLE_API_KEY") or "").strip()
+        env_key = str(
+            os.getenv("FUGLE_MARKETDATA_API_KEY") or os.getenv("FUGLE_API_KEY") or ""
+        ).strip()
         if env_key:
             return env_key
 
         key_file = str(
-            os.getenv("FUGLE_MARKETDATA_API_KEY_FILE") or os.getenv("FUGLE_API_KEY_FILE") or cls.default_key_file
+            os.getenv("FUGLE_MARKETDATA_API_KEY_FILE")
+            or os.getenv("FUGLE_API_KEY_FILE")
+            or cls.default_key_file
         ).strip()
         if not key_file:
             return None
@@ -44,13 +55,15 @@ class TwFugleHistoricalProvider(MarketDataProvider):
         normalized = text.strip()
         return normalized or None
 
-    def __init__(self, api_key: Optional[str] = None, timeout_sec: int = 15, base_url: Optional[str] = None):
+    def __init__(
+        self, api_key: str | None = None, timeout_sec: int = 15, base_url: str | None = None
+    ):
         self.api_key = self._resolve_api_key(api_key)
         self.timeout_sec = timeout_sec
         self.base_url = (base_url or self.default_base_url).rstrip("/")
 
     @staticmethod
-    def _to_float(value: Any) -> Optional[float]:
+    def _to_float(value: Any) -> float | None:
         if value is None:
             return None
         try:
@@ -74,11 +87,19 @@ class TwFugleHistoricalProvider(MarketDataProvider):
         return token
 
     def quote(self, request: ProviderRequest) -> QuoteSnapshot:
-        raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Fugle historical provider does not provide quote")
+        raise ProviderError(
+            self.name,
+            ProviderErrorKind.UNSUPPORTED,
+            "Fugle historical provider does not provide quote",
+        )
 
-    def _fetch_chunk(self, symbol: str, start: datetime, end: datetime, *, timeframe: str) -> list[dict[str, Any]]:
+    def _fetch_chunk(
+        self, symbol: str, start: datetime, end: datetime, *, timeframe: str
+    ) -> list[dict[str, Any]]:
         if not self.api_key:
-            raise ProviderError(self.name, ProviderErrorKind.AUTH, "FUGLE_MARKETDATA_API_KEY is missing")
+            raise ProviderError(
+                self.name, ProviderErrorKind.AUTH, "FUGLE_MARKETDATA_API_KEY is missing"
+            )
 
         url = f"{self.base_url}/historical/candles/{symbol}"
         params = {
@@ -93,22 +114,30 @@ class TwFugleHistoricalProvider(MarketDataProvider):
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=self.timeout_sec)
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "Fugle historical request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "Fugle historical request failed", exc
+            ) from exc
 
         if resp.status_code in {401, 403}:
             raise ProviderError(self.name, ProviderErrorKind.AUTH, "Fugle API key unauthorized")
         if resp.status_code == 429:
             raise ProviderError(self.name, ProviderErrorKind.RATE_LIMIT, "Fugle API rate limit")
         if resp.status_code >= 400:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, f"Fugle API http {resp.status_code}")
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, f"Fugle API http {resp.status_code}"
+            )
 
         try:
             payload = resp.json()
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "Fugle historical response parse failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "Fugle historical response parse failed", exc
+            ) from exc
 
         if not isinstance(payload, dict):
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "Fugle historical response is not an object")
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "Fugle historical response is not an object"
+            )
         data = payload.get("data")
         if not isinstance(data, list):
             return []
@@ -140,10 +169,18 @@ class TwFugleHistoricalProvider(MarketDataProvider):
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
         if request.market != "TW":
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Fugle historical provider only supports TW market")
+            raise ProviderError(
+                self.name,
+                ProviderErrorKind.UNSUPPORTED,
+                "Fugle historical provider only supports TW market",
+            )
         interval = str(request.interval or "").strip().lower()
         if interval not in {"1d", "1m"}:
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Fugle historical provider supports 1d/1m interval")
+            raise ProviderError(
+                self.name,
+                ProviderErrorKind.UNSUPPORTED,
+                "Fugle historical provider supports 1d/1m interval",
+            )
 
         symbol = self._normalize_tw_symbol(request.symbol)
 
@@ -163,16 +200,27 @@ class TwFugleHistoricalProvider(MarketDataProvider):
         cursor = start
         while cursor.date() <= end.date():
             chunk_end = min(end, cursor + timedelta(days=max_span))
-            rows.extend(self._fetch_chunk(symbol=symbol, start=cursor, end=chunk_end, timeframe=timeframe))
+            rows.extend(
+                self._fetch_chunk(symbol=symbol, start=cursor, end=chunk_end, timeframe=timeframe)
+            )
             cursor = chunk_end + timedelta(days=1)
 
         if not rows:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Fugle historical returned empty OHLCV")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "Fugle historical returned empty OHLCV"
+            )
 
-        df = pd.DataFrame(rows).drop_duplicates(subset=["date"]).sort_values("date").set_index("date")
+        df = (
+            pd.DataFrame(rows)
+            .drop_duplicates(subset=["date"])
+            .sort_values("date")
+            .set_index("date")
+        )
         df = df[(df.index >= start) & (df.index <= end)]
         if df.empty:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Fugle historical OHLCV filtered empty")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "Fugle historical OHLCV filtered empty"
+            )
 
         return OhlcvSnapshot(
             symbol=symbol,

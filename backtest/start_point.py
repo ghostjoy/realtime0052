@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, Optional, Tuple
 
 import pandas as pd
-
 
 StartMode = str  # "沿用回測起始日期" | "指定日期" | "指定第幾根K"
 
@@ -12,9 +10,9 @@ StartMode = str  # "沿用回測起始日期" | "指定日期" | "指定第幾�
 def resolve_start_index(
     bars: pd.DataFrame,
     mode: StartMode,
-    start_date: Optional[date] = None,
-    start_k: Optional[int] = None,
-) -> Tuple[int, pd.Timestamp]:
+    start_date: date | None = None,
+    start_k: int | None = None,
+) -> tuple[int, pd.Timestamp]:
     if bars is None or bars.empty:
         raise ValueError("bars is empty")
 
@@ -42,12 +40,12 @@ def resolve_start_index(
 
 
 def apply_start_to_bars_map(
-    bars_by_symbol: Dict[str, pd.DataFrame],
+    bars_by_symbol: dict[str, pd.DataFrame],
     mode: StartMode,
-    start_date: Optional[date] = None,
-    start_k: Optional[int] = None,
-) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
-    trimmed: Dict[str, pd.DataFrame] = {}
+    start_date: date | None = None,
+    start_k: int | None = None,
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    trimmed: dict[str, pd.DataFrame] = {}
     rows = []
 
     for symbol, bars in bars_by_symbol.items():

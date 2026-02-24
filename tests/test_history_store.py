@@ -109,10 +109,7 @@ class _DupColumnService:
         dates = pd.date_range("2024-01-01", periods=10, freq="B", tz="UTC")
         # Simulate malformed upstream shape: duplicated "open" column.
         df = pd.DataFrame(
-            data=[
-                [100.0, 100.0, 101.0, 99.0, 100.5, 1000.0]
-                for _ in range(len(dates))
-            ],
+            data=[[100.0, 100.0, 101.0, 99.0, 100.5, 1000.0] for _ in range(len(dates))],
             columns=["open", "open", "high", "low", "close", "volume"],
             index=dates,
         )
@@ -140,7 +137,9 @@ class HistoryStoreTests(unittest.TestCase):
 
             bars = store.load_daily_bars("TSLA", "US")
             self.assertFalse(bars.empty)
-            self.assertTrue({"open", "high", "low", "close", "volume", "source"}.issubset(bars.columns))
+            self.assertTrue(
+                {"open", "high", "low", "close", "volume", "source"}.issubset(bars.columns)
+            )
 
             second = store.sync_symbol_history(symbol="TSLA", market="US")
             self.assertEqual(second.rows_upserted, 0)
@@ -183,8 +182,14 @@ class HistoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"
             store = HistoryStore(db_path=db_path, service=_FakeService())
-            payload_old = {"rows": [{"symbol": "2330", "excess_pct": 1.2}], "generated_at": "2026-01-01T00:00:00+00:00"}
-            payload_new = {"rows": [{"symbol": "2454", "excess_pct": 2.3}], "generated_at": "2026-01-02T00:00:00+00:00"}
+            payload_old = {
+                "rows": [{"symbol": "2330", "excess_pct": 1.2}],
+                "generated_at": "2026-01-01T00:00:00+00:00",
+            }
+            payload_new = {
+                "rows": [{"symbol": "2454", "excess_pct": 2.3}],
+                "generated_at": "2026-01-02T00:00:00+00:00",
+            }
             store.save_heatmap_run(universe_id="TW:00935", payload=payload_old)
             store.save_heatmap_run(universe_id="TW:00935", payload=payload_new)
             latest = store.load_latest_heatmap_run("TW:00935")
@@ -197,8 +202,12 @@ class HistoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"
             store = HistoryStore(db_path=db_path, service=_FakeService())
-            store.upsert_heatmap_hub_entry(etf_code="00935", etf_name="野村臺灣新科技50", opened=True)
-            store.upsert_heatmap_hub_entry(etf_code="00935", etf_name="野村臺灣新科技50", opened=True, pin_as_card=True)
+            store.upsert_heatmap_hub_entry(
+                etf_code="00935", etf_name="野村臺灣新科技50", opened=True
+            )
+            store.upsert_heatmap_hub_entry(
+                etf_code="00935", etf_name="野村臺灣新科技50", opened=True, pin_as_card=True
+            )
             store.upsert_heatmap_hub_entry(etf_code="0050", etf_name="元大台灣50", opened=False)
 
             all_rows = store.list_heatmap_hub_entries()
@@ -326,8 +335,20 @@ class HistoryStoreTests(unittest.TestCase):
             store = HistoryStore(db_path=db_path, service=_FakeService())
             written = store.upsert_symbol_metadata(
                 [
-                    {"symbol": "2330", "market": "TW", "name": "台積電", "exchange": "TW", "industry": "24"},
-                    {"symbol": "AAPL", "market": "US", "name": "Apple", "exchange": "US", "currency": "USD"},
+                    {
+                        "symbol": "2330",
+                        "market": "TW",
+                        "name": "台積電",
+                        "exchange": "TW",
+                        "industry": "24",
+                    },
+                    {
+                        "symbol": "AAPL",
+                        "market": "US",
+                        "name": "Apple",
+                        "exchange": "US",
+                        "currency": "USD",
+                    },
                 ]
             )
             self.assertEqual(written, 2)
@@ -374,7 +395,12 @@ class HistoryStoreTests(unittest.TestCase):
             now = datetime.now(tz=timezone.utc)
             old_ts = now - pd.Timedelta(days=5)
             rows = [
-                {"ts": old_ts.isoformat(), "price": 100.0, "cum_volume": 10.0, "source": "fugle_ws"},
+                {
+                    "ts": old_ts.isoformat(),
+                    "price": 100.0,
+                    "cum_volume": 10.0,
+                    "source": "fugle_ws",
+                },
                 {"ts": now.isoformat(), "price": 110.0, "cum_volume": 20.0, "source": "fugle_ws"},
             ]
             written = store.save_intraday_ticks("2330", "TW", rows, retain_days=2)

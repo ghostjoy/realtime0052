@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Callable, Optional, Protocol
+from typing import Protocol
 
 import pandas as pd
 
@@ -12,11 +13,11 @@ from services.sync_orchestrator import sync_symbols_history
 
 
 class HistoryStoreLike(Protocol):
-    def load_daily_bars(self, symbol: str, market: str, start: datetime, end: datetime) -> pd.DataFrame:
-        ...
+    def load_daily_bars(
+        self, symbol: str, market: str, start: datetime, end: datetime
+    ) -> pd.DataFrame: ...
 
-    def sync_symbol_history(self, symbol: str, market: str, start: datetime, end: datetime):
-        ...
+    def sync_symbol_history(self, symbol: str, market: str, start: datetime, end: datetime): ...
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,9 @@ class HeatmapBarsPreparationResult:
 
 
 def build_heatmap_run_key(config: HeatmapRunInput) -> str:
-    strategy_token = json.dumps(config.strategy_params if isinstance(config.strategy_params, dict) else {}, sort_keys=True)
+    strategy_token = json.dumps(
+        config.strategy_params if isinstance(config.strategy_params, dict) else {}, sort_keys=True
+    )
     symbols_token = ",".join(config.selected_symbols)
     return (
         f"{config.page_key}_heatmap:{config.start_date}:{config.end_date}:{config.benchmark_choice}:{config.strategy}:{strategy_token}:"
@@ -91,7 +94,9 @@ def prepare_heatmap_bars(
         )
         symbol_sync_issues.extend(lazy_sync_issues)
         for symbol in symbols_need_sync:
-            bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars_local = store.load_daily_bars(
+                symbol=symbol, market="TW", start=start_dt, end=end_dt
+            )
             bars_cache[symbol] = normalize_ohlcv_frame(bars_local)
 
     return HeatmapBarsPreparationResult(bars_cache=bars_cache, sync_issues=symbol_sync_issues)
@@ -107,12 +112,14 @@ def compute_heatmap_rows(
     cost_model: CostModel,
     name_map: dict[str, str],
     min_required: int,
-    progress_callback: Optional[Callable[[float], None]] = None,
+    progress_callback: Callable[[float], None] | None = None,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     total = max(len(run_symbols), 1)
     for idx, symbol in enumerate(run_symbols):
-        bars = bars_cache.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
+        bars = bars_cache.get(
+            symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        )
         if len(bars) < int(min_required):
             if progress_callback:
                 progress_callback((idx + 1) / total)

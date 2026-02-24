@@ -58,7 +58,10 @@ class ComparisonTests(unittest.TestCase):
         plan = build_dca_contribution_plan(idx)
         self.assertEqual(pd.Timestamp(plan["initial_date"]), pd.Timestamp("2026-01-02", tz="UTC"))
         monthly_dates = list(plan["monthly_dates"])
-        self.assertEqual(monthly_dates, [pd.Timestamp("2026-02-02", tz="UTC"), pd.Timestamp("2026-03-02", tz="UTC")])
+        self.assertEqual(
+            monthly_dates,
+            [pd.Timestamp("2026-02-02", tz="UTC"), pd.Timestamp("2026-03-02", tz="UTC")],
+        )
 
     def test_build_dca_equity_single_lump_sum_only(self):
         bars_by_symbol = {"A": _bars("2026-01-01", [100, 110, 121])}

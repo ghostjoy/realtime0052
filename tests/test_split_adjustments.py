@@ -28,11 +28,17 @@ class SplitAdjustmentTests(unittest.TestCase):
             },
             index=idx,
         )
-        out, events = apply_split_adjustment(bars, symbol="0050", market="TW", use_known=True, use_auto_detect=False)
+        out, events = apply_split_adjustment(
+            bars, symbol="0050", market="TW", use_known=True, use_auto_detect=False
+        )
         self.assertEqual(len(events), 1)
         self.assertAlmostEqual(events[0].ratio, 1.0 / 4.0, places=8)
-        self.assertAlmostEqual(float(out.loc[pd.Timestamp("2025-06-16", tz="UTC"), "close"]), 190.5 / 4.0, places=4)
-        self.assertAlmostEqual(float(out.loc[pd.Timestamp("2025-06-18", tz="UTC"), "close"]), 48.2, places=4)
+        self.assertAlmostEqual(
+            float(out.loc[pd.Timestamp("2025-06-16", tz="UTC"), "close"]), 190.5 / 4.0, places=4
+        )
+        self.assertAlmostEqual(
+            float(out.loc[pd.Timestamp("2025-06-18", tz="UTC"), "close"]), 48.2, places=4
+        )
 
     def test_known_split_adjusts_0052_history(self):
         idx = pd.to_datetime(
@@ -55,11 +61,17 @@ class SplitAdjustmentTests(unittest.TestCase):
             },
             index=idx,
         )
-        out, events = apply_split_adjustment(bars, symbol="0052", market="TW", use_known=True, use_auto_detect=False)
+        out, events = apply_split_adjustment(
+            bars, symbol="0052", market="TW", use_known=True, use_auto_detect=False
+        )
         self.assertEqual(len(events), 1)
         self.assertAlmostEqual(events[0].ratio, 1.0 / 7.0, places=8)
-        self.assertAlmostEqual(float(out.loc[pd.Timestamp("2025-11-18", tz="UTC"), "close"]), 245.3 / 7.0, places=4)
-        self.assertAlmostEqual(float(out.loc[pd.Timestamp("2025-11-26", tz="UTC"), "close"]), 35.04, places=4)
+        self.assertAlmostEqual(
+            float(out.loc[pd.Timestamp("2025-11-18", tz="UTC"), "close"]), 245.3 / 7.0, places=4
+        )
+        self.assertAlmostEqual(
+            float(out.loc[pd.Timestamp("2025-11-26", tz="UTC"), "close"]), 35.04, places=4
+        )
 
     def test_auto_detect_split_event(self):
         idx = pd.date_range("2025-01-01", periods=5, freq="B", tz="UTC")
@@ -89,7 +101,9 @@ class SplitAdjustmentTests(unittest.TestCase):
             },
             index=idx,
         )
-        out, events = apply_split_adjustment(bars, symbol="0052", market="TW", use_known=False, use_auto_detect=False)
+        out, events = apply_split_adjustment(
+            bars, symbol="0052", market="TW", use_known=False, use_auto_detect=False
+        )
         self.assertTrue(out.equals(bars))
         self.assertEqual(events, [])
 

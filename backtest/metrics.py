@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from math import sqrt
-from typing import Dict, Iterable
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,7 @@ import pandas as pd
 from backtest.types import BacktestMetrics
 
 
-def compute_yearly_returns(equity: pd.Series) -> Dict[str, float]:
+def compute_yearly_returns(equity: pd.Series) -> dict[str, float]:
     yearly = equity.resample("YE").last().pct_change().dropna()
     return {str(idx.year): float(val) for idx, val in yearly.items()}
 
@@ -18,7 +18,7 @@ def compute_metrics_from_equity(
     equity_curve: pd.DataFrame,
     initial_capital: float,
     trade_pnls: Iterable[float],
-) -> tuple[BacktestMetrics, pd.Series, Dict[str, float]]:
+) -> tuple[BacktestMetrics, pd.Series, dict[str, float]]:
     returns = equity_curve["equity"].pct_change().fillna(0.0)
     running_max = equity_curve["equity"].cummax()
     drawdown = equity_curve["equity"] / running_max - 1.0

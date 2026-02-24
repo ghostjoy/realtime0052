@@ -16,7 +16,9 @@ if str(ROOT_DIR) not in sys.path:
 
 from storage.duck_store import DuckHistoryStore
 
-ICLOUD_CODEXAPP_DIR = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "codexapp"
+ICLOUD_CODEXAPP_DIR = (
+    Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "codexapp"
+)
 
 
 def _default_sqlite_path() -> str:
@@ -81,10 +83,16 @@ def _backup_target(duckdb_path: Path, parquet_root: Path) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="One-shot migration from SQLite history DB to DuckDB + Parquet hybrid.")
+    parser = argparse.ArgumentParser(
+        description="One-shot migration from SQLite history DB to DuckDB + Parquet hybrid."
+    )
     parser.add_argument("--sqlite-path", default=_default_sqlite_path(), help="Legacy SQLite path.")
-    parser.add_argument("--duckdb-path", default=_default_duckdb_path(), help="DuckDB destination path.")
-    parser.add_argument("--parquet-root", default=None, help="Parquet root directory. Default: <duckdb_dir>/parquet")
+    parser.add_argument(
+        "--duckdb-path", default=_default_duckdb_path(), help="DuckDB destination path."
+    )
+    parser.add_argument(
+        "--parquet-root", default=None, help="Parquet root directory. Default: <duckdb_dir>/parquet"
+    )
     parser.add_argument(
         "--no-auto-migrate",
         action="store_true",
@@ -143,7 +151,9 @@ def main() -> int:
     tw_count = len(store.list_symbols("TW"))
     us_count = len(store.list_symbols("US"))
     sqlite_daily_rows = _count_sqlite_daily_rows(sqlite_path) if sqlite_path.exists() else 0
-    parquet_daily_rows, parquet_daily_symbols = _count_parquet_daily_rows_and_symbols(store.parquet_root)
+    parquet_daily_rows, parquet_daily_symbols = _count_parquet_daily_rows_and_symbols(
+        store.parquet_root
+    )
     print("[ok] DuckDB store is ready")
     print(f"  duckdb_path : {store.db_path}")
     print(f"  parquet_root: {store.parquet_root}")

@@ -6,8 +6,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from market_data_types import OhlcvSnapshot
-from market_data_types import QuoteSnapshot
+from market_data_types import OhlcvSnapshot, QuoteSnapshot
 from providers.base import ProviderError, ProviderErrorKind, ProviderRequest
 from services.market_data_service import LiveOptions, MarketDataService
 
@@ -104,7 +103,9 @@ class MarketDataServiceTests(unittest.TestCase):
     def test_quote_chain_fallback(self):
         service = MarketDataService()
         request = ProviderRequest(symbol="TSLA", market="US", interval="quote")
-        quote, chain, reason, depth = service._try_quote_chain([_BrokenProvider(), _GoodProvider()], request)  # noqa: SLF001
+        quote, chain, reason, depth = service._try_quote_chain(
+            [_BrokenProvider(), _GoodProvider()], request
+        )  # noqa: SLF001
         self.assertEqual(quote.source, "good")
         self.assertEqual(depth, 1)
         self.assertEqual(chain, ["broken", "good"])
@@ -181,7 +182,13 @@ class MarketDataServiceTests(unittest.TestCase):
             interval="1d",
             tz="UTC",
             df=pd.DataFrame(
-                {"open": [1, 1, 1, 1, 1], "high": [1, 1, 1, 1, 1], "low": [1, 1, 1, 1, 1], "close": [10, 11, 12, 13, 14], "volume": [1, 1, 1, 1, 1]},
+                {
+                    "open": [1, 1, 1, 1, 1],
+                    "high": [1, 1, 1, 1, 1],
+                    "low": [1, 1, 1, 1, 1],
+                    "close": [10, 11, 12, 13, 14],
+                    "volume": [1, 1, 1, 1, 1],
+                },
                 index=idx,
             ),
             source="stooq",
@@ -380,7 +387,9 @@ class MarketDataServiceTests(unittest.TestCase):
 
     def test_get_tw_etf_constituents_00935_primary_source(self):
         service = MarketDataService()
-        with patch.object(service, "_fetch_00935_nomura_constituents", return_value=["2330", "2454", "2317"]):
+        with patch.object(
+            service, "_fetch_00935_nomura_constituents", return_value=["2330", "2454", "2317"]
+        ):
             symbols, source = service.get_tw_etf_constituents("00935")
         self.assertEqual(source, "nomura_etfapi")
         self.assertEqual(symbols, ["2330", "2454", "2317"])
@@ -440,9 +449,15 @@ class MarketDataServiceTests(unittest.TestCase):
     def test_get_tw_live_context_prefers_fugle_when_key_exists(self):
         service = MarketDataService()
         service.tw_fugle_ws.api_key = "fake-key"
-        service.tw_mis.quote = unittest.mock.MagicMock(side_effect=RuntimeError("should not be called"))
-        service.tw_openapi.quote = unittest.mock.MagicMock(side_effect=RuntimeError("should not be called"))
-        service.tw_tpex.quote = unittest.mock.MagicMock(side_effect=RuntimeError("should not be called"))
+        service.tw_mis.quote = unittest.mock.MagicMock(
+            side_effect=RuntimeError("should not be called")
+        )
+        service.tw_openapi.quote = unittest.mock.MagicMock(
+            side_effect=RuntimeError("should not be called")
+        )
+        service.tw_tpex.quote = unittest.mock.MagicMock(
+            side_effect=RuntimeError("should not be called")
+        )
 
         quote = QuoteSnapshot(
             symbol="2330",
@@ -484,7 +499,9 @@ class MarketDataServiceTests(unittest.TestCase):
                     symbol="2330",
                     yahoo_symbol="2330.TW",
                     ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
-                    options=LiveOptions(use_yahoo=False, keep_minutes=60, exchange="tse", use_fugle_ws=True),
+                    options=LiveOptions(
+                        use_yahoo=False, keep_minutes=60, exchange="tse", use_fugle_ws=True
+                    ),
                 )
         self.assertEqual(ctx.quote.source, "fugle_ws")
         service.tw_mis.quote.assert_not_called()
@@ -548,7 +565,9 @@ class MarketDataServiceTests(unittest.TestCase):
                         symbol="2330",
                         yahoo_symbol="2330.TW",
                         ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
-                        options=LiveOptions(use_yahoo=True, keep_minutes=60, exchange="tse", use_fugle_ws=True),
+                        options=LiveOptions(
+                            use_yahoo=True, keep_minutes=60, exchange="tse", use_fugle_ws=True
+                        ),
                     )
 
         self.assertFalse(ctx.intraday.empty)
@@ -595,13 +614,19 @@ class MarketDataServiceTests(unittest.TestCase):
         )
 
         with patch.object(service, "_try_quote_chain", return_value=(quote, ["tw_mis"], None, 0)):
-            with patch.object(service, "_try_ohlcv_chain", return_value=daily_snap) as mock_daily_chain:
-                with patch.object(service.yahoo, "ohlcv", side_effect=RuntimeError("skip intraday yahoo")):
+            with patch.object(
+                service, "_try_ohlcv_chain", return_value=daily_snap
+            ) as mock_daily_chain:
+                with patch.object(
+                    service.yahoo, "ohlcv", side_effect=RuntimeError("skip intraday yahoo")
+                ):
                     service.get_tw_live_context(
                         symbol="0050",
                         yahoo_symbol="0050.TW",
                         ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
-                        options=LiveOptions(use_yahoo=True, keep_minutes=60, exchange="tse", use_fugle_ws=False),
+                        options=LiveOptions(
+                            use_yahoo=True, keep_minutes=60, exchange="tse", use_fugle_ws=False
+                        ),
                     )
         providers = mock_daily_chain.call_args.args[0]
         provider_names = [str(getattr(p, "name", "")) for p in providers]
@@ -647,7 +672,9 @@ class MarketDataServiceTests(unittest.TestCase):
             is_delayed=True,
             fetched_at=datetime.now(tz=timezone.utc),
         )
-        intraday_idx = pd.date_range(datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=10), periods=20, freq="1min")
+        intraday_idx = pd.date_range(
+            datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=10), periods=20, freq="1min"
+        )
         intraday_snap = OhlcvSnapshot(
             symbol="2330",
             market="TW",
@@ -676,7 +703,9 @@ class MarketDataServiceTests(unittest.TestCase):
                             symbol="2330",
                             yahoo_symbol="2330.TW",
                             ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
-                            options=LiveOptions(use_yahoo=True, keep_minutes=180, exchange="tse", use_fugle_ws=True),
+                            options=LiveOptions(
+                                use_yahoo=True, keep_minutes=180, exchange="tse", use_fugle_ws=True
+                            ),
                         )
 
         self.assertEqual(ctx.intraday_source, "tw_fugle_rest")
@@ -718,26 +747,34 @@ class MarketDataServiceTests(unittest.TestCase):
             is_delayed=True,
             fetched_at=datetime.now(tz=timezone.utc),
         )
-        with patch.object(service, "_try_quote_chain", return_value=(stale_quote, ["tw_openapi"], None, 0)):
+        with patch.object(
+            service, "_try_quote_chain", return_value=(stale_quote, ["tw_openapi"], None, 0)
+        ):
             with patch.object(service, "_try_ohlcv_chain", return_value=daily_snap):
                 ctx, ticks = service.get_tw_live_context(
                     symbol="2330",
                     yahoo_symbol="2330.TW",
                     ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
-                    options=LiveOptions(use_yahoo=False, keep_minutes=60, exchange="tse", use_fugle_ws=False),
+                    options=LiveOptions(
+                        use_yahoo=False, keep_minutes=60, exchange="tse", use_fugle_ws=False
+                    ),
                 )
         self.assertFalse(ctx.intraday.empty)
         self.assertFalse(ticks.empty)
         latest = pd.to_datetime(ticks["ts"], utc=True, errors="coerce").max()
         self.assertFalse(pd.isna(latest))
-        self.assertGreaterEqual(latest, pd.Timestamp(datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=5)))
+        self.assertGreaterEqual(
+            latest, pd.Timestamp(datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=5))
+        )
 
     def test_get_tw_live_context_uses_cached_last_good_intraday_when_sparse(self):
         service = MarketDataService()
         service.tw_fugle_ws.api_key = "fake-key"
         service.tw_fugle_rest.api_key = None
         cache_key = "tw-live:intraday1m:last-good:2330:2330.TW"
-        idx = pd.date_range(datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=30), periods=30, freq="1min")
+        idx = pd.date_range(
+            datetime.now(tz=timezone.utc) - pd.Timedelta(minutes=30), periods=30, freq="1min"
+        )
         cached_df = pd.DataFrame(
             {
                 "open": [600.0] * len(idx),
@@ -792,7 +829,9 @@ class MarketDataServiceTests(unittest.TestCase):
                         symbol="2330",
                         yahoo_symbol="2330.TW",
                         ticks=pd.DataFrame(columns=["ts", "price", "cum_volume"]),
-                        options=LiveOptions(use_yahoo=True, keep_minutes=180, exchange="tse", use_fugle_ws=True),
+                        options=LiveOptions(
+                            use_yahoo=True, keep_minutes=180, exchange="tse", use_fugle_ws=True
+                        ),
                     )
 
         self.assertEqual(ctx.intraday_source, "cache:last_good:yahoo")

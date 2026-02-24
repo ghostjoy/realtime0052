@@ -51,7 +51,9 @@ def vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
     prev_close = close.shift(1)
-    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(
+        axis=1
+    )
     return tr.rolling(window=window, min_periods=window).mean()
 
 
@@ -61,7 +63,14 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     return signed_vol.cumsum()
 
 
-def stochastic(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14, smooth_k: int = 3, smooth_d: int = 3):
+def stochastic(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    window: int = 14,
+    smooth_k: int = 3,
+    smooth_d: int = 3,
+):
     ll = low.rolling(window=window, min_periods=window).min()
     hh = high.rolling(window=window, min_periods=window).max()
     k = 100 * (close - ll) / (hh - ll).replace(0, np.nan)
@@ -70,7 +79,9 @@ def stochastic(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 
     return k_s, d
 
 
-def mfi(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, window: int = 14) -> pd.Series:
+def mfi(
+    high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, window: int = 14
+) -> pd.Series:
     tp = (high + low + close) / 3.0
     mf = tp * volume
     direction = np.sign(tp.diff()).fillna(0)

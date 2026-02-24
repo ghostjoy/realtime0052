@@ -76,7 +76,9 @@ def sync_symbols_history(
             except Exception as exc:
                 reports[symbol] = None
                 issues_by_symbol[symbol] = f"{symbol}: {exc}"
-        issues = [issues_by_symbol[symbol] for symbol in ordered_symbols if symbol in issues_by_symbol]
+        issues = [
+            issues_by_symbol[symbol] for symbol in ordered_symbols if symbol in issues_by_symbol
+        ]
         return reports, issues
 
     workers = max(1, min(int(max_workers), len(ordered_symbols)))
@@ -154,7 +156,9 @@ def sync_symbols_if_needed(
     skipped = [sym for sym in ordered if sym not in need_sync]
     source_chain = [f"mode:{mode_token}", f"need:{len(need_sync)}", f"skip:{len(skipped)}"]
     if not need_sync:
-        return {}, SyncPlanResult(synced_symbols=[], skipped_symbols=skipped, issues=[], source_chain=source_chain)
+        return {}, SyncPlanResult(
+            synced_symbols=[], skipped_symbols=skipped, issues=[], source_chain=source_chain
+        )
 
     reports, issues = sync_symbols_history(
         store=store,

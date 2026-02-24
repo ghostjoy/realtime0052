@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,9 +25,9 @@ def _safe(v):
         return None
 
 
-def score(df: pd.DataFrame) -> Tuple[int, Dict[str, str]]:
+def score(df: pd.DataFrame) -> tuple[int, dict[str, str]]:
     latest = df.iloc[-1]
-    notes: Dict[str, str] = {}
+    notes: dict[str, str] = {}
     points = 0
 
     close = _safe(latest.get("close"))
@@ -171,7 +171,7 @@ def _fmt_pct(v: Any) -> str:
         v = float(v)
         if np.isnan(v):
             return "—"
-        return f"{v*100:.1f}%"
+        return f"{v * 100:.1f}%"
     except Exception:
         return "—"
 
@@ -186,11 +186,11 @@ def _fmt_big(v: Any) -> str:
         # 粗略縮寫
         abs_v = abs(v)
         if abs_v >= 1e12:
-            return f"{v/1e12:.2f}T"
+            return f"{v / 1e12:.2f}T"
         if abs_v >= 1e9:
-            return f"{v/1e9:.2f}B"
+            return f"{v / 1e9:.2f}B"
         if abs_v >= 1e6:
-            return f"{v/1e6:.2f}M"
+            return f"{v / 1e6:.2f}M"
         return f"{v:,.0f}"
     except Exception:
         return str(v)
@@ -223,7 +223,7 @@ def render_advice_scai_style(
     df: pd.DataFrame,
     profile: Profile,
     symbol: str,
-    fundamentals: Optional[Dict[str, Any]] = None,
+    fundamentals: dict[str, Any] | None = None,
 ) -> str:
     """
     注意：此為「以常見投資節目/社群語境的心法」整理成的框架化輸出，
@@ -264,7 +264,9 @@ def render_advice_scai_style(
     t_lines = []
     if sma20 is not None and sma60 is not None:
         try:
-            t_lines.append(f"- 趨勢：價={close:.2f}；SMA20={float(sma20):.2f}；SMA60={float(sma60):.2f}")
+            t_lines.append(
+                f"- 趨勢：價={close:.2f}；SMA20={float(sma20):.2f}；SMA60={float(sma60):.2f}"
+            )
         except Exception:
             pass
     if rsi14 is not None:
@@ -287,7 +289,7 @@ def render_advice_scai_style(
         risk_line = "風控：一般 → 分批進出，先定義『錯了』的條件（停損/時間停損/趨勢破壞）。"
 
     pos_lo, pos_hi = _position_range(points, profile.risk)
-    position_line = f"倉位建議：{pos_lo}%~{pos_hi}%（現金/短債 = {100-pos_hi}%~{100-pos_lo}%）"
+    position_line = f"倉位建議：{pos_lo}%~{pos_hi}%（現金/短債 = {100 - pos_hi}%~{100 - pos_lo}%）"
 
     # 行動：用評分決定「做/不做/怎麼做」
     if points >= 2:
@@ -295,7 +297,9 @@ def render_advice_scai_style(
     elif points <= -2:
         action = "行動：偏空 → 先減碼、留現金；若要逆勢，只允許極小部位試單並設定明確停損。"
     else:
-        action = "行動：中性 → 可小倉位試單，等『站上/跌破』關鍵位再加減碼，避免在盤整中重倉來回挨打。"
+        action = (
+            "行動：中性 → 可小倉位試單，等『站上/跌破』關鍵位再加減碼，避免在盤整中重倉來回挨打。"
+        )
 
     lines = [
         f"{symbol}｜綜合評分 {points:+d} → {bias}",

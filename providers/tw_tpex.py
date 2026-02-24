@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 import requests
@@ -10,7 +10,7 @@ from market_data_types import OhlcvSnapshot, QuoteSnapshot
 from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind, ProviderRequest
 
 
-def _parse_roc_compact(value: str) -> Optional[datetime]:
+def _parse_roc_compact(value: str) -> datetime | None:
     text = (value or "").strip()
     if len(text) != 7 or not text.isdigit():
         return None
@@ -23,7 +23,7 @@ def _parse_roc_compact(value: str) -> Optional[datetime]:
         return None
 
 
-def _to_float(value: Any) -> Optional[float]:
+def _to_float(value: Any) -> float | None:
     if value is None:
         return None
     text = str(value).strip().replace(",", "")
@@ -48,15 +48,24 @@ class TwTpexOpenApiProvider(MarketDataProvider):
             resp.raise_for_status()
             rows = resp.json()
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "TPEx OpenAPI request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "TPEx OpenAPI request failed", exc
+            ) from exc
         if not isinstance(rows, list):
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "TPEx OpenAPI response is not an array")
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "TPEx OpenAPI response is not an array"
+            )
         return rows
 
     def _find_row(self, symbol: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-        row = next((item for item in rows if str(item.get("SecuritiesCompanyCode", "")).strip() == symbol), None)
+        row = next(
+            (item for item in rows if str(item.get("SecuritiesCompanyCode", "")).strip() == symbol),
+            None,
+        )
         if row is None:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, f"TPEx symbol not found: {symbol}")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, f"TPEx symbol not found: {symbol}"
+            )
         return row
 
     def quote(self, request: ProviderRequest) -> QuoteSnapshot:
@@ -88,7 +97,9 @@ class TwTpexOpenApiProvider(MarketDataProvider):
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
         if request.interval != "1d":
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "TPEx provider supports 1d interval")
+            raise ProviderError(
+                self.name, ProviderErrorKind.UNSUPPORTED, "TPEx provider supports 1d interval"
+            )
 
         end = request.end or datetime.now(tz=timezone.utc)
         start = request.start or (end - pd.Timedelta(days=5))
@@ -105,7 +116,9 @@ class TwTpexOpenApiProvider(MarketDataProvider):
         row = self._find_row(request.symbol, rows)
         date = _parse_roc_compact(str(row.get("Date") or ""))
         if date is None:
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "TPEx OpenAPI date parse failed")
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "TPEx OpenAPI date parse failed"
+            )
 
         open_ = _to_float(row.get("Open"))
         high = _to_float(row.get("High"))
@@ -129,7 +142,9 @@ class TwTpexOpenApiProvider(MarketDataProvider):
         )
         df = df[(df.index >= start) & (df.index <= end)]
         if df.empty:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "TPEx OpenAPI OHLCV filtered empty")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "TPEx OpenAPI OHLCV filtered empty"
+            )
 
         return OhlcvSnapshot(
             symbol=request.symbol,

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-import unittest
 
 import numpy as np
 import pandas as pd
 
-from services.rotation_runner import build_rotation_holding_rank, build_rotation_payload, prepare_rotation_bars
+from services.rotation_runner import (
+    build_rotation_holding_rank,
+    build_rotation_payload,
+    prepare_rotation_bars,
+)
 
 
 def _bars(n: int = 140, *, seed: int = 9) -> pd.DataFrame:
@@ -27,7 +31,9 @@ def _bars(n: int = 140, *, seed: int = 9) -> pd.DataFrame:
 
 
 class _FakeStore:
-    def __init__(self, bars_map: dict[str, pd.DataFrame], sync_map: dict[str, pd.DataFrame] | None = None):
+    def __init__(
+        self, bars_map: dict[str, pd.DataFrame], sync_map: dict[str, pd.DataFrame] | None = None
+    ):
         self._bars_map = {k.upper(): v for k, v in bars_map.items()}
         self._sync_map = {k.upper(): v for k, v in (sync_map or {}).items()}
         self.sync_calls: list[str] = []

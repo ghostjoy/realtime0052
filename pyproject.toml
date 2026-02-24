@@ -34,7 +34,30 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]
+ignore = [
+    "E501",  # line too long
+    "F821",  # undefined-name (caused by ctx=globals() injection pattern)
+    "F811",  # redefinition of unused (quote param conflicts with urllib.parse.quote)
+    "C408",  # unnecessary dict() call
+    "C414",  # unnecessary list() call
+    "C416",  # unnecessary dict comprehension
+    "B026",  # star-arg unpacking after keyword argument
+    "E402",  # module level import not at top (some files have conditional imports)
+    "E741",  # ambiguous variable name (l for lambda line)
+    "N816",  # mixedCase variable in global scope
+    "SIM105", # use contextlib.suppress instead of try-except-pass
+    "SIM108", # use ternary operator instead of if-else
+    "SIM102", # use single if statement instead of nested
+    "SIM103", # return the negated condition directly
+    "SIM113", # use enumerate() for index variable
+    "SIM117", # use single with statement with multiple contexts
+    "F401",  # unused imports (conditional imports for optional features)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"app.py" = ["F821"]
+"ui/pages/*.py" = ["F821"]
+"ui/core/charts.py" = ["F821"]
 
 [tool.mypy]
 python_version = "3.10"

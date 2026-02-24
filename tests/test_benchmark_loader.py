@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-import unittest
 from unittest.mock import patch
 
 import pandas as pd
@@ -32,10 +32,11 @@ def _sample_bars(rows: int = 2) -> pd.DataFrame:
 class BenchmarkLoaderTests(unittest.TestCase):
     def test_benchmark_candidates_tw_modes(self):
         self.assertEqual(benchmark_candidates_tw("twii"), ["^TWII"])
-        self.assertEqual(benchmark_candidates_tw("twii", allow_twii_fallback=True), ["^TWII", "0050", "006208"])
+        self.assertEqual(
+            benchmark_candidates_tw("twii", allow_twii_fallback=True), ["^TWII", "0050", "006208"]
+        )
         self.assertEqual(benchmark_candidates_tw("0050"), ["0050"])
         self.assertEqual(benchmark_candidates_tw("unknown"), ["^TWII"])
-
 
     def test_load_tw_benchmark_bars_fallback_and_sync_issues(self):
         class _FakeStore:
@@ -54,7 +55,10 @@ class BenchmarkLoaderTests(unittest.TestCase):
                 return pd.DataFrame()
 
         store = _FakeStore()
-        with patch("services.benchmark_loader.apply_split_adjustment", side_effect=lambda bars, **kwargs: (bars, [])):
+        with patch(
+            "services.benchmark_loader.apply_split_adjustment",
+            side_effect=lambda bars, **kwargs: (bars, []),
+        ):
             result = load_tw_benchmark_bars(
                 store=store,
                 choice="twii",
@@ -73,7 +77,6 @@ class BenchmarkLoaderTests(unittest.TestCase):
         self.assertTrue(result.source_chain and result.source_chain[0].startswith("^TWII:"))
         self.assertEqual(result.candidates, ["^TWII", "0050", "006208"])
 
-
     def test_load_tw_benchmark_close_requires_two_rows(self):
         class _FakeStore:
             def sync_symbol_history(self, symbol, market, start=None, end=None):
@@ -82,7 +85,10 @@ class BenchmarkLoaderTests(unittest.TestCase):
             def load_daily_bars(self, symbol, market, start=None, end=None):
                 return _sample_bars(rows=1)
 
-        with patch("services.benchmark_loader.apply_split_adjustment", side_effect=lambda bars, **kwargs: (bars, [])):
+        with patch(
+            "services.benchmark_loader.apply_split_adjustment",
+            side_effect=lambda bars, **kwargs: (bars, []),
+        ):
             result = load_tw_benchmark_close(
                 store=_FakeStore(),
                 choice="0050",

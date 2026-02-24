@@ -45,16 +45,26 @@ def load_tw_benchmark_bars(
     required_rows = max(1, int(min_rows))
     for benchmark_symbol in candidates:
         if sync_first:
-            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            report = store.sync_symbol_history(
+                symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt
+            )
             if report.error:
                 sync_issues.append(f"{benchmark_symbol}: {report.error}")
 
-        bench_bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
+        bench_bars = normalize_ohlcv_frame(
+            store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+        )
         if bench_bars.empty and not sync_first:
-            report = store.sync_symbol_history(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt)
+            report = store.sync_symbol_history(
+                symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt
+            )
             if report.error:
                 sync_issues.append(f"{benchmark_symbol}: {report.error}")
-            bench_bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt))
+            bench_bars = normalize_ohlcv_frame(
+                store.load_daily_bars(
+                    symbol=benchmark_symbol, market="TW", start=start_dt, end=end_dt
+                )
+            )
         if bench_bars.empty:
             source_chain.append(f"{benchmark_symbol}:empty")
             continue

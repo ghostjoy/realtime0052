@@ -6,7 +6,6 @@ import subprocess
 from datetime import date
 from pathlib import Path
 
-
 CHANGELOG_PATH = Path("CHANGELOG.md")
 UNRELEASED_HEADER = "## [Unreleased]"
 CHANGED_HEADER = "### Changed"
@@ -66,7 +65,22 @@ def _insert_changed_entry(text: str, entry: str, fingerprint: str) -> str:
     unreleased_start, unreleased_end = _find_section_bounds(lines, UNRELEASED_HEADER)
     if unreleased_start == -1:
         today = date.today().isoformat()
-        prepend = [f"{UNRELEASED_HEADER} - {today}", "", "### Added", "- N/A", "", "### Changed", "- N/A", "", "### Fixed", "- N/A", "", "### Docs", "- N/A", ""]
+        prepend = [
+            f"{UNRELEASED_HEADER} - {today}",
+            "",
+            "### Added",
+            "- N/A",
+            "",
+            "### Changed",
+            "- N/A",
+            "",
+            "### Fixed",
+            "- N/A",
+            "",
+            "### Docs",
+            "- N/A",
+            "",
+        ]
         if lines and lines[0].startswith("# "):
             lines = [lines[0], ""] + prepend + lines[1:]
         else:

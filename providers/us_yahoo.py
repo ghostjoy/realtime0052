@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 import pandas as pd
 
@@ -17,10 +16,14 @@ class UsYahooProvider(MarketDataProvider):
         try:
             bars = fetch_yf_ohlcv(request.symbol, period="1d", interval="1m")
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "Yahoo quote request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "Yahoo quote request failed", exc
+            ) from exc
 
         if bars.empty:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Yahoo returned empty quote bars")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "Yahoo returned empty quote bars"
+            )
 
         bars = bars.sort_index()
         last_bar = bars.iloc[-1]
@@ -28,7 +31,7 @@ class UsYahooProvider(MarketDataProvider):
         try:
             _, pct = fetch_yf_last_close(request.symbol)
             if pct is None:
-                prev_close: Optional[float] = None
+                prev_close: float | None = None
             else:
                 close_guess = float(last_bar["close"])
                 prev_close = close_guess / (1.0 + pct / 100.0)
@@ -58,7 +61,9 @@ class UsYahooProvider(MarketDataProvider):
         try:
             df = fetch_yf_ohlcv(request.symbol, period=period, interval=interval)
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "Yahoo OHLCV request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "Yahoo OHLCV request failed", exc
+            ) from exc
         if df.empty:
             raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Yahoo returned empty OHLCV")
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-import unittest
 
 import numpy as np
 import pandas as pd
@@ -125,7 +125,9 @@ class BacktestRunnerTests(unittest.TestCase):
             initial_capital=1_000_000.0,
             cost_model=CostModel(fee_rate=0.0, sell_tax_rate=0.0, slippage_rate=0.0),
         )
-        single_payload = execute_backtest_run(bars_by_symbol={"0050": bars_map["0050"]}, config=config_single)
+        single_payload = execute_backtest_run(
+            bars_by_symbol={"0050": bars_map["0050"]}, config=config_single
+        )
         self.assertEqual(single_payload["mode"], "single")
         self.assertIn("result", single_payload)
 

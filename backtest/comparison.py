@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -50,7 +49,7 @@ def _normalize_close_series(bars: pd.DataFrame) -> pd.Series:
 
 
 def build_dca_equity(
-    bars_by_symbol: Dict[str, pd.DataFrame],
+    bars_by_symbol: dict[str, pd.DataFrame],
     target_index: pd.DatetimeIndex,
     initial_lump_sum: float,
     monthly_contribution: float,
@@ -71,7 +70,7 @@ def build_dca_equity(
     if len(idx) == 0:
         return pd.Series(dtype=float)
 
-    symbols = [str(sym).strip().upper() for sym in bars_by_symbol.keys() if str(sym).strip()]
+    symbols = [str(sym).strip().upper() for sym in bars_by_symbol if str(sym).strip()]
     symbols = list(dict.fromkeys(symbols))
     symbol_count = len(symbols)
 
@@ -99,7 +98,7 @@ def build_dca_equity(
     slippage_rate = max(0.0, float(slippage_rate))
     initial_lump_sum = max(0.0, float(initial_lump_sum))
     monthly_contribution = max(0.0, float(monthly_contribution))
-    qty_by_symbol = {symbol: 0.0 for symbol in symbols}
+    qty_by_symbol = dict.fromkeys(symbols, 0.0)
     cash = 0.0
     equity_values: list[float] = []
 
@@ -184,7 +183,11 @@ def build_dca_benchmark_equity(
 
 def dca_summary_metrics(equity: pd.Series, *, total_contribution: float) -> dict[str, float]:
     total_contribution = max(0.0, float(total_contribution))
-    series = pd.to_numeric(equity, errors="coerce").dropna() if isinstance(equity, pd.Series) else pd.Series(dtype=float)
+    series = (
+        pd.to_numeric(equity, errors="coerce").dropna()
+        if isinstance(equity, pd.Series)
+        else pd.Series(dtype=float)
+    )
     if series.empty:
         return {
             "end_value": np.nan,
@@ -204,7 +207,7 @@ def dca_summary_metrics(equity: pd.Series, *, total_contribution: float) -> dict
 
 
 def build_buy_hold_equity(
-    bars_by_symbol: Dict[str, pd.DataFrame],
+    bars_by_symbol: dict[str, pd.DataFrame],
     target_index: pd.DatetimeIndex,
     initial_capital: float,
 ) -> pd.Series:
@@ -241,7 +244,7 @@ def build_buy_hold_equity(
     return out
 
 
-def _safe_float(value: object) -> Optional[float]:
+def _safe_float(value: object) -> float | None:
     try:
         fv = float(value)  # type: ignore[arg-type]
     except Exception:

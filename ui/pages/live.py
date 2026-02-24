@@ -63,7 +63,9 @@ def _render_live_view(*, ctx: object):
             step=5,
             help="預設 60 秒更新一次，可降低免費資料源被限流的機率。",
         )
-        keep_minutes = st.slider("保留即時資料（分鐘）", min_value=30, max_value=360, value=180, step=30)
+        keep_minutes = st.slider(
+            "保留即時資料（分鐘）", min_value=30, max_value=360, value=180, step=30
+        )
         use_yahoo = st.checkbox("允許 Yahoo 補K", value=True)
         use_fugle_ws = False
         if market == "台股(TWSE)":
@@ -74,7 +76,9 @@ def _render_live_view(*, ctx: object):
             )
 
         st.subheader("建議偏好")
-        advice_mode = st.selectbox("建議模式", options=["一般(技術面)", "股癌風格(心法/檢核)"], index=1)
+        advice_mode = st.selectbox(
+            "建議模式", options=["一般(技術面)", "股癌風格(心法/檢核)"], index=1
+        )
         horizon = st.selectbox("時間尺度", options=["短線", "中期", "長期"], index=1)
         risk = st.selectbox("風險偏好", options=["保守", "一般", "積極"], index=1)
         style = st.selectbox("操作風格", options=["定期定額", "波段", "趨勢"], index=2)
@@ -93,9 +97,13 @@ def _render_live_view(*, ctx: object):
         if market == "台股(TWSE)":
             assert stock_id is not None
             tick_key = f"ticks:TW:{stock_id}:{exchange}"
-            ticks = st.session_state.get(tick_key, pd.DataFrame(columns=["ts", "price", "cum_volume"]))
+            ticks = st.session_state.get(
+                tick_key, pd.DataFrame(columns=["ts", "price", "cum_volume"])
+            )
             try:
-                ctx, ticks = service.get_tw_live_context(stock_id, yahoo_symbol, ticks=ticks, options=options)
+                ctx, ticks = service.get_tw_live_context(
+                    stock_id, yahoo_symbol, ticks=ticks, options=options
+                )
                 st.session_state[tick_key] = ticks
             except Exception as exc:
                 st.error(f"台股資料取得失敗：{exc}")
@@ -114,7 +122,9 @@ def _render_live_view(*, ctx: object):
         else:
             assert us_symbol is not None
             if us_symbol.isdigit():
-                st.warning("目前為美股模式，請輸入美股代碼（例如 AAPL、TSLA）；若要查台股請切換到台股模式。")
+                st.warning(
+                    "目前為美股模式，請輸入美股代碼（例如 AAPL、TSLA）；若要查台股請切換到台股模式。"
+                )
                 return
             try:
                 ctx = service.get_us_live_context(us_symbol, yahoo_symbol, options)
@@ -131,7 +141,9 @@ def _render_live_view(*, ctx: object):
                 display_name = str(quote.extra.get("full_name") or "").strip()
             if not display_name and market == "台股(TWSE)" and stock_id:
                 try:
-                    display_name = str(service.get_tw_symbol_names([stock_id]).get(stock_id, "") or "").strip()
+                    display_name = str(
+                        service.get_tw_symbol_names([stock_id]).get(stock_id, "") or ""
+                    ).strip()
                 except Exception:
                     display_name = ""
             if not display_name:
@@ -172,7 +184,9 @@ def _render_live_view(*, ctx: object):
                     if before <= 0:
                         st.caption("即時走勢：本輪改用本地即時快取。")
                     else:
-                        st.caption(f"即時走勢：K數偏少，已用本地快取補齊（{before} -> {len(bars_intraday)}）。")
+                        st.caption(
+                            f"即時走勢：K數偏少，已用本地快取補齊（{before} -> {len(bars_intraday)}）。"
+                        )
         if bars_intraday.empty:
             st.warning("目前無法取得走勢資料。")
             return
@@ -195,7 +209,9 @@ def _render_live_view(*, ctx: object):
             use_auto_detect=True,
         )
         if intraday_split_events:
-            ev_txt = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in intraday_split_events])
+            ev_txt = ", ".join(
+                [f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in intraday_split_events]
+            )
             st.caption(f"即時走勢已套用分割調整：{ev_txt}")
 
         ind = add_indicators(bars_intraday)
@@ -222,7 +238,9 @@ def _render_live_view(*, ctx: object):
         with main_col:
             with st.container(border=True):
                 _render_card_section_header("即時趨勢卡", "主圖使用分K；下方補上日K長期視角。")
-                live_watermark_symbol = stock_id if market == "台股(TWSE)" else (us_symbol or quote.symbol or "")
+                live_watermark_symbol = (
+                    stock_id if market == "台股(TWSE)" else (us_symbol or quote.symbol or "")
+                )
                 live_watermark_market = "TW" if market == "台股(TWSE)" else "US"
                 live_watermark_text = _symbol_watermark_text(
                     symbol=live_watermark_symbol,
@@ -230,7 +248,11 @@ def _render_live_view(*, ctx: object):
                     service=service,
                 )
                 _render_live_chart(ind, watermark_text=live_watermark_text)
-                live_symbol_key = (stock_id if market == "台股(TWSE)" else (us_symbol or quote.symbol or "US")).strip().upper()
+                live_symbol_key = (
+                    (stock_id if market == "台股(TWSE)" else (us_symbol or quote.symbol or "US"))
+                    .strip()
+                    .upper()
+                )
                 live_indicator_toggle_key = f"live_indicator_panel:{market}:{live_symbol_key}"
                 if live_indicator_toggle_key not in st.session_state:
                     st.session_state[live_indicator_toggle_key] = True
@@ -255,7 +277,12 @@ def _render_live_view(*, ctx: object):
                 if not daily_long.empty:
                     st.markdown("#### 長期視角（Daily）")
                     if daily_split_events:
-                        ev_txt = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}" for ev in daily_split_events])
+                        ev_txt = ", ".join(
+                            [
+                                f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}"
+                                for ev in daily_split_events
+                            ]
+                        )
                         st.caption(f"已套用分割調整（復權）：{ev_txt}")
                     daily = add_indicators(daily_long)
                     st.line_chart(daily[["close", "sma_20", "sma_60"]].dropna(how="all"))
@@ -268,7 +295,11 @@ def _render_live_view(*, ctx: object):
                         st.warning("股癌風格載入失敗，已改用一般模式。")
                         st.text(render_advice(ind, profile))
                     else:
-                        st.text(render_advice_scai_style(ind, profile, symbol=yahoo_symbol, fundamentals=ctx.fundamentals))
+                        st.text(
+                            render_advice_scai_style(
+                                ind, profile, symbol=yahoo_symbol, fundamentals=ctx.fundamentals
+                            )
+                        )
                 else:
                     st.text(render_advice(ind, profile))
 
@@ -344,5 +375,6 @@ def _render_live_view(*, ctx: object):
                     st.dataframe(refs, width="stretch", hide_index=True)
 
     live_fragment()
+
 
 __all__ = ["_render_live_view"]

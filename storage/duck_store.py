@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-
 import json
 import os
 import re
@@ -9,9 +7,10 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import duckdb
 import pandas as pd
@@ -41,11 +40,11 @@ class DuckHistoryStore:
 
     def __init__(
         self,
-        db_path: Optional[str] = None,
-        parquet_root: Optional[str] = None,
-        service: Optional[MarketDataService] = None,
-        intraday_retain_days: Optional[int] = None,
-        legacy_sqlite_path: Optional[str] = None,
+        db_path: str | None = None,
+        parquet_root: str | None = None,
+        service: MarketDataService | None = None,
+        intraday_retain_days: int | None = None,
+        legacy_sqlite_path: str | None = None,
         auto_migrate_legacy_sqlite: bool = True,
     ):
         self.db_path = self.resolve_history_db_path(db_path)
@@ -56,7 +55,7 @@ class DuckHistoryStore:
         self.service = service or MarketDataService()
         self._writeback_lock = threading.Lock()
         self._writeback_inflight: set[tuple[str, str]] = set()
-        self._writeback_executor: Optional[ThreadPoolExecutor] = None
+        self._writeback_executor: ThreadPoolExecutor | None = None
         self._init_db()
 
         set_metadata_store = getattr(self.service, "set_metadata_store", None)
@@ -67,11 +66,15 @@ class DuckHistoryStore:
                 pass
 
         if auto_migrate_legacy_sqlite:
-            src = Path(legacy_sqlite_path).expanduser() if legacy_sqlite_path else self._default_legacy_sqlite_path()
+            src = (
+                Path(legacy_sqlite_path).expanduser()
+                if legacy_sqlite_path
+                else self._default_legacy_sqlite_path()
+            )
             self._maybe_migrate_from_legacy_sqlite(src)
 
     @staticmethod
-    def resolve_history_db_path(db_path: Optional[str] = None) -> Path:
+    def resolve_history_db_path(db_path: str | None = None) -> Path:
         if db_path:
             return Path(db_path).expanduser()
         if ICLOUD_DOCS_ROOT.exists():
@@ -79,14 +82,16 @@ class DuckHistoryStore:
         return Path(DEFAULT_DB_FILENAME)
 
     @staticmethod
-    def resolve_parquet_root(parquet_root: Optional[str] = None, *, db_path: Optional[Path] = None) -> Path:
+    def resolve_parquet_root(
+        parquet_root: str | None = None, *, db_path: Path | None = None
+    ) -> Path:
         if parquet_root:
             return Path(parquet_root).expanduser()
         base = db_path if db_path is not None else DuckHistoryStore.resolve_history_db_path()
         return base.parent / "parquet"
 
     @staticmethod
-    def resolve_intraday_retain_days(days: Optional[int] = None) -> int:
+    def resolve_intraday_retain_days(days: int | None = None) -> int:
         if days is None:
             return DEFAULT_INTRADAY_RETAIN_DAYS
         try:
@@ -112,7 +117,7 @@ class DuckHistoryStore:
         return bool(re.fullmatch(r"\d{4,6}[A-Z]?", token))
 
     @staticmethod
-    def _parse_iso_datetime(value: object) -> Optional[datetime]:
+    def _parse_iso_datetime(value: object) -> datetime | None:
         text = str(value or "").strip()
         if not text:
             return None
@@ -128,11 +133,11 @@ class DuckHistoryStore:
     def _connect_ctx(self):
         db_path = str(self.db_path)
         is_memory = db_path == ":memory:" or db_path.startswith("file::")
-        
-        if is_memory and hasattr(self, '_memory_conn') and self._memory_conn:
+
+        if is_memory and hasattr(self, "_memory_conn") and self._memory_conn:
             yield self._memory_conn
             return
-        
+
         conn = self._connect()
         try:
             yield conn
@@ -308,7 +313,10 @@ class DuckHistoryStore:
         env = str(os.getenv("REALTIME0052_DB_PATH", "")).strip()
         if env:
             return Path(env).expanduser()
-        if str(self.db_path).startswith(str(ICLOUD_DOCS_ROOT)) and DEFAULT_LEGACY_ICLOUD_DB_PATH.exists():
+        if (
+            str(self.db_path).startswith(str(ICLOUD_DOCS_ROOT))
+            and DEFAULT_LEGACY_ICLOUD_DB_PATH.exists()
+        ):
             return DEFAULT_LEGACY_ICLOUD_DB_PATH
         local = Path(DEFAULT_LEGACY_SQLITE_FILENAME)
         if local.exists():
@@ -362,9 +370,13 @@ class DuckHistoryStore:
         conn = self._connect()
         try:
             if _table_exists("instruments"):
-                rows = src.execute("SELECT id, symbol, market, name, currency, timezone, active FROM instruments").fetchall()
+                rows = src.execute(
+                    "SELECT id, symbol, market, name, currency, timezone, active FROM instruments"
+                ).fetchall()
                 for _, symbol, market, name, currency, tz, active in rows:
-                    inst_id = self._get_or_create_instrument(str(symbol), str(market), name=str(name or ""))
+                    inst_id = self._get_or_create_instrument(
+                        str(symbol), str(market), name=str(name or "")
+                    )
                     conn.execute(
                         "UPDATE instruments SET currency=?, timezone=?, active=? WHERE id=?",
                         (str(currency or ""), str(tz or "UTC"), int(active or 1), int(inst_id)),
@@ -454,10 +466,22 @@ class DuckHistoryStore:
             src.close()
 
     def _daily_symbol_path(self, symbol: str, market: str) -> Path:
-        return self.parquet_root / "daily_bars" / f"market={self._normalize_market_token(market)}" / f"symbol={self._normalize_symbol_token(symbol)}" / "bars.parquet"
+        return (
+            self.parquet_root
+            / "daily_bars"
+            / f"market={self._normalize_market_token(market)}"
+            / f"symbol={self._normalize_symbol_token(symbol)}"
+            / "bars.parquet"
+        )
 
     def _intraday_symbol_path(self, symbol: str, market: str) -> Path:
-        return self.parquet_root / "intraday_ticks" / f"market={self._normalize_market_token(market)}" / f"symbol={self._normalize_symbol_token(symbol)}" / "ticks.parquet"
+        return (
+            self.parquet_root
+            / "intraday_ticks"
+            / f"market={self._normalize_market_token(market)}"
+            / f"symbol={self._normalize_symbol_token(symbol)}"
+            / "ticks.parquet"
+        )
 
     @staticmethod
     def _normalize_daily_bars_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -472,7 +496,16 @@ class DuckHistoryStore:
                 parts = [str(part).strip().lower() for part in col if str(part).strip()]
                 candidate = ""
                 for item in reversed(parts):
-                    if item in {"open", "high", "low", "close", "adj close", "adj_close", "volume", "price"}:
+                    if item in {
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "adj close",
+                        "adj_close",
+                        "volume",
+                        "price",
+                    }:
                         candidate = item
                         break
                 renamed.append(candidate or (parts[-1] if parts else ""))
@@ -513,7 +546,9 @@ class DuckHistoryStore:
         idx = pd.to_datetime(norm.index, utc=True, errors="coerce")
         norm.index = idx
         norm = norm[~norm.index.isna()]
-        keep_cols = [c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in norm.columns]
+        keep_cols = [
+            c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in norm.columns
+        ]
         norm = norm[keep_cols]
         norm = norm.dropna(subset=["open", "high", "low", "close"], how="any").sort_index()
         if "volume" in norm.columns:
@@ -523,11 +558,45 @@ class DuckHistoryStore:
     def _load_daily_frame_raw(self, symbol: str, market: str) -> pd.DataFrame:
         path = self._daily_symbol_path(symbol, market)
         if not path.exists():
-            return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "adj_close", "source", "fetched_at"])
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "adj_close",
+                    "source",
+                    "fetched_at",
+                ]
+            )
         df = pd.read_parquet(path)
         if df.empty:
-            return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "adj_close", "source", "fetched_at"])
-        expected = ["date", "open", "high", "low", "close", "volume", "adj_close", "source", "fetched_at"]
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "adj_close",
+                    "source",
+                    "fetched_at",
+                ]
+            )
+        expected = [
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "adj_close",
+            "source",
+            "fetched_at",
+        ]
         for col in expected:
             if col not in df.columns:
                 df[col] = None
@@ -550,8 +619,12 @@ class DuckHistoryStore:
                 "low": pd.to_numeric(frame["low"], errors="coerce"),
                 "close": pd.to_numeric(frame["close"], errors="coerce"),
                 "volume": pd.to_numeric(frame.get("volume", 0.0), errors="coerce").fillna(0.0),
-                "adj_close": pd.to_numeric(frame.get("adj_close"), errors="coerce") if "adj_close" in frame.columns else None,
-                "source": frame.get("source", pd.Series(index=frame.index, data="unknown")).astype(str),
+                "adj_close": pd.to_numeric(frame.get("adj_close"), errors="coerce")
+                if "adj_close" in frame.columns
+                else None,
+                "source": frame.get("source", pd.Series(index=frame.index, data="unknown")).astype(
+                    str
+                ),
                 "fetched_at": frame.get(
                     "fetched_at",
                     pd.Series(index=frame.index, data=datetime.now(tz=timezone.utc).isoformat()),
@@ -580,7 +653,9 @@ class DuckHistoryStore:
     def _get_writeback_executor(self) -> ThreadPoolExecutor:
         with self._writeback_lock:
             if self._writeback_executor is None:
-                self._writeback_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="duck-writeback")
+                self._writeback_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="duck-writeback"
+                )
             return self._writeback_executor
 
     def _persist_daily_bars_writeback(
@@ -589,7 +664,7 @@ class DuckHistoryStore:
         symbol: str,
         market: str,
         bars: pd.DataFrame,
-        source: Optional[str],
+        source: str | None,
     ) -> int:
         normalized = self._normalize_daily_bars_frame(bars)
         if normalized.empty:
@@ -600,7 +675,9 @@ class DuckHistoryStore:
             normalized["source"] = source_text or "writeback"
         else:
             normalized["source"] = normalized["source"].astype(str).replace({"": None})
-            normalized["source"] = normalized["source"].fillna(source_text or "writeback").astype(str)
+            normalized["source"] = (
+                normalized["source"].fillna(source_text or "writeback").astype(str)
+            )
         normalized["fetched_at"] = datetime.now(tz=timezone.utc).isoformat()
 
         rows_upserted = self._upsert_daily_bars(symbol=symbol, market=market, bars=normalized)
@@ -608,7 +685,9 @@ class DuckHistoryStore:
             return 0
 
         instrument_id = self._get_or_create_instrument(symbol, market)
-        last_synced = pd.Timestamp(normalized.index.max()).to_pydatetime().replace(tzinfo=timezone.utc)
+        last_synced = (
+            pd.Timestamp(normalized.index.max()).to_pydatetime().replace(tzinfo=timezone.utc)
+        )
         current_last = self._load_last_success_date(instrument_id)
         merged_last = last_synced if current_last is None else max(current_last, last_synced)
         self._save_sync_state(instrument_id, merged_last, source_text or "writeback", None)
@@ -620,7 +699,7 @@ class DuckHistoryStore:
         symbol: str,
         market: str,
         bars: pd.DataFrame,
-        source: Optional[str] = None,
+        source: str | None = None,
     ) -> bool:
         if not isinstance(bars, pd.DataFrame) or bars.empty:
             return False
@@ -698,8 +777,12 @@ class DuckHistoryStore:
             {
                 "ts_utc": frame.index.tz_convert("UTC").astype("datetime64[ns, UTC]").astype(str),
                 "price": pd.to_numeric(frame["price"], errors="coerce"),
-                "cum_volume": pd.to_numeric(frame.get("cum_volume", 0.0), errors="coerce").fillna(0.0),
-                "source": frame.get("source", pd.Series(index=frame.index, data="unknown")).astype(str),
+                "cum_volume": pd.to_numeric(frame.get("cum_volume", 0.0), errors="coerce").fillna(
+                    0.0
+                ),
+                "source": frame.get("source", pd.Series(index=frame.index, data="unknown")).astype(
+                    str
+                ),
                 "fetched_at": frame.get(
                     "fetched_at",
                     pd.Series(index=frame.index, data=datetime.now(tz=timezone.utc).isoformat()),
@@ -727,7 +810,7 @@ class DuckHistoryStore:
         merged.to_parquet(out_path, index=False)
         return int(len(payload))
 
-    def _get_or_create_instrument(self, symbol: str, market: str, name: Optional[str] = None) -> int:
+    def _get_or_create_instrument(self, symbol: str, market: str, name: str | None = None) -> int:
         symbol = self._normalize_symbol_token(symbol)
         market = self._normalize_market_token(market)
         conn = self._connect()
@@ -751,13 +834,13 @@ class DuckHistoryStore:
         finally:
             conn.close()
 
-    def _load_first_bar_date(self, symbol: str, market: str) -> Optional[datetime]:
+    def _load_first_bar_date(self, symbol: str, market: str) -> datetime | None:
         bars = self.load_daily_bars(symbol=symbol, market=market)
         if bars.empty:
             return None
         return pd.Timestamp(bars.index.min()).to_pydatetime().replace(tzinfo=timezone.utc)
 
-    def _load_last_success_date(self, instrument_id: int) -> Optional[datetime]:
+    def _load_last_success_date(self, instrument_id: int) -> datetime | None:
         conn = self._connect()
         try:
             row = conn.execute(
@@ -775,9 +858,9 @@ class DuckHistoryStore:
     def _save_sync_state(
         self,
         instrument_id: int,
-        last_success_date: Optional[datetime],
-        source: Optional[str],
-        error: Optional[str],
+        last_success_date: datetime | None,
+        source: str | None,
+        error: str | None,
     ):
         conn = self._connect()
         try:
@@ -799,8 +882,8 @@ class DuckHistoryStore:
         self,
         symbol: str,
         market: str,
-        start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> SyncReport:
         symbol = self._normalize_symbol_token(symbol)
         market = self._normalize_market_token(market)
@@ -816,7 +899,12 @@ class DuckHistoryStore:
                 fetch_start = max(fetch_start, last_success + pd.Timedelta(days=1))
         else:
             fetch_start = start
-            if last_success and first_bar_date is not None and start >= first_bar_date and start <= last_success:
+            if (
+                last_success
+                and first_bar_date is not None
+                and start >= first_bar_date
+                and start <= last_success
+            ):
                 fetch_start = max(fetch_start, last_success + pd.Timedelta(days=1))
 
         if fetch_start.date() > end.date():
@@ -832,7 +920,9 @@ class DuckHistoryStore:
                 error=None,
             )
 
-        request = ProviderRequest(symbol=symbol, market=market, interval="1d", start=fetch_start, end=end)
+        request = ProviderRequest(
+            symbol=symbol, market=market, interval="1d", start=fetch_start, end=end
+        )
         is_tw_local_symbol = self._is_tw_local_security_symbol(symbol)
         if market == "US":
             providers = [self.service.us_twelve, self.service.yahoo, self.service.us_stooq]
@@ -842,7 +932,9 @@ class DuckHistoryStore:
                 fugle_rest = getattr(self.service, "tw_fugle_rest", None)
                 if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
                     providers.append(fugle_rest)
-                providers.extend([self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo])
+                providers.extend(
+                    [self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo]
+                )
             else:
                 providers = [self.service.yahoo]
         else:
@@ -924,14 +1016,16 @@ class DuckHistoryStore:
         self,
         symbol: str,
         market: str,
-        start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> pd.DataFrame:
         symbol = self._normalize_symbol_token(symbol)
         market = self._normalize_market_token(market)
         df = self._load_daily_frame_raw(symbol, market)
         if df.empty:
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "adj_close", "source"])
+            return pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume", "adj_close", "source"]
+            )
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         df = df.dropna(subset=["date"]).set_index("date").sort_index()
         if start is not None:
@@ -943,14 +1037,20 @@ class DuckHistoryStore:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         if "source" not in df.columns:
             df["source"] = "unknown"
-        return df[[c for c in ["open", "high", "low", "close", "volume", "adj_close", "source"] if c in df.columns]]
+        return df[
+            [
+                c
+                for c in ["open", "high", "low", "close", "volume", "adj_close", "source"]
+                if c in df.columns
+            ]
+        ]
 
     def save_intraday_ticks(
         self,
         symbol: str,
         market: str,
         ticks: list[dict[str, object]],
-        retain_days: Optional[int] = None,
+        retain_days: int | None = None,
     ) -> int:
         if not ticks:
             return 0
@@ -991,7 +1091,9 @@ class DuckHistoryStore:
         frame["ts_utc"] = pd.to_datetime(frame["ts_utc"], utc=True, errors="coerce")
         frame = frame.dropna(subset=["ts_utc"]).set_index("ts_utc").sort_index()
 
-        retain = self.resolve_intraday_retain_days(self.intraday_retain_days if retain_days is None else retain_days)
+        retain = self.resolve_intraday_retain_days(
+            self.intraday_retain_days if retain_days is None else retain_days
+        )
         self.intraday_retain_days = retain
         return self._upsert_intraday_ticks(symbol=symbol, market=market, ticks=frame)
 
@@ -999,8 +1101,8 @@ class DuckHistoryStore:
         self,
         symbol: str,
         market: str,
-        start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> pd.DataFrame:
         symbol = self._normalize_symbol_token(symbol)
         market = self._normalize_market_token(market)
@@ -1020,7 +1122,7 @@ class DuckHistoryStore:
             df["source"] = "unknown"
         return df[[c for c in ["price", "cum_volume", "source"] if c in df.columns]]
 
-    def upsert_symbol_metadata(self, rows: list[Dict[str, object]]) -> int:
+    def upsert_symbol_metadata(self, rows: list[dict[str, object]]) -> int:
         payload: list[tuple[str, str, str, str, str, str, str, str, str]] = []
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         normalized: list[dict[str, str]] = []
@@ -1047,7 +1149,11 @@ class DuckHistoryStore:
         if not normalized:
             return 0
 
-        existing = self.load_symbol_metadata([r["symbol"] for r in normalized], normalized[0]["market"]) if normalized else {}
+        existing = (
+            self.load_symbol_metadata([r["symbol"] for r in normalized], normalized[0]["market"])
+            if normalized
+            else {}
+        )
         for row in normalized:
             base = existing.get(row["symbol"], {})
             payload.append(
@@ -1067,7 +1173,9 @@ class DuckHistoryStore:
         conn = self._connect()
         try:
             for p in payload:
-                conn.execute("DELETE FROM symbol_metadata WHERE symbol=? AND market=?", (p[0], p[1]))
+                conn.execute(
+                    "DELETE FROM symbol_metadata WHERE symbol=? AND market=?", (p[0], p[1])
+                )
                 conn.execute(
                     "INSERT INTO symbol_metadata(symbol, market, name, exchange, industry, asset_type, currency, source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     p,
@@ -1117,7 +1225,7 @@ class DuckHistoryStore:
             }
         return out
 
-    def list_symbols(self, market: str, limit: Optional[int] = None) -> list[str]:
+    def list_symbols(self, market: str, limit: int | None = None) -> list[str]:
         market_token = self._normalize_market_token(market)
         if not market_token:
             return []
@@ -1133,7 +1241,11 @@ class DuckHistoryStore:
                 f"SELECT symbol FROM symbol_metadata WHERE market=? ORDER BY symbol ASC{limit_sql}",
                 params,
             ).fetchall()
-            symbols = [self._normalize_symbol_token(r[0]) for r in rows if self._normalize_symbol_token(r[0])]
+            symbols = [
+                self._normalize_symbol_token(r[0])
+                for r in rows
+                if self._normalize_symbol_token(r[0])
+            ]
             if symbols:
                 return symbols
 
@@ -1141,7 +1253,11 @@ class DuckHistoryStore:
                 f"SELECT symbol FROM instruments WHERE market=? ORDER BY symbol ASC{limit_sql}",
                 params,
             ).fetchall()
-            symbols = [self._normalize_symbol_token(r[0]) for r in rows if self._normalize_symbol_token(r[0])]
+            symbols = [
+                self._normalize_symbol_token(r[0])
+                for r in rows
+                if self._normalize_symbol_token(r[0])
+            ]
             if symbols:
                 return symbols
         finally:
@@ -1157,7 +1273,7 @@ class DuckHistoryStore:
             return all_symbols[: max(1, int(limit))]
         return all_symbols
 
-    def start_bootstrap_run(self, scope: str, params: Dict[str, object]) -> str:
+    def start_bootstrap_run(self, scope: str, params: dict[str, object]) -> str:
         run_id = f"bootstrap:{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S%f')}"
         conn = self._connect()
         try:
@@ -1189,8 +1305,8 @@ class DuckHistoryStore:
         total_symbols: int,
         synced_symbols: int,
         failed_symbols: int,
-        summary: Optional[Dict[str, object]] = None,
-        error: Optional[str] = None,
+        summary: dict[str, object] | None = None,
+        error: str | None = None,
     ):
         key = self._normalize_text(run_id)
         if not key:
@@ -1213,7 +1329,7 @@ class DuckHistoryStore:
         finally:
             conn.close()
 
-    def load_latest_bootstrap_run(self) -> Optional[BootstrapRun]:
+    def load_latest_bootstrap_run(self) -> BootstrapRun | None:
         conn = self._connect()
         try:
             row = conn.execute(
@@ -1224,8 +1340,8 @@ class DuckHistoryStore:
         if row is None:
             return None
 
-        params_obj: Dict[str, Any] = {}
-        summary_obj: Dict[str, Any] = {}
+        params_obj: dict[str, Any] = {}
+        summary_obj: dict[str, Any] = {}
         try:
             loaded = json.loads(str(row[8] or "{}"))
             if isinstance(loaded, dict):
@@ -1260,9 +1376,9 @@ class DuckHistoryStore:
         symbol: str,
         market: str,
         strategy: str,
-        params: Dict[str, object],
-        cost: Dict[str, object],
-        result: Dict[str, object],
+        params: dict[str, object],
+        cost: dict[str, object],
+        result: dict[str, object],
     ) -> int:
         conn = self._connect()
         try:
@@ -1287,8 +1403,8 @@ class DuckHistoryStore:
     def save_backtest_replay_run(
         self,
         run_key: str,
-        params: Dict[str, object],
-        payload: Dict[str, object],
+        params: dict[str, object],
+        payload: dict[str, object],
     ) -> int:
         key = str(run_key or "").strip()
         if not key:
@@ -1310,7 +1426,7 @@ class DuckHistoryStore:
         finally:
             conn.close()
 
-    def load_latest_backtest_replay_run(self, run_key: str) -> Optional[BacktestReplayRun]:
+    def load_latest_backtest_replay_run(self, run_key: str) -> BacktestReplayRun | None:
         key = str(run_key or "").strip()
         if not key:
             return None
@@ -1326,8 +1442,8 @@ class DuckHistoryStore:
             return None
 
         created_at = self._parse_iso_datetime(row[1]) or datetime.now(tz=timezone.utc)
-        params: Dict[str, object] = {}
-        payload: Dict[str, object] = {}
+        params: dict[str, object] = {}
+        payload: dict[str, object] = {}
         try:
             obj = json.loads(str(row[2] or "{}"))
             if isinstance(obj, dict):
@@ -1368,7 +1484,7 @@ class DuckHistoryStore:
         finally:
             conn.close()
 
-    def load_universe_snapshot(self, universe_id: str) -> Optional[UniverseSnapshot]:
+    def load_universe_snapshot(self, universe_id: str) -> UniverseSnapshot | None:
         key = str(universe_id or "").strip().upper()
         conn = self._connect()
         try:
@@ -1395,20 +1511,25 @@ class DuckHistoryStore:
             fetched_at=fetched,
         )
 
-    def save_heatmap_run(self, universe_id: str, payload: Dict[str, object]) -> int:
+    def save_heatmap_run(self, universe_id: str, payload: dict[str, object]) -> int:
         key = str(universe_id or "").strip().upper()
         conn = self._connect()
         try:
             rid = self._next_id(conn, "heatmap_runs")
             conn.execute(
                 "INSERT INTO heatmap_runs(id, universe_id, created_at, payload_json) VALUES(?, ?, ?, ?)",
-                (rid, key, datetime.now(tz=timezone.utc).isoformat(), json.dumps(payload, ensure_ascii=False)),
+                (
+                    rid,
+                    key,
+                    datetime.now(tz=timezone.utc).isoformat(),
+                    json.dumps(payload, ensure_ascii=False),
+                ),
             )
             return int(rid)
         finally:
             conn.close()
 
-    def load_latest_heatmap_run(self, universe_id: str) -> Optional[HeatmapRun]:
+    def load_latest_heatmap_run(self, universe_id: str) -> HeatmapRun | None:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
             return None
@@ -1424,7 +1545,7 @@ class DuckHistoryStore:
             return None
 
         created_at = self._parse_iso_datetime(row[1]) or datetime.now(tz=timezone.utc)
-        payload: Dict[str, object] = {}
+        payload: dict[str, object] = {}
         try:
             obj = json.loads(str(row[2] or "{}"))
             if isinstance(obj, dict):
@@ -1444,7 +1565,7 @@ class DuckHistoryStore:
         etf_code: str,
         etf_name: str,
         opened: bool = False,
-        pin_as_card: Optional[bool] = None,
+        pin_as_card: bool | None = None,
     ) -> None:
         code = self._normalize_symbol_token(etf_code)
         if not code:
@@ -1541,7 +1662,9 @@ class DuckHistoryStore:
         now = datetime.now(tz=timezone.utc).isoformat()
         conn = self._connect()
         try:
-            row = conn.execute("SELECT 1 FROM heatmap_hub_entries WHERE etf_code=? LIMIT 1", (code,)).fetchone()
+            row = conn.execute(
+                "SELECT 1 FROM heatmap_hub_entries WHERE etf_code=? LIMIT 1", (code,)
+            ).fetchone()
             if row is None:
                 return False
             conn.execute(
@@ -1556,8 +1679,8 @@ class DuckHistoryStore:
         self,
         universe_id: str,
         run_key: str,
-        params: Dict[str, object],
-        payload: Dict[str, object],
+        params: dict[str, object],
+        payload: dict[str, object],
     ) -> int:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
@@ -1580,7 +1703,7 @@ class DuckHistoryStore:
         finally:
             conn.close()
 
-    def load_latest_rotation_run(self, universe_id: str) -> Optional[RotationRun]:
+    def load_latest_rotation_run(self, universe_id: str) -> RotationRun | None:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
             return None
@@ -1596,8 +1719,8 @@ class DuckHistoryStore:
             return None
 
         created_at = self._parse_iso_datetime(row[2]) or datetime.now(tz=timezone.utc)
-        params: Dict[str, object] = {}
-        payload: Dict[str, object] = {}
+        params: dict[str, object] = {}
+        payload: dict[str, object] = {}
         try:
             obj = json.loads(str(row[3] or "{}"))
             if isinstance(obj, dict):

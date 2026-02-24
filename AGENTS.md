@@ -6,7 +6,7 @@
 ## 1) 專案定位
 
 - 專案名稱：`realtime0052`
-- 主要技術：`Python + Streamlit + Plotly + SQLite`
+- 主要技術：`Python + Streamlit + Plotly + DuckDB`
 - 核心用途：
   - 台股/美股即時與近即時資訊
   - 歷史資料同步與本地儲存
@@ -14,7 +14,7 @@
   - ETF 輪動策略回測（固定 ETF 池、月頻調倉）
   - ETF 專題頁（2025 Top10 / 2026 YTD Top10 / 2026 YTD 主動式 ETF）
   - 成分股熱力圖回測（`00910 / 00935 / 00993A / 0050 / 0052`）
-  - SQLite 資料庫檢視與新手教學導引
+  - DuckDB 資料庫檢視與新手教學導引
 
 ## 2) 先讀哪些檔案
 
@@ -37,7 +37,7 @@ uv run python -m compileall app.py
 
 ## 4) 資料與快取原則
 
-- 歷史 OHLCV：預設儲存在 iCloud `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.sqlite3`（可由 `REALTIME0052_DB_PATH` 覆蓋）
+- 歷史 OHLCV：預設儲存在 iCloud `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.duckdb`（可由 `REALTIME0052_DUCKDB_PATH` 覆蓋）
 - 回測摘要與回放快取：`backtest_runs`、`backtest_replay_runs`
 - 成分股快取：`universe_snapshots`（`00910 / 00935 / 00993A / 0050 / 0052`）
 - 專題結果快取：`heatmap_runs`、`rotation_runs`、`bootstrap_runs`

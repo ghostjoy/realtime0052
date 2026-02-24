@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Protocol
+from typing import Protocol
 
 from market_data_types import Market, OhlcvSnapshot, QuoteSnapshot
 
@@ -22,7 +22,7 @@ class ProviderError(RuntimeError):
     source: str
     kind: ProviderErrorKind
     message: str
-    cause: Optional[Exception] = None
+    cause: Exception | None = None
 
     def __str__(self) -> str:
         return f"[{self.source}:{self.kind}] {self.message}"
@@ -33,9 +33,9 @@ class ProviderRequest:
     symbol: str
     market: Market
     interval: str
-    start: Optional[datetime] = None
-    end: Optional[datetime] = None
-    exchange: Optional[str] = None
+    start: datetime | None = None
+    end: datetime | None = None
+    exchange: str | None = None
 
 
 class MarketDataProvider(Protocol):

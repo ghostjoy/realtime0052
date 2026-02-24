@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import html as html_lib
 import re
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -39,7 +38,7 @@ class _CacheEntry:
 
 class _TtlCache:
     def __init__(self):
-        self._store: Dict[str, _CacheEntry] = {}
+        self._store: dict[str, _CacheEntry] = {}
 
     def get(self, key: str):
         entry = self._store.get(key)
@@ -51,7 +50,9 @@ class _TtlCache:
         return entry.value
 
     def set(self, key: str, value: object, ttl_sec: int):
-        self._store[key] = _CacheEntry(expires_at=datetime.now(tz=timezone.utc) + timedelta(seconds=ttl_sec), value=value)
+        self._store[key] = _CacheEntry(
+            expires_at=datetime.now(tz=timezone.utc) + timedelta(seconds=ttl_sec), value=value
+        )
 
 
 class MarketDataService:
@@ -70,7 +71,9 @@ class MarketDataService:
     def set_metadata_store(self, store: object):
         self._metadata_store = store
 
-    def _load_cached_symbol_metadata(self, market: str, symbols: list[str]) -> dict[str, dict[str, object]]:
+    def _load_cached_symbol_metadata(
+        self, market: str, symbols: list[str]
+    ) -> dict[str, dict[str, object]]:
         store = getattr(self, "_metadata_store", None)
         if store is None:
             return {}
@@ -106,8 +109,10 @@ class MarketDataService:
             pass
 
     @staticmethod
-    def _quality(quote: QuoteSnapshot, fallback_depth: int, reason: Optional[str]) -> DataQuality:
-        freshness = int((datetime.now(tz=quote.ts.tzinfo or timezone.utc) - quote.ts).total_seconds())
+    def _quality(quote: QuoteSnapshot, fallback_depth: int, reason: str | None) -> DataQuality:
+        freshness = int(
+            (datetime.now(tz=quote.ts.tzinfo or timezone.utc) - quote.ts).total_seconds()
+        )
         return DataQuality(
             freshness_sec=max(freshness, 0),
             degraded=fallback_depth > 0 or quote.is_delayed,
@@ -115,8 +120,10 @@ class MarketDataService:
             reason=reason,
         )
 
-    def _try_quote_chain(self, providers, request: ProviderRequest) -> Tuple[QuoteSnapshot, List[str], Optional[str], int]:
-        errors: List[str] = []
+    def _try_quote_chain(
+        self, providers, request: ProviderRequest
+    ) -> tuple[QuoteSnapshot, list[str], str | None, int]:
+        errors: list[str] = []
         for idx, provider in enumerate(providers):
             try:
                 quote = provider.quote(request)
@@ -128,7 +135,7 @@ class MarketDataService:
         raise RuntimeError("; ".join(errors) if errors else "no provider available")
 
     def _try_ohlcv_chain(self, providers, request: ProviderRequest) -> OhlcvSnapshot:
-        errors: List[str] = []
+        errors: list[str] = []
         for provider in providers:
             provider_request = request
             if request.market == "TW" and getattr(provider, "name", "") == "yahoo":
@@ -168,8 +175,8 @@ class MarketDataService:
         self,
         market: str,
         candidates: list[tuple[object, str]],
-    ) -> Tuple[QuoteSnapshot, List[str], Optional[str], int]:
-        errors: List[str] = []
+    ) -> tuple[QuoteSnapshot, list[str], str | None, int]:
+        errors: list[str] = []
         chain_names = [provider.name for provider, _ in candidates]
         for idx, (provider, symbol) in enumerate(candidates):
             try:
@@ -188,7 +195,7 @@ class MarketDataService:
         interval: str,
         candidates: list[tuple[object, str]],
     ) -> OhlcvSnapshot:
-        errors: List[str] = []
+        errors: list[str] = []
         for provider, symbol in candidates:
             try:
                 req = ProviderRequest(symbol=symbol, market=market, interval=interval)
@@ -235,7 +242,7 @@ class MarketDataService:
         daily_candidates.append((self.us_stooq, symbol))
 
         daily = pd.DataFrame()
-        daily_source: Optional[str] = None
+        daily_source: str | None = None
         try:
             daily_snap = self._try_ohlcv_chain_with_symbols("US", "1d", daily_candidates)
             daily = daily_snap.df
@@ -247,7 +254,7 @@ class MarketDataService:
                 daily_source = str(getattr(last_good, "daily_source", "") or "cache:last_good")
 
         intraday = pd.DataFrame()
-        intraday_source: Optional[str] = None
+        intraday_source: str | None = None
         if options.use_yahoo:
             try:
                 intraday_req = ProviderRequest(symbol=yahoo_symbol, market="US", interval="1m")
@@ -263,16 +270,22 @@ class MarketDataService:
                 intraday_source = f"{daily_source or 'daily'}_tail"
             else:
                 last_good = self.cache.get(last_good_key)
-                if isinstance(last_good, LiveContext) and isinstance(last_good.intraday, pd.DataFrame):
+                if isinstance(last_good, LiveContext) and isinstance(
+                    last_good.intraday, pd.DataFrame
+                ):
                     intraday = last_good.intraday.copy()
-                    intraday_source = str(getattr(last_good, "intraday_source", "") or "cache:last_good")
+                    intraday_source = str(
+                        getattr(last_good, "intraday_source", "") or "cache:last_good"
+                    )
 
         if daily.empty and not intraday.empty:
             tmp = intraday.copy()
             tmp = tmp.sort_index()
             daily = (
                 tmp.resample("1D")
-                .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+                .agg(
+                    {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+                )
                 .dropna(subset=["open", "high", "low", "close"], how="any")
             )
             daily_source = f"{intraday_source or 'intraday'}_resampled"
@@ -318,7 +331,7 @@ class MarketDataService:
         yahoo_symbol: str,
         ticks: pd.DataFrame,
         options: LiveOptions,
-    ) -> Tuple[LiveContext, pd.DataFrame]:
+    ) -> tuple[LiveContext, pd.DataFrame]:
         intraday_cache_key = f"tw-live:intraday1m:last-good:{symbol}:{yahoo_symbol}"
 
         quote_providers: list[object] = []
@@ -326,7 +339,9 @@ class MarketDataService:
             quote_providers.append(self.tw_fugle_ws)
         quote_providers.extend([self.tw_mis, self.tw_openapi, self.tw_tpex])
 
-        quote_req = ProviderRequest(symbol=symbol, market="TW", interval="quote", exchange=options.exchange)
+        quote_req = ProviderRequest(
+            symbol=symbol, market="TW", interval="quote", exchange=options.exchange
+        )
         quote, chain, reason, depth = self._try_quote_chain(quote_providers, quote_req)
 
         if quote.price is not None:
@@ -339,13 +354,19 @@ class MarketDataService:
             quote_source = str(getattr(quote, "source", "") or "").strip().lower()
             # Daily snapshot sources may carry stale trading-date timestamps.
             # Use "now" as tick ts to keep intraday chart visible.
-            if quote_source in {"tw_openapi", "tw_tpex"}:
-                tick_ts = now_ts
-            elif (now_ts - tick_ts) > pd.Timedelta(days=1):
+            if quote_source in {"tw_openapi", "tw_tpex"} or (now_ts - tick_ts) > pd.Timedelta(
+                days=1
+            ):
                 tick_ts = now_ts
 
             new_tick = pd.DataFrame(
-                [{"ts": tick_ts, "price": float(quote.price), "cum_volume": float(quote.volume or 0)}]
+                [
+                    {
+                        "ts": tick_ts,
+                        "price": float(quote.price),
+                        "cum_volume": float(quote.volume or 0),
+                    }
+                ]
             )
             if ticks.empty:
                 ticks = new_tick.copy()
@@ -354,14 +375,16 @@ class MarketDataService:
             ticks["ts"] = pd.to_datetime(ticks["ts"], utc=True, errors="coerce")
             ticks = ticks.dropna(subset=["ts"])
             ticks = ticks.drop_duplicates(subset=["ts", "price", "cum_volume"], keep="last")
-            cutoff = pd.Timestamp(TwMisProvider.now() - pd.Timedelta(minutes=options.keep_minutes)).tz_convert("UTC")
+            cutoff = pd.Timestamp(
+                TwMisProvider.now() - pd.Timedelta(minutes=options.keep_minutes)
+            ).tz_convert("UTC")
             ticks = ticks[ticks["ts"] >= cutoff].copy()
 
         bars_rt = TwMisProvider.build_bars_from_ticks(ticks)
         intraday = bars_rt.copy()
-        intraday_source: Optional[str] = f"{quote.source}_ticks" if not bars_rt.empty else None
+        intraday_source: str | None = f"{quote.source}_ticks" if not bars_rt.empty else None
         daily = pd.DataFrame()
-        daily_source: Optional[str] = None
+        daily_source: str | None = None
 
         if options.use_yahoo:
             try:
@@ -382,14 +405,15 @@ class MarketDataService:
         # If tick aggregation is too sparse, prefer Fugle historical 1m candles for chart readability.
         # This helps cases where only one latest trade tick is available in the current refresh cycle.
         min_intraday_bars = max(6, int(max(1, options.keep_minutes) // 30))
-        need_fugle_intraday = (
-            getattr(self.tw_fugle_rest, "api_key", None) is not None
-            and (intraday.empty or len(intraday) < min_intraday_bars)
+        need_fugle_intraday = getattr(self.tw_fugle_rest, "api_key", None) is not None and (
+            intraday.empty or len(intraday) < min_intraday_bars
         )
         if need_fugle_intraday:
             try:
                 now_utc = datetime.now(tz=timezone.utc)
-                tw_midnight = datetime.now(tz=TAIPEI_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+                tw_midnight = datetime.now(tz=TAIPEI_TZ).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
                 day_start_utc = tw_midnight.astimezone(timezone.utc)
                 rolling_start = now_utc - pd.Timedelta(minutes=max(30, int(options.keep_minutes)))
                 intraday_start = min(rolling_start, day_start_utc)
@@ -417,7 +441,11 @@ class MarketDataService:
             cached_intraday = self.cache.get(intraday_cache_key)
             if isinstance(cached_intraday, dict):
                 cached_df = cached_intraday.get("df")
-                if isinstance(cached_df, pd.DataFrame) and not cached_df.empty and len(cached_df) > len(intraday):
+                if (
+                    isinstance(cached_df, pd.DataFrame)
+                    and not cached_df.empty
+                    and len(cached_df) > len(intraday)
+                ):
                     intraday = cached_df.copy()
                     cached_source = str(cached_intraday.get("source") or "1m")
                     intraday_source = f"cache:last_good:{cached_source}"
@@ -437,7 +465,9 @@ class MarketDataService:
         except Exception:
             if options.use_yahoo:
                 try:
-                    daily_snap = self.yahoo.ohlcv(ProviderRequest(symbol=yahoo_symbol, market="TW", interval="1d"))
+                    daily_snap = self.yahoo.ohlcv(
+                        ProviderRequest(symbol=yahoo_symbol, market="TW", interval="1d")
+                    )
                     daily = daily_snap.df
                     daily_source = str(daily_snap.source or "") or "yahoo"
                 except Exception:
@@ -550,7 +580,11 @@ class MarketDataService:
             if name:
                 out[symbol] = name
 
-        wanted = {symbol for symbol in normalized if str(out.get(symbol, symbol)).strip().upper() == symbol}
+        wanted = {
+            symbol
+            for symbol in normalized
+            if str(out.get(symbol, symbol)).strip().upper() == symbol
+        }
         if not wanted:
             self.cache.set(cache_key, out, ttl_sec=21600)
             return out
@@ -604,13 +638,16 @@ class MarketDataService:
             resp = requests.get(twse_url, timeout=12)
             resp.raise_for_status()
             rows = resp.json()
-            source_ok = _fill_from_rows(
-                rows,
-                ("Code",),
-                ("Name",),
-                exchange="TW",
-                source="twse_stock_day_all",
-            ) or source_ok
+            source_ok = (
+                _fill_from_rows(
+                    rows,
+                    ("Code",),
+                    ("Name",),
+                    exchange="TW",
+                    source="twse_stock_day_all",
+                )
+                or source_ok
+            )
         except Exception:
             pass
 
@@ -620,13 +657,16 @@ class MarketDataService:
             resp = requests.get(tpex_url, timeout=12)
             resp.raise_for_status()
             rows = resp.json()
-            source_ok = _fill_from_rows(
-                rows,
-                ("SecuritiesCompanyCode",),
-                ("CompanyName",),
-                exchange="OTC",
-                source="tpex_mainboard_daily_close_quotes",
-            ) or source_ok
+            source_ok = (
+                _fill_from_rows(
+                    rows,
+                    ("SecuritiesCompanyCode",),
+                    ("CompanyName",),
+                    exchange="OTC",
+                    source="tpex_mainboard_daily_close_quotes",
+                )
+                or source_ok
+            )
         except Exception:
             pass
 
@@ -637,13 +677,16 @@ class MarketDataService:
                 resp = requests.get(twse_profile_url, timeout=12)
                 resp.raise_for_status()
                 rows = resp.json()
-                source_ok = _fill_from_rows(
-                    rows,
-                    ("公司代號", "Code"),
-                    ("公司簡稱", "公司名稱", "Name"),
-                    exchange="TW",
-                    source="twse_t187ap03_l",
-                ) or source_ok
+                source_ok = (
+                    _fill_from_rows(
+                        rows,
+                        ("公司代號", "Code"),
+                        ("公司簡稱", "公司名稱", "Name"),
+                        exchange="TW",
+                        source="twse_t187ap03_l",
+                    )
+                    or source_ok
+                )
             except Exception:
                 pass
 
@@ -654,13 +697,16 @@ class MarketDataService:
                 resp = requests.get(tpex_profile_url, timeout=12)
                 resp.raise_for_status()
                 rows = resp.json()
-                source_ok = _fill_from_rows(
-                    rows,
-                    ("SecuritiesCompanyCode", "公司代號"),
-                    ("CompanyName", "公司簡稱", "SecuritiesCompanyName"),
-                    exchange="OTC",
-                    source="tpex_mopsfin_t187ap03_o",
-                ) or source_ok
+                source_ok = (
+                    _fill_from_rows(
+                        rows,
+                        ("SecuritiesCompanyCode", "公司代號"),
+                        ("CompanyName", "公司簡稱", "SecuritiesCompanyName"),
+                        exchange="OTC",
+                        source="tpex_mopsfin_t187ap03_o",
+                    )
+                    or source_ok
+                )
             except Exception:
                 pass
 
@@ -688,7 +734,7 @@ class MarketDataService:
         if isinstance(cached, dict):
             return {str(k): str(v) for k, v in cached.items()}
 
-        out = {symbol: "" for symbol in normalized}
+        out = dict.fromkeys(normalized, "")
         metadata = self._load_cached_symbol_metadata("TW", normalized)
         for symbol in normalized:
             row = metadata.get(symbol, {})
@@ -834,7 +880,9 @@ class MarketDataService:
             return pd.DataFrame(columns=["close"])
 
         default_symbol = "^TWII" if market == "TW" else "^GSPC"
-        cache_key = f"benchmark:{market}:{benchmark}:{start.date().isoformat()}:{end.date().isoformat()}"
+        cache_key = (
+            f"benchmark:{market}:{benchmark}:{start.date().isoformat()}:{end.date().isoformat()}"
+        )
         cached = self.cache.get(cache_key)
         if isinstance(cached, pd.DataFrame):
             return cached
@@ -848,7 +896,12 @@ class MarketDataService:
             }
         else:
             candidates = {
-                "auto": [("yf", "^GSPC"), ("us_proxy", "SPY"), ("us_proxy", "QQQ"), ("us_proxy", "DIA")],
+                "auto": [
+                    ("yf", "^GSPC"),
+                    ("us_proxy", "SPY"),
+                    ("us_proxy", "QQQ"),
+                    ("us_proxy", "DIA"),
+                ],
                 "gspc": [("yf", "^GSPC")],
                 "spy": [("us_proxy", "SPY")],
                 "qqq": [("us_proxy", "QQQ")],
@@ -933,7 +986,9 @@ class MarketDataService:
             "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         }
         for _ in range(2):
-            html = requests.get("https://www.yuantaetfs.com/tradeInfo/pcf/0050", headers=headers, timeout=20).text
+            html = requests.get(
+                "https://www.yuantaetfs.com/tradeInfo/pcf/0050", headers=headers, timeout=20
+            ).text
             start_marker = '元大台灣卓越50證券投資信託基金"'
             end_marker = '"en",{},"股票實物申贖"'
             start_idx = html.find(start_marker)
@@ -1044,7 +1099,7 @@ class MarketDataService:
         return rows
 
     def get_etf_constituents_full(
-        self, etf_code: str, limit: Optional[int] = None, force_refresh: bool = False
+        self, etf_code: str, limit: int | None = None, force_refresh: bool = False
     ) -> tuple[list[dict[str, object]], str]:
         code = str(etf_code or "").strip().upper()
         if not code:
@@ -1073,14 +1128,16 @@ class MarketDataService:
         return rows, source
 
     @staticmethod
-    def get_tw_etf_expected_count(etf_code: str) -> Optional[int]:
+    def get_tw_etf_expected_count(etf_code: str) -> int | None:
         mapping = {
             "0050": 50,
             "00935": 50,
         }
         return mapping.get(str(etf_code or "").strip().upper())
 
-    def get_tw_etf_constituents(self, etf_code: str, limit: Optional[int] = None) -> tuple[list[str], str]:
+    def get_tw_etf_constituents(
+        self, etf_code: str, limit: int | None = None
+    ) -> tuple[list[str], str]:
         import yfinance as yf
 
         code = str(etf_code or "").strip().upper()
@@ -1272,8 +1329,8 @@ class MarketDataService:
         self.cache.set(cache_key, (symbols, source), ttl_sec=3600)
         return symbols, source
 
-    def get_00935_constituents(self, limit: Optional[int] = None) -> tuple[list[str], str]:
+    def get_00935_constituents(self, limit: int | None = None) -> tuple[list[str], str]:
         return self.get_tw_etf_constituents("00935", limit=limit)
 
-    def get_0050_constituents(self, limit: Optional[int] = None) -> tuple[list[str], str]:
+    def get_0050_constituents(self, limit: int | None = None) -> tuple[list[str], str]:
         return self.get_tw_etf_constituents("0050", limit=limit)

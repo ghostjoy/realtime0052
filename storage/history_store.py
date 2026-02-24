@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-
 import json
 import os
 import re
 import shutil
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -25,7 +24,7 @@ ICLOUD_DOCS_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~Clo
 DEFAULT_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_DB_FILENAME
 
 
-def resolve_history_db_path(db_path: Optional[str] = None) -> Path:
+def resolve_history_db_path(db_path: str | None = None) -> Path:
     if db_path:
         return Path(db_path).expanduser()
 
@@ -48,7 +47,7 @@ def _copy_legacy_local_db_if_needed(target_path: Path):
     shutil.copy2(local_path, target_path)
 
 
-def resolve_intraday_retain_days(days: Optional[int] = None) -> int:
+def resolve_intraday_retain_days(days: int | None = None) -> int:
     if days is not None:
         try:
             return max(1, int(days))
@@ -73,7 +72,7 @@ class SyncReport:
     finished_at: datetime
     fallback_depth: int
     stale: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +86,7 @@ class UniverseSnapshot:
 @dataclass(frozen=True)
 class HeatmapRun:
     universe_id: str
-    payload: Dict[str, object]
+    payload: dict[str, object]
     created_at: datetime
 
 
@@ -106,16 +105,16 @@ class HeatmapHubEntry:
 class RotationRun:
     universe_id: str
     run_key: str
-    params: Dict[str, object]
-    payload: Dict[str, object]
+    params: dict[str, object]
+    payload: dict[str, object]
     created_at: datetime
 
 
 @dataclass(frozen=True)
 class BacktestReplayRun:
     run_key: str
-    params: Dict[str, object]
-    payload: Dict[str, object]
+    params: dict[str, object]
+    payload: dict[str, object]
     created_at: datetime
 
 
@@ -138,17 +137,17 @@ class BootstrapRun:
     scope: str
     status: str
     started_at: datetime
-    finished_at: Optional[datetime]
+    finished_at: datetime | None
     total_symbols: int
     synced_symbols: int
     failed_symbols: int
-    params: Dict[str, object]
-    summary: Dict[str, object]
-    error: Optional[str]
+    params: dict[str, object]
+    summary: dict[str, object]
+    error: str | None
 
 
 class HistoryStore:
-    def __init__(self, db_path: Optional[str] = None, service: Optional[MarketDataService] = None):
+    def __init__(self, db_path: str | None = None, service: MarketDataService | None = None):
         self.db_path = resolve_history_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if db_path is None and not str(os.getenv(DB_PATH_ENV_VAR, "")).strip():
@@ -167,11 +166,11 @@ class HistoryStore:
     def _connect_ctx(self):
         db_path = str(self.db_path)
         is_memory = db_path == ":memory:" or db_path.startswith("file::")
-        
-        if is_memory and hasattr(self, '_memory_conn') and self._memory_conn:
+
+        if is_memory and hasattr(self, "_memory_conn") and self._memory_conn:
             yield self._memory_conn
             return
-        
+
         conn = self._connect()
         try:
             yield conn
@@ -352,7 +351,7 @@ class HistoryStore:
             )
 
     @staticmethod
-    def _parse_iso_datetime(value: object) -> Optional[datetime]:
+    def _parse_iso_datetime(value: object) -> datetime | None:
         text = str(value or "").strip()
         if not text:
             return None
@@ -381,7 +380,7 @@ class HistoryStore:
         token = str(symbol or "").strip().upper()
         return bool(re.fullmatch(r"\d{4,6}[A-Z]?", token))
 
-    def upsert_symbol_metadata(self, rows: list[Dict[str, object]]) -> int:
+    def upsert_symbol_metadata(self, rows: list[dict[str, object]]) -> int:
         payload: list[tuple[str, str, str, str, str, str, str, str, str]] = []
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         for row in rows:
@@ -465,7 +464,7 @@ class HistoryStore:
             }
         return out
 
-    def list_symbols(self, market: str, limit: Optional[int] = None) -> list[str]:
+    def list_symbols(self, market: str, limit: int | None = None) -> list[str]:
         market_token = self._normalize_market_token(market)
         if not market_token:
             return []
@@ -486,7 +485,11 @@ class HistoryStore:
                 params,
             ).fetchall()
         if rows:
-            return [self._normalize_symbol_token(row[0]) for row in rows if self._normalize_symbol_token(row[0])]
+            return [
+                self._normalize_symbol_token(row[0])
+                for row in rows
+                if self._normalize_symbol_token(row[0])
+            ]
 
         instrument_params: list[object] = [market_token]
         instrument_limit_sql = ""
@@ -504,9 +507,13 @@ class HistoryStore:
                 """,
                 instrument_params,
             ).fetchall()
-        return [self._normalize_symbol_token(row[0]) for row in fallback_rows if self._normalize_symbol_token(row[0])]
+        return [
+            self._normalize_symbol_token(row[0])
+            for row in fallback_rows
+            if self._normalize_symbol_token(row[0])
+        ]
 
-    def start_bootstrap_run(self, scope: str, params: Dict[str, object]) -> str:
+    def start_bootstrap_run(self, scope: str, params: dict[str, object]) -> str:
         run_id = f"bootstrap:{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S%f')}"
         with self._connect_ctx() as conn:
             conn.execute(
@@ -534,8 +541,8 @@ class HistoryStore:
         total_symbols: int,
         synced_symbols: int,
         failed_symbols: int,
-        summary: Optional[Dict[str, object]] = None,
-        error: Optional[str] = None,
+        summary: dict[str, object] | None = None,
+        error: str | None = None,
     ):
         key = self._normalize_text(run_id)
         if not key:
@@ -566,7 +573,7 @@ class HistoryStore:
                 ),
             )
 
-    def load_latest_bootstrap_run(self) -> Optional[BootstrapRun]:
+    def load_latest_bootstrap_run(self) -> BootstrapRun | None:
         with self._connect_ctx() as conn:
             row = conn.execute(
                 """
@@ -580,8 +587,8 @@ class HistoryStore:
             ).fetchone()
         if row is None:
             return None
-        params_obj: Dict[str, Any] = {}
-        summary_obj: Dict[str, Any] = {}
+        params_obj: dict[str, Any] = {}
+        summary_obj: dict[str, Any] = {}
         try:
             loaded = json.loads(str(row[8] or "{}"))
             if isinstance(loaded, dict):
@@ -623,7 +630,16 @@ class HistoryStore:
                 parts = [str(part).strip().lower() for part in col if str(part).strip()]
                 candidate = ""
                 for item in reversed(parts):
-                    if item in {"open", "high", "low", "close", "adj close", "adj_close", "volume", "price"}:
+                    if item in {
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "adj close",
+                        "adj_close",
+                        "volume",
+                        "price",
+                    }:
                         candidate = item
                         break
                 renamed.append(candidate or (parts[-1] if parts else ""))
@@ -665,16 +681,20 @@ class HistoryStore:
         idx = pd.to_datetime(norm.index, utc=True, errors="coerce")
         norm.index = idx
         norm = norm[~norm.index.isna()]
-        keep_cols = [c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in norm.columns]
+        keep_cols = [
+            c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in norm.columns
+        ]
         norm = norm[keep_cols]
         norm = norm.dropna(subset=["open", "high", "low", "close"], how="any").sort_index()
         if "volume" in norm.columns:
             norm["volume"] = pd.to_numeric(norm["volume"], errors="coerce").fillna(0.0)
         return norm
 
-    def _load_first_bar_date(self, instrument_id: int) -> Optional[datetime]:
+    def _load_first_bar_date(self, instrument_id: int) -> datetime | None:
         with self._connect_ctx() as conn:
-            row = conn.execute("SELECT MIN(date) FROM daily_bars WHERE instrument_id=?", (instrument_id,)).fetchone()
+            row = conn.execute(
+                "SELECT MIN(date) FROM daily_bars WHERE instrument_id=?", (instrument_id,)
+            ).fetchone()
         if not row or not row[0]:
             return None
         return datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
@@ -685,7 +705,7 @@ class HistoryStore:
             return f"{symbol}.TW"
         return symbol
 
-    def _get_or_create_instrument(self, symbol: str, market: str, name: Optional[str] = None) -> int:
+    def _get_or_create_instrument(self, symbol: str, market: str, name: str | None = None) -> int:
         with self._connect_ctx() as conn:
             conn.execute(
                 """
@@ -695,12 +715,14 @@ class HistoryStore:
                 """,
                 (symbol, market, name, "UTC"),
             )
-            row = conn.execute("SELECT id FROM instruments WHERE symbol=? AND market=?", (symbol, market)).fetchone()
+            row = conn.execute(
+                "SELECT id FROM instruments WHERE symbol=? AND market=?", (symbol, market)
+            ).fetchone()
             if row is None:
                 raise RuntimeError(f"failed to load instrument id for {market}:{symbol}")
             return int(row[0])
 
-    def _load_last_success_date(self, instrument_id: int) -> Optional[datetime]:
+    def _load_last_success_date(self, instrument_id: int) -> datetime | None:
         with self._connect_ctx() as conn:
             row = conn.execute(
                 "SELECT last_success_date FROM sync_state WHERE instrument_id=?",
@@ -713,9 +735,9 @@ class HistoryStore:
     def _save_sync_state(
         self,
         instrument_id: int,
-        last_success_date: Optional[datetime],
-        source: Optional[str],
-        error: Optional[str],
+        last_success_date: datetime | None,
+        source: str | None,
+        error: str | None,
     ):
         with self._connect_ctx() as conn:
             conn.execute(
@@ -741,8 +763,8 @@ class HistoryStore:
         self,
         symbol: str,
         market: str,
-        start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> SyncReport:
         symbol = self._normalize_symbol_token(symbol)
         market = self._normalize_market_token(market)
@@ -757,7 +779,12 @@ class HistoryStore:
                 fetch_start = max(fetch_start, last_success + pd.Timedelta(days=1))
         else:
             fetch_start = start
-            if last_success and first_bar_date is not None and start >= first_bar_date and start <= last_success:
+            if (
+                last_success
+                and first_bar_date is not None
+                and start >= first_bar_date
+                and start <= last_success
+            ):
                 # Requested start is already covered locally: keep incremental forward sync.
                 fetch_start = max(fetch_start, last_success + pd.Timedelta(days=1))
         if fetch_start.date() > end.date():
@@ -773,7 +800,9 @@ class HistoryStore:
                 error=None,
             )
 
-        request = ProviderRequest(symbol=symbol, market=market, interval="1d", start=fetch_start, end=end)
+        request = ProviderRequest(
+            symbol=symbol, market=market, interval="1d", start=fetch_start, end=end
+        )
         is_tw_local_symbol = self._is_tw_local_security_symbol(symbol)
 
         if market == "US":
@@ -784,7 +813,9 @@ class HistoryStore:
                 fugle_rest = getattr(self.service, "tw_fugle_rest", None)
                 if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
                     providers.append(fugle_rest)
-                providers.extend([self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo])
+                providers.extend(
+                    [self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo]
+                )
             else:
                 providers = [self.service.yahoo]
         else:
@@ -873,7 +904,9 @@ class HistoryStore:
                         float(row["low"]),
                         float(row["close"]),
                         float(row.get("volume", 0.0)),
-                        float(row["adj_close"]) if "adj_close" in df.columns and pd.notna(row["adj_close"]) else None,
+                        float(row["adj_close"])
+                        if "adj_close" in df.columns and pd.notna(row["adj_close"])
+                        else None,
                         source,
                         datetime.now(tz=timezone.utc).isoformat(),
                     ),
@@ -897,8 +930,8 @@ class HistoryStore:
         self,
         symbol: str,
         market: str,
-        start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> pd.DataFrame:
         instrument_id = self._get_or_create_instrument(symbol, market)
         where = ["instrument_id=?"]
@@ -919,7 +952,9 @@ class HistoryStore:
         with self._connect_ctx() as conn:
             df = pd.read_sql_query(sql, conn, params=params)
         if df.empty:
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "adj_close", "source"])
+            return pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume", "adj_close", "source"]
+            )
         df["date"] = pd.to_datetime(df["date"], utc=True)
         df = df.set_index("date")
         return df
@@ -929,7 +964,7 @@ class HistoryStore:
         symbol: str,
         market: str,
         ticks: list[dict[str, object]],
-        retain_days: Optional[int] = None,
+        retain_days: int | None = None,
     ) -> int:
         if not ticks:
             return 0
@@ -949,12 +984,18 @@ class HistoryStore:
                 continue
             cum_val = pd.to_numeric(row.get("cum_volume", 0.0), errors="coerce")
             source = str(row.get("source", "unknown") or "unknown")
-            normalized[ts.isoformat()] = (float(price_val), 0.0 if pd.isna(cum_val) else float(cum_val), source)
+            normalized[ts.isoformat()] = (
+                float(price_val),
+                0.0 if pd.isna(cum_val) else float(cum_val),
+                source,
+            )
 
         if not normalized:
             return 0
 
-        retain = resolve_intraday_retain_days(self.intraday_retain_days if retain_days is None else retain_days)
+        retain = resolve_intraday_retain_days(
+            self.intraday_retain_days if retain_days is None else retain_days
+        )
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         rows = sorted(normalized.items(), key=lambda item: item[0])
         with self._connect_ctx() as conn:
@@ -991,8 +1032,8 @@ class HistoryStore:
         self,
         symbol: str,
         market: str,
-        start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> pd.DataFrame:
         instrument_id = self._get_or_create_instrument(symbol, market)
         where = ["instrument_id=?"]
@@ -1033,9 +1074,9 @@ class HistoryStore:
         symbol: str,
         market: str,
         strategy: str,
-        params: Dict[str, object],
-        cost: Dict[str, object],
-        result: Dict[str, object],
+        params: dict[str, object],
+        cost: dict[str, object],
+        result: dict[str, object],
     ) -> int:
         with self._connect_ctx() as conn:
             cur = conn.execute(
@@ -1058,8 +1099,8 @@ class HistoryStore:
     def save_backtest_replay_run(
         self,
         run_key: str,
-        params: Dict[str, object],
-        payload: Dict[str, object],
+        params: dict[str, object],
+        payload: dict[str, object],
     ) -> int:
         key = str(run_key or "").strip()
         if not key:
@@ -1080,7 +1121,7 @@ class HistoryStore:
             )
             return int(cur.lastrowid)
 
-    def load_latest_backtest_replay_run(self, run_key: str) -> Optional[BacktestReplayRun]:
+    def load_latest_backtest_replay_run(self, run_key: str) -> BacktestReplayRun | None:
         key = str(run_key or "").strip()
         if not key:
             return None
@@ -1106,8 +1147,8 @@ class HistoryStore:
         except Exception:
             pass
 
-        params: Dict[str, object] = {}
-        payload: Dict[str, object] = {}
+        params: dict[str, object] = {}
+        payload: dict[str, object] = {}
         try:
             obj = json.loads(str(row[2] or "{}"))
             if isinstance(obj, dict):
@@ -1151,7 +1192,7 @@ class HistoryStore:
                 (universe_id, payload, source, now, now),
             )
 
-    def load_universe_snapshot(self, universe_id: str) -> Optional[UniverseSnapshot]:
+    def load_universe_snapshot(self, universe_id: str) -> UniverseSnapshot | None:
         with self._connect_ctx() as conn:
             row = conn.execute(
                 """
@@ -1185,7 +1226,7 @@ class HistoryStore:
             fetched_at=fetched,
         )
 
-    def save_heatmap_run(self, universe_id: str, payload: Dict[str, object]) -> int:
+    def save_heatmap_run(self, universe_id: str, payload: dict[str, object]) -> int:
         now = datetime.now(tz=timezone.utc).isoformat()
         with self._connect_ctx() as conn:
             cur = conn.execute(
@@ -1193,11 +1234,15 @@ class HistoryStore:
                 INSERT INTO heatmap_runs(universe_id, created_at, payload_json)
                 VALUES(?, ?, ?)
                 """,
-                (str(universe_id or "").strip().upper(), now, json.dumps(payload, ensure_ascii=False)),
+                (
+                    str(universe_id or "").strip().upper(),
+                    now,
+                    json.dumps(payload, ensure_ascii=False),
+                ),
             )
             return int(cur.lastrowid)
 
-    def load_latest_heatmap_run(self, universe_id: str) -> Optional[HeatmapRun]:
+    def load_latest_heatmap_run(self, universe_id: str) -> HeatmapRun | None:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
             return None
@@ -1223,7 +1268,7 @@ class HistoryStore:
         except Exception:
             pass
 
-        payload: Dict[str, object] = {}
+        payload: dict[str, object] = {}
         try:
             obj = json.loads(str(row[2] or "{}"))
             if isinstance(obj, dict):
@@ -1243,7 +1288,7 @@ class HistoryStore:
         etf_code: str,
         etf_name: str,
         opened: bool = False,
-        pin_as_card: Optional[bool] = None,
+        pin_as_card: bool | None = None,
     ) -> None:
         code = self._normalize_symbol_token(etf_code)
         if not code:
@@ -1343,8 +1388,8 @@ class HistoryStore:
         self,
         universe_id: str,
         run_key: str,
-        params: Dict[str, object],
-        payload: Dict[str, object],
+        params: dict[str, object],
+        payload: dict[str, object],
     ) -> int:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
@@ -1366,7 +1411,7 @@ class HistoryStore:
             )
             return int(cur.lastrowid)
 
-    def load_latest_rotation_run(self, universe_id: str) -> Optional[RotationRun]:
+    def load_latest_rotation_run(self, universe_id: str) -> RotationRun | None:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
             return None
@@ -1392,8 +1437,8 @@ class HistoryStore:
         except Exception:
             pass
 
-        params: Dict[str, object] = {}
-        payload: Dict[str, object] = {}
+        params: dict[str, object] = {}
+        payload: dict[str, object] = {}
         try:
             obj = json.loads(str(row[3] or "{}"))
             if isinstance(obj, dict):

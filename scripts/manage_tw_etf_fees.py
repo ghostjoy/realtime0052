@@ -271,12 +271,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Manage TW ETF management fee whitelist (incremental updates + missing report)."
     )
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to tw_etf_management_fees.json")
-    parser.add_argument("--set", action="append", default=[], metavar="CODE=FEE", help="Set one fee entry.")
+    parser.add_argument(
+        "--config", default=str(DEFAULT_CONFIG_PATH), help="Path to tw_etf_management_fees.json"
+    )
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="CODE=FEE", help="Set one fee entry."
+    )
     parser.add_argument("--input-csv", default="", help="Bulk update from CSV.")
     parser.add_argument("--missing-csv", default="", help="Write missing ETF fee list to CSV.")
     parser.add_argument("--top", type=int, default=30, help="How many missing rows to print.")
-    parser.add_argument("--dry-run", action="store_true", help="Do not write config, print report only.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Do not write config, print report only."
+    )
     parser.add_argument(
         "--refresh-meta",
         action="store_true",

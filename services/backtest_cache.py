@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date
-from typing import Any, Optional
+from typing import Any
 
 
 def stable_json_dumps(payload: object) -> str:
@@ -34,7 +34,7 @@ def build_backtest_run_key(
     auto_detect_split: bool,
     use_total_return_adjustment: bool,
     invest_start_mode: str,
-    invest_start_date: Optional[date],
+    invest_start_date: date | None,
     invest_start_k: int,
 ) -> str:
     strategy_token = stable_json_dumps(strategy_params if isinstance(strategy_params, dict) else {})
@@ -68,7 +68,7 @@ def build_backtest_run_params_base(
     auto_detect_split: bool,
     use_total_return_adjustment: bool,
     invest_start_mode: str,
-    invest_start_date: Optional[date],
+    invest_start_date: date | None,
     invest_start_k: int,
 ) -> dict[str, object]:
     return {

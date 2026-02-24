@@ -176,9 +176,13 @@ def _ensure_readme_links(readme_path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bootstrap repo docs for faster LLM onboarding.")
-    parser.add_argument("--target", default=".", help="Target repository directory. Default: current directory.")
+    parser.add_argument(
+        "--target", default=".", help="Target repository directory. Default: current directory."
+    )
     parser.add_argument("--force", action="store_true", help="Overwrite existing template files.")
-    parser.add_argument("--skip-readme-links", action="store_true", help="Do not edit README.md links section.")
+    parser.add_argument(
+        "--skip-readme-links", action="store_true", help="Do not edit README.md links section."
+    )
     args = parser.parse_args()
 
     target = Path(args.target).resolve()
@@ -186,11 +190,15 @@ def main() -> int:
     project_name = target.name
 
     file_states: dict[str, str] = {}
-    file_states["AGENTS.md"] = _write_if_needed(target / "AGENTS.md", _agents_template(project_name), args.force)
+    file_states["AGENTS.md"] = _write_if_needed(
+        target / "AGENTS.md", _agents_template(project_name), args.force
+    )
     file_states["PROJECT_CONTEXT.md"] = _write_if_needed(
         target / "PROJECT_CONTEXT.md", _project_context_template(project_name), args.force
     )
-    file_states["CHANGELOG.md"] = _write_if_needed(target / "CHANGELOG.md", _changelog_template(), args.force)
+    file_states["CHANGELOG.md"] = _write_if_needed(
+        target / "CHANGELOG.md", _changelog_template(), args.force
+    )
     file_states["PROMPT_TEMPLATES.md"] = _write_if_needed(
         target / "PROMPT_TEMPLATES.md", _prompt_templates(), args.force
     )

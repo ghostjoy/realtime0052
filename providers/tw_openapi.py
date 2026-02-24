@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 import requests
@@ -10,7 +10,7 @@ from market_data_types import OhlcvSnapshot, QuoteSnapshot
 from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind, ProviderRequest
 
 
-def _parse_roc_compact(value: str) -> Optional[datetime]:
+def _parse_roc_compact(value: str) -> datetime | None:
     text = (value or "").strip()
     if len(text) != 7 or not text.isdigit():
         return None
@@ -23,7 +23,7 @@ def _parse_roc_compact(value: str) -> Optional[datetime]:
         return None
 
 
-def _parse_roc_slash(value: str) -> Optional[datetime]:
+def _parse_roc_slash(value: str) -> datetime | None:
     text = (value or "").strip()
     parts = text.split("/")
     if len(parts) != 3:
@@ -37,7 +37,7 @@ def _parse_roc_slash(value: str) -> Optional[datetime]:
         return None
 
 
-def _to_float(value: Any) -> Optional[float]:
+def _to_float(value: Any) -> float | None:
     if value is None:
         return None
     text = str(value).strip().replace(",", "")
@@ -49,7 +49,7 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
-def _to_int(value: Any) -> Optional[int]:
+def _to_int(value: Any) -> int | None:
     fv = _to_float(value)
     if fv is None:
         return None
@@ -69,14 +69,24 @@ class TwOpenApiProvider(MarketDataProvider):
             resp.raise_for_status()
             rows = resp.json()
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "TWSE OpenAPI quote request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "TWSE OpenAPI quote request failed", exc
+            ) from exc
 
         if not isinstance(rows, list):
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "TWSE OpenAPI quote response is not an array")
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "TWSE OpenAPI quote response is not an array"
+            )
 
-        row = next((item for item in rows if str(item.get("Code", "")).strip() == request.symbol), None)
+        row = next(
+            (item for item in rows if str(item.get("Code", "")).strip() == request.symbol), None
+        )
         if row is None:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, f"TWSE OpenAPI symbol not found: {request.symbol}")
+            raise ProviderError(
+                self.name,
+                ProviderErrorKind.EMPTY,
+                f"TWSE OpenAPI symbol not found: {request.symbol}",
+            )
 
         ts = _parse_roc_compact(str(row.get("Date") or "")) or datetime.now(tz=timezone.utc)
         price = _to_float(row.get("ClosingPrice"))
@@ -105,7 +115,7 @@ class TwOpenApiProvider(MarketDataProvider):
             extra={"name": row.get("Name")},
         )
 
-    def _fetch_month(self, symbol: str, month_anchor: datetime) -> List[List[Any]]:
+    def _fetch_month(self, symbol: str, month_anchor: datetime) -> list[list[Any]]:
         date_str = month_anchor.strftime("%Y%m01")
         url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
         params = {"response": "json", "date": date_str, "stockNo": symbol}
@@ -114,7 +124,9 @@ class TwOpenApiProvider(MarketDataProvider):
             resp.raise_for_status()
             payload = resp.json()
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "TWSE monthly history request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "TWSE monthly history request failed", exc
+            ) from exc
 
         data = payload.get("data")
         if not isinstance(data, list):
@@ -123,13 +135,15 @@ class TwOpenApiProvider(MarketDataProvider):
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
         if request.interval != "1d":
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "TW OpenAPI provider supports 1d interval")
+            raise ProviderError(
+                self.name, ProviderErrorKind.UNSUPPORTED, "TW OpenAPI provider supports 1d interval"
+            )
 
         end = request.end or datetime.now(tz=timezone.utc)
         start = request.start or datetime(end.year - 5, 1, 1, tzinfo=timezone.utc)
         months = pd.period_range(start=start.date(), end=end.date(), freq="M")
 
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for period in months:
             month_anchor = datetime(period.year, period.month, 1, tzinfo=timezone.utc)
             for item in self._fetch_month(request.symbol, month_anchor):
@@ -157,12 +171,21 @@ class TwOpenApiProvider(MarketDataProvider):
                 )
 
         if not rows:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "TW OpenAPI returned empty OHLCV")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "TW OpenAPI returned empty OHLCV"
+            )
 
-        df = pd.DataFrame(rows).drop_duplicates(subset=["date"]).sort_values("date").set_index("date")
+        df = (
+            pd.DataFrame(rows)
+            .drop_duplicates(subset=["date"])
+            .sort_values("date")
+            .set_index("date")
+        )
         df = df[(df.index >= start) & (df.index <= end)]
         if df.empty:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "TW OpenAPI OHLCV filtered empty")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "TW OpenAPI OHLCV filtered empty"
+            )
 
         return OhlcvSnapshot(
             symbol=request.symbol,

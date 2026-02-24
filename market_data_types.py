@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -14,27 +14,27 @@ class QuoteSnapshot:
     symbol: str
     market: Market
     ts: datetime
-    price: Optional[float]
-    prev_close: Optional[float]
-    open: Optional[float]
-    high: Optional[float]
-    low: Optional[float]
-    volume: Optional[int]
+    price: float | None
+    prev_close: float | None
+    open: float | None
+    high: float | None
+    low: float | None
+    volume: int | None
     source: str
     is_delayed: bool
     interval: str = "quote"
-    currency: Optional[str] = None
-    exchange: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
+    currency: str | None = None
+    exchange: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def change(self) -> Optional[float]:
+    def change(self) -> float | None:
         if self.price is None or self.prev_close is None:
             return None
         return self.price - self.prev_close
 
     @property
-    def change_pct(self) -> Optional[float]:
+    def change_pct(self) -> float | None:
         if self.change is None or not self.prev_close:
             return None
         return self.change / self.prev_close * 100.0
@@ -54,21 +54,21 @@ class OhlcvSnapshot:
 
 @dataclass(frozen=True)
 class DataQuality:
-    freshness_sec: Optional[int]
+    freshness_sec: int | None
     degraded: bool
     fallback_depth: int
-    reason: Optional[str]
+    reason: str | None
 
 
 @dataclass(frozen=True)
 class DataHealth:
-    as_of: Optional[str]
+    as_of: str | None
     data_sources: list[str]
     source_chain: list[str]
     degraded: bool
     fallback_depth: int
-    freshness_sec: Optional[int] = None
-    notes: Optional[str] = None
+    freshness_sec: int | None = None
+    notes: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,6 @@ class LiveContext:
     quality: DataQuality
     source_chain: list[str]
     used_fallback: bool
-    fundamentals: Optional[Dict[str, Any]] = None
-    intraday_source: Optional[str] = None
-    daily_source: Optional[str] = None
+    fundamentals: dict[str, Any] | None = None
+    intraday_source: str | None = None
+    daily_source: str | None = None

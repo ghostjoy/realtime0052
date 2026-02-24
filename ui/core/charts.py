@@ -30,6 +30,7 @@ def _bind_ctx(ctx: object):
         module_globals[name] = value
     _CTX_BOUND = True
 
+
 def _render_benchmark_lines_chart(
     *,
     ctx: object,
@@ -75,7 +76,9 @@ def _render_benchmark_lines_chart(
                 mode="lines",
                 name=name,
                 line=dict(color=color, width=width, dash=dash),
-                hovertemplate=_hovertemplate_with_code(hover_code, value_label=value_label, y_format=y_format),
+                hovertemplate=_hovertemplate_with_code(
+                    hover_code, value_label=value_label, y_format=y_format
+                ),
             )
         )
         plotted_series.append((name, series))
@@ -88,6 +91,7 @@ def _render_benchmark_lines_chart(
         extrema_name, extrema_series = target_pair
         extrema_vals = pd.to_numeric(extrema_series, errors="coerce").dropna()
         if not extrema_vals.empty:
+
             def _fmt_extrema_date(ts_val: object) -> str:
                 try:
                     return pd.Timestamp(ts_val).strftime("%Y-%m-%d")
@@ -178,6 +182,7 @@ def _render_benchmark_lines_chart(
         palette=palette,
     )
 
+
 def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = ""):
     _bind_ctx(ctx)
     palette = _ui_palette()
@@ -191,7 +196,14 @@ def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = 
             ("bb_lower", "BB下軌", str(palette["bb_lower"])),
         ]:
             if col in ind.columns:
-                overlays.append({"name": name, "series": pd.to_numeric(ind[col], errors="coerce"), "color": color, "width": 2})
+                overlays.append(
+                    {
+                        "name": name,
+                        "series": pd.to_numeric(ind[col], errors="coerce"),
+                        "color": color,
+                        "width": 2,
+                    }
+                )
         ok = render_lightweight_live_chart(
             ind=ind,
             palette=palette,
@@ -206,7 +218,9 @@ def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = 
     price_down_line = str(palette.get("price_down_line", palette["price_down"]))
     price_up_fill = str(palette.get("price_up_fill", _to_rgba(price_up_line, 0.42)))
     price_down_fill = str(palette.get("price_down_fill", _to_rgba(price_down_line, 0.42)))
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.72, 0.28])
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.72, 0.28]
+    )
     fig.add_trace(
         go.Candlestick(
             x=ind.index,
@@ -233,14 +247,26 @@ def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = 
     ]:
         if col in ind.columns:
             fig.add_trace(
-                go.Scatter(x=ind.index, y=ind[col], mode="lines", name=name, line=dict(color=color, width=1.3)),
+                go.Scatter(
+                    x=ind.index,
+                    y=ind[col],
+                    mode="lines",
+                    name=name,
+                    line=dict(color=color, width=1.3),
+                ),
                 row=1,
                 col=1,
             )
 
     volume = ind.get("volume", pd.Series(index=ind.index)).fillna(0)
-    close_diff = pd.to_numeric(ind.get("close", pd.Series(index=ind.index)), errors="coerce").diff().fillna(0.0)
-    volume_colors = np.where(close_diff >= 0, str(palette["volume_up"]), str(palette["volume_down"]))
+    close_diff = (
+        pd.to_numeric(ind.get("close", pd.Series(index=ind.index)), errors="coerce")
+        .diff()
+        .fillna(0.0)
+    )
+    volume_colors = np.where(
+        close_diff >= 0, str(palette["volume_up"]), str(palette["volume_down"])
+    )
     fig.add_trace(
         go.Bar(x=ind.index, y=volume, name="Volume", marker_color=volume_colors),
         row=2,
@@ -270,6 +296,7 @@ def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = 
         watermark_text=str(watermark_text),
         palette=palette,
     )
+
 
 def _render_indicator_panels(
     ind: pd.DataFrame,
@@ -328,7 +355,9 @@ def _render_indicator_panels(
         row=1,
         col=1,
     )
-    bb_mid_col = "bb_mid" if "bb_mid" in frame.columns else ("sma_20" if "sma_20" in frame.columns else "")
+    bb_mid_col = (
+        "bb_mid" if "bb_mid" in frame.columns else ("sma_20" if "sma_20" in frame.columns else "")
+    )
     if bb_mid_col:
         fig.add_trace(
             go.Scatter(
@@ -391,8 +420,12 @@ def _render_indicator_panels(
             row=2,
             col=1,
         )
-    fig.add_hline(y=70, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=2, col=1)
-    fig.add_hline(y=30, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=2, col=1)
+    fig.add_hline(
+        y=70, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=2, col=1
+    )
+    fig.add_hline(
+        y=30, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=2, col=1
+    )
     fig.update_yaxes(range=[0, 100], row=2, col=1)
 
     if "stoch_k" in frame.columns:
@@ -419,13 +452,19 @@ def _render_indicator_panels(
             row=3,
             col=1,
         )
-    fig.add_hline(y=80, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=3, col=1)
-    fig.add_hline(y=20, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=3, col=1)
+    fig.add_hline(
+        y=80, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=3, col=1
+    )
+    fig.add_hline(
+        y=20, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=3, col=1
+    )
     fig.update_yaxes(range=[0, 100], row=3, col=1)
 
     if "macd_hist" in frame.columns:
         hist_vals = pd.to_numeric(frame["macd_hist"], errors="coerce").fillna(0.0)
-        hist_colors = np.where(hist_vals >= 0, str(palette["volume_up"]), str(palette["volume_down"]))
+        hist_colors = np.where(
+            hist_vals >= 0, str(palette["volume_up"]), str(palette["volume_down"])
+        )
         fig.add_trace(
             go.Bar(x=frame.index, y=hist_vals.values, name="MACD Hist", marker_color=hist_colors),
             row=4,
@@ -455,7 +494,9 @@ def _render_indicator_panels(
             row=4,
             col=1,
         )
-    fig.add_hline(y=0, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=4, col=1)
+    fig.add_hline(
+        y=0, line=dict(color=str(palette["text_muted"]), width=1, dash="dot"), row=4, col=1
+    )
 
     if x_range is not None:
         x0, x1 = x_range
@@ -489,5 +530,6 @@ def _render_indicator_panels(
         watermark_text=str(watermark_text),
         palette=palette,
     )
+
 
 __all__ = ["_render_benchmark_lines_chart", "_render_live_chart", "_render_indicator_panels"]

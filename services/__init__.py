@@ -1,5 +1,3 @@
-from services.market_data_service import LiveOptions, MarketDataService
-from services.benchmark_loader import benchmark_candidates_tw, load_tw_benchmark_bars, load_tw_benchmark_close
 from services.backtest_cache import (
     build_backtest_run_key,
     build_backtest_run_params_base,
@@ -17,14 +15,30 @@ from services.backtest_runner import (
     parse_symbols,
     series_metrics,
 )
-from services.heatmap_runner import HeatmapBarsPreparationResult, HeatmapRunInput, compute_heatmap_rows, prepare_heatmap_bars
+from services.benchmark_loader import (
+    benchmark_candidates_tw,
+    load_tw_benchmark_bars,
+    load_tw_benchmark_close,
+)
+from services.heatmap_runner import (
+    HeatmapBarsPreparationResult,
+    HeatmapRunInput,
+    compute_heatmap_rows,
+    prepare_heatmap_bars,
+)
+from services.market_data_service import LiveOptions, MarketDataService
 from services.rotation_runner import (
     RotationBarsPreparationResult,
     build_rotation_holding_rank,
     build_rotation_payload,
     prepare_rotation_bars,
 )
-from services.sync_orchestrator import bars_need_backfill, normalize_symbols, sync_symbols_history, sync_symbols_if_needed
+from services.sync_orchestrator import (
+    bars_need_backfill,
+    normalize_symbols,
+    sync_symbols_history,
+    sync_symbols_if_needed,
+)
 
 __all__ = [
     "LiveOptions",

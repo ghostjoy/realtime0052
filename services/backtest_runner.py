@@ -1,23 +1,31 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Optional, Protocol
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
 
-from backtest import CostModel, apply_split_adjustment, run_backtest, run_portfolio_backtest, walk_forward_portfolio, walk_forward_single
+from backtest import (
+    CostModel,
+    apply_split_adjustment,
+    run_backtest,
+    run_portfolio_backtest,
+    walk_forward_portfolio,
+    walk_forward_single,
+)
 from services.benchmark_loader import benchmark_candidates_tw
 from utils import normalize_ohlcv_frame
 
 
 class HistoryStoreLike(Protocol):
-    def load_daily_bars(self, symbol: str, market: str, start: datetime, end: datetime) -> pd.DataFrame:
-        ...
+    def load_daily_bars(
+        self, symbol: str, market: str, start: datetime, end: datetime
+    ) -> pd.DataFrame: ...
 
-    def sync_symbol_history(self, symbol: str, market: str, start: datetime, end: datetime):
-        ...
+    def sync_symbol_history(self, symbol: str, market: str, start: datetime, end: datetime): ...
 
 
 @dataclass(frozen=True)
@@ -109,12 +117,16 @@ def load_benchmark_from_store(
         return pd.DataFrame(columns=["close"])
 
     for bench_symbol in candidates:
-        bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end))
+        bars = normalize_ohlcv_frame(
+            store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end)
+        )
         end_ts = pd.Timestamp(end).tz_convert("UTC")
         needs_sync = bars.empty or pd.Timestamp(bars.index.max()).tz_convert("UTC") < end_ts
         if needs_sync:
             store.sync_symbol_history(symbol=bench_symbol, market=market_code, start=start, end=end)
-            bars = normalize_ohlcv_frame(store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end))
+            bars = normalize_ohlcv_frame(
+                store.load_daily_bars(symbol=bench_symbol, market=market_code, start=start, end=end)
+            )
         if bars.empty or "close" not in bars.columns:
             continue
 
@@ -135,7 +147,9 @@ def load_benchmark_from_store(
     return pd.DataFrame(columns=["close"])
 
 
-def queue_benchmark_writeback(*, store: HistoryStoreLike, market_code: str, benchmark: pd.DataFrame) -> bool:
+def queue_benchmark_writeback(
+    *, store: HistoryStoreLike, market_code: str, benchmark: pd.DataFrame
+) -> bool:
     if not isinstance(benchmark, pd.DataFrame) or benchmark.empty:
         return False
     queue_fn = getattr(store, "queue_daily_bars_writeback", None)
@@ -146,7 +160,14 @@ def queue_benchmark_writeback(*, store: HistoryStoreLike, market_code: str, benc
         return False
     source = str(getattr(benchmark, "attrs", {}).get("source", "")).strip()
     try:
-        return bool(queue_fn(symbol=symbol, market=market_code, bars=benchmark, source=source or "benchmark_fallback"))
+        return bool(
+            queue_fn(
+                symbol=symbol,
+                market=market_code,
+                bars=benchmark,
+                source=source or "benchmark_fallback",
+            )
+        )
     except Exception:
         return False
 
@@ -168,7 +189,9 @@ def load_and_prepare_symbol_bars(
     for symbol in symbols:
         bars = store.load_daily_bars(symbol=symbol, market=market_code, start=start, end=end)
         if bars.empty:
-            availability_rows.append({"symbol": symbol, "rows": 0, "sources": "", "status": "EMPTY", "adj_mode": ""})
+            availability_rows.append(
+                {"symbol": symbol, "rows": 0, "sources": "", "status": "EMPTY", "adj_mode": ""}
+            )
             continue
         bars = bars.sort_index()
         adj_info: dict[str, object] = {"applied": False}
@@ -196,11 +219,16 @@ def load_and_prepare_symbol_bars(
             {
                 "symbol": symbol,
                 "rows": int(len(bars)),
-                "sources": ",".join(sorted(set(bars["source"].dropna().astype(str)))) if "source" in bars.columns else "",
+                "sources": ",".join(sorted(set(bars["source"].dropna().astype(str))))
+                if "source" in bars.columns
+                else "",
                 "status": "OK",
                 "adj_mode": adj_mode,
                 "splits": ", ".join(
-                    [f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}({ev.source})" for ev in split_events]
+                    [
+                        f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f}({ev.source})"
+                        for ev in split_events
+                    ]
                 )
                 if split_events
                 else "",
@@ -209,7 +237,9 @@ def load_and_prepare_symbol_bars(
     return BacktestPreparedBars(bars_by_symbol=bars_by_symbol, availability_rows=availability_rows)
 
 
-def execute_backtest_run(*, bars_by_symbol: dict[str, pd.DataFrame], config: BacktestExecutionInput) -> dict[str, object]:
+def execute_backtest_run(
+    *, bars_by_symbol: dict[str, pd.DataFrame], config: BacktestExecutionInput
+) -> dict[str, object]:
     mode = str(config.mode or "單一標的")
     strategy = str(config.strategy or "")
     initial_capital = float(config.initial_capital)

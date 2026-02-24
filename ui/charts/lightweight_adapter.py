@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import pandas as pd
 
 try:
@@ -18,6 +16,7 @@ def _series_type(name: str) -> str:
         return name
     item = getattr(Chart, name, None)
     return str(getattr(item, "name", name))
+
 
 def _to_unix_seconds(ts: pd.Timestamp) -> int:
     return int(ts.tz_convert("UTC").timestamp())
@@ -39,7 +38,10 @@ def _chart_layout_options(palette: dict[str, object], *, height: int) -> dict[st
     return {
         "height": int(height),
         "layout": {
-            "background": {"type": "solid", "color": str(palette.get("plot_bg", palette.get("paper_bg", "#ffffff")))},
+            "background": {
+                "type": "solid",
+                "color": str(palette.get("plot_bg", palette.get("paper_bg", "#ffffff"))),
+            },
             "textColor": str(palette.get("text_color", "#111827")),
         },
         "grid": {
@@ -52,8 +54,14 @@ def _chart_layout_options(palette: dict[str, object], *, height: int) -> dict[st
         },
         "timeScale": {"borderColor": grid},
         "crosshair": {
-            "vertLine": {"color": grid, "labelBackgroundColor": str(palette.get("paper_bg", "#ffffff"))},
-            "horzLine": {"color": grid, "labelBackgroundColor": str(palette.get("paper_bg", "#ffffff"))},
+            "vertLine": {
+                "color": grid,
+                "labelBackgroundColor": str(palette.get("paper_bg", "#ffffff")),
+            },
+            "horzLine": {
+                "color": grid,
+                "labelBackgroundColor": str(palette.get("paper_bg", "#ffffff")),
+            },
         },
     }
 
@@ -82,7 +90,9 @@ def _build_candlestick_points(frame: pd.DataFrame) -> list[dict[str, object]]:
     return points
 
 
-def _build_volume_points(frame: pd.DataFrame, *, up_color: str, down_color: str) -> list[dict[str, object]]:
+def _build_volume_points(
+    frame: pd.DataFrame, *, up_color: str, down_color: str
+) -> list[dict[str, object]]:
     if frame.empty:
         return []
     bars = frame.copy()
@@ -115,7 +125,9 @@ def _build_line_points(series: pd.Series) -> list[dict[str, object]]:
         return []
     points: list[dict[str, object]] = []
     for _, row in frame.iterrows():
-        points.append({"time": _to_unix_seconds(pd.Timestamp(row["time"])), "value": float(row["value"])})
+        points.append(
+            {"time": _to_unix_seconds(pd.Timestamp(row["time"])), "value": float(row["value"])}
+        )
     return points
 
 
@@ -124,7 +136,7 @@ def render_lightweight_live_chart(
     ind: pd.DataFrame,
     palette: dict[str, object],
     key: str,
-    overlays: Optional[list[dict[str, object]]] = None,
+    overlays: list[dict[str, object]] | None = None,
 ) -> bool:
     if Chart is None or renderLightweightCharts is None:
         return False
@@ -206,7 +218,7 @@ def render_lightweight_kline_equity_chart(
     *,
     bars: pd.DataFrame,
     strategy: pd.Series,
-    benchmark: Optional[pd.Series],
+    benchmark: pd.Series | None,
     palette: dict[str, object],
     key: str,
 ) -> bool:
@@ -217,7 +229,9 @@ def render_lightweight_kline_equity_chart(
 
     candle_points = _build_candlestick_points(bars)
     strategy_points = _build_line_points(strategy)
-    benchmark_points = _build_line_points(benchmark if isinstance(benchmark, pd.Series) else pd.Series(dtype=float))
+    benchmark_points = _build_line_points(
+        benchmark if isinstance(benchmark, pd.Series) else pd.Series(dtype=float)
+    )
     if not candle_points or not strategy_points:
         return False
 

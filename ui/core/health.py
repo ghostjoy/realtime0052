@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 import pandas as pd
 
@@ -29,10 +28,10 @@ def build_data_health(
     *,
     as_of: object,
     data_sources: list[str],
-    source_chain: Optional[list[str]] = None,
+    source_chain: list[str] | None = None,
     degraded: bool = False,
     fallback_depth: int = 0,
-    freshness_sec: Optional[int] = None,
+    freshness_sec: int | None = None,
     notes: str = "",
 ) -> DataHealth:
     sources = [str(item).strip() for item in data_sources if str(item).strip()]
@@ -67,9 +66,12 @@ def render_sync_issues(prefix: str, issues: list[str], *, preview_limit: int = 3
         return ""
     limit = max(1, int(preview_limit))
     preview = [" ".join(str(item).split()) for item in items[:limit]]
-    preview_text = " | ".join([item if len(item) <= 120 else f"{item[:117]}..." for item in preview])
+    preview_text = " | ".join(
+        [item if len(item) <= 120 else f"{item[:117]}..." for item in preview]
+    )
     remain = len(items) - len(preview)
     remain_text = f" | 其餘 {remain} 筆請查看終端 log。" if remain > 0 else ""
     return f"{prefix}：{preview_text}{remain_text}"
+
 
 __all__ = ["build_data_health", "render_data_health_caption", "render_sync_issues"]

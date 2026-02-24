@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Dict, Optional
-
 import pandas as pd
 
 from backtest.engine import CostModel, run_backtest
@@ -10,7 +8,7 @@ from backtest.types import BacktestResult, PortfolioBacktestResult
 
 
 def _aggregate_component_equity(
-    component_results: Dict[str, BacktestResult],
+    component_results: dict[str, BacktestResult],
     per_symbol_capital: float,
 ) -> pd.DataFrame:
     union_index = None
@@ -25,13 +23,15 @@ def _aggregate_component_equity(
 
     total = pd.Series(0.0, index=union_index, dtype=float)
     for result in component_results.values():
-        series = result.equity_curve["equity"].reindex(union_index).ffill().fillna(per_symbol_capital)
+        series = (
+            result.equity_curve["equity"].reindex(union_index).ffill().fillna(per_symbol_capital)
+        )
         total = total + series
     return pd.DataFrame({"equity": total})
 
 
 def portfolio_from_components(
-    component_results: Dict[str, BacktestResult],
+    component_results: dict[str, BacktestResult],
     initial_capital: float,
     per_symbol_capital: float,
 ) -> PortfolioBacktestResult:
@@ -66,7 +66,10 @@ def portfolio_from_components(
     trades = pd.DataFrame(trades_rows)
 
     signals = pd.DataFrame(
-        {symbol: result.signals.reindex(equity_curve.index).ffill().fillna(0).astype(int) for symbol, result in component_results.items()},
+        {
+            symbol: result.signals.reindex(equity_curve.index).ffill().fillna(0).astype(int)
+            for symbol, result in component_results.items()
+        },
         index=equity_curve.index,
     )
 
@@ -82,21 +85,25 @@ def portfolio_from_components(
 
 
 def run_portfolio_backtest(
-    bars_by_symbol: Dict[str, pd.DataFrame],
+    bars_by_symbol: dict[str, pd.DataFrame],
     strategy_name: str,
-    strategy_params: Optional[Dict[str, float]] = None,
-    cost_model: Optional[CostModel] = None,
+    strategy_params: dict[str, float] | None = None,
+    cost_model: CostModel | None = None,
     initial_capital: float = 1_000_000.0,
 ) -> PortfolioBacktestResult:
     if not bars_by_symbol:
         raise ValueError("bars_by_symbol cannot be empty")
 
-    valid = {symbol: bars for symbol, bars in bars_by_symbol.items() if bars is not None and not bars.empty}
+    valid = {
+        symbol: bars
+        for symbol, bars in bars_by_symbol.items()
+        if bars is not None and not bars.empty
+    }
     if not valid:
         raise ValueError("all symbols have empty bars")
 
     per_symbol_capital = initial_capital / float(len(valid))
-    component_results: Dict[str, BacktestResult] = {}
+    component_results: dict[str, BacktestResult] = {}
     for symbol, bars in valid.items():
         component_results[symbol] = run_backtest(
             bars=bars,

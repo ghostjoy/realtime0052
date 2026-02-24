@@ -95,8 +95,30 @@ def _seed_legacy_sqlite(path: Path):
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
             [
-                (1, "2024-01-02", 100.0, 101.0, 99.0, 100.5, 1000.0, 100.5, "unit", "2024-01-02T00:00:00+00:00"),
-                (1, "2024-01-03", 101.0, 102.0, 100.0, 101.5, 1100.0, 101.5, "unit", "2024-01-03T00:00:00+00:00"),
+                (
+                    1,
+                    "2024-01-02",
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.5,
+                    1000.0,
+                    100.5,
+                    "unit",
+                    "2024-01-02T00:00:00+00:00",
+                ),
+                (
+                    1,
+                    "2024-01-03",
+                    101.0,
+                    102.0,
+                    100.0,
+                    101.5,
+                    1100.0,
+                    101.5,
+                    "unit",
+                    "2024-01-03T00:00:00+00:00",
+                ),
             ],
         )
         conn.commit()
@@ -108,7 +130,9 @@ class DuckStoreTests(unittest.TestCase):
     def test_default_legacy_sqlite_path_prefers_env(self):
         dummy = DuckHistoryStore.__new__(DuckHistoryStore)
         dummy.db_path = Path("market_history.duckdb")
-        with patch.dict("os.environ", {"REALTIME0052_DB_PATH": "/tmp/legacy_from_env.sqlite3"}, clear=False):
+        with patch.dict(
+            "os.environ", {"REALTIME0052_DB_PATH": "/tmp/legacy_from_env.sqlite3"}, clear=False
+        ):
             out = dummy._default_legacy_sqlite_path()
         self.assertEqual(str(out), "/tmp/legacy_from_env.sqlite3")
 
@@ -147,9 +171,24 @@ class DuckStoreTests(unittest.TestCase):
                 symbol="2330",
                 market="TW",
                 ticks=[
-                    {"ts": "2024-01-03T01:00:00+00:00", "price": 100.0, "cum_volume": 10, "source": "unit"},
-                    {"ts": "2024-01-03T01:00:00+00:00", "price": 101.0, "cum_volume": 11, "source": "unit"},
-                    {"ts": "2024-01-03T01:01:00+00:00", "price": 102.0, "cum_volume": 15, "source": "unit"},
+                    {
+                        "ts": "2024-01-03T01:00:00+00:00",
+                        "price": 100.0,
+                        "cum_volume": 10,
+                        "source": "unit",
+                    },
+                    {
+                        "ts": "2024-01-03T01:00:00+00:00",
+                        "price": 101.0,
+                        "cum_volume": 11,
+                        "source": "unit",
+                    },
+                    {
+                        "ts": "2024-01-03T01:01:00+00:00",
+                        "price": 102.0,
+                        "cum_volume": 15,
+                        "source": "unit",
+                    },
                 ],
             )
             self.assertEqual(written, 2)
@@ -170,7 +209,9 @@ class DuckStoreTests(unittest.TestCase):
 
             idx = pd.date_range("2025-01-01", periods=3, freq="B", tz="UTC")
             frame = pd.DataFrame({"close": [100.0, 101.0, 102.5]}, index=idx)
-            queued = store.queue_daily_bars_writeback(symbol="^GSPC", market="US", bars=frame, source="yfinance")
+            queued = store.queue_daily_bars_writeback(
+                symbol="^GSPC", market="US", bars=frame, source="yfinance"
+            )
             self.assertTrue(queued)
             self.assertTrue(store.flush_writeback_queue(timeout_sec=3.0))
 
@@ -188,8 +229,12 @@ class DuckStoreTests(unittest.TestCase):
                 service=_NoopService(),
                 auto_migrate_legacy_sqlite=False,
             )
-            store.upsert_heatmap_hub_entry(etf_code="00935", etf_name="野村臺灣新科技50", opened=True)
-            store.upsert_heatmap_hub_entry(etf_code="00935", etf_name="野村臺灣新科技50", opened=True, pin_as_card=True)
+            store.upsert_heatmap_hub_entry(
+                etf_code="00935", etf_name="野村臺灣新科技50", opened=True
+            )
+            store.upsert_heatmap_hub_entry(
+                etf_code="00935", etf_name="野村臺灣新科技50", opened=True, pin_as_card=True
+            )
             store.upsert_heatmap_hub_entry(etf_code="0050", etf_name="元大台灣50", opened=False)
 
             all_rows = store.list_heatmap_hub_entries()

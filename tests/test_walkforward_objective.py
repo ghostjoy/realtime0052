@@ -21,8 +21,12 @@ class _Result:
 
 class WalkForwardObjectiveTests(unittest.TestCase):
     def test_mdd_prefers_smaller_drawdown(self):
-        better = _Result(metrics=_Metrics(cagr=0.0, total_return=0.0, max_drawdown=-0.10, sharpe=0.0))
-        worse = _Result(metrics=_Metrics(cagr=0.0, total_return=0.0, max_drawdown=-0.30, sharpe=0.0))
+        better = _Result(
+            metrics=_Metrics(cagr=0.0, total_return=0.0, max_drawdown=-0.10, sharpe=0.0)
+        )
+        worse = _Result(
+            metrics=_Metrics(cagr=0.0, total_return=0.0, max_drawdown=-0.30, sharpe=0.0)
+        )
         self.assertGreater(_score(better, "mdd"), _score(worse, "mdd"))
 
     def test_required_walkforward_bars_increases_for_daily_k_strategy(self):

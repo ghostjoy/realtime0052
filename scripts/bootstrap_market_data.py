@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
-import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -23,11 +23,17 @@ def _parse_symbols_csv(raw: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prebuild TW/US market baseline into SQLite")
-    parser.add_argument("--scope", choices=["both", "tw", "us"], default="both", help="Bootstrap market scope")
-    parser.add_argument("--years", type=int, default=5, help="Lookback years to backfill daily bars")
+    parser.add_argument(
+        "--scope", choices=["both", "tw", "us"], default="both", help="Bootstrap market scope"
+    )
+    parser.add_argument(
+        "--years", type=int, default=5, help="Lookback years to backfill daily bars"
+    )
     parser.add_argument("--max-workers", type=int, default=6, help="Parallel worker count")
     parser.add_argument("--serial", action="store_true", help="Disable parallel sync")
-    parser.add_argument("--tw-limit", type=int, default=None, help="Limit TW symbols for trial runs")
+    parser.add_argument(
+        "--tw-limit", type=int, default=None, help="Limit TW symbols for trial runs"
+    )
     parser.add_argument(
         "--us-symbols",
         type=str,
@@ -40,7 +46,9 @@ def main() -> int:
         default="min_rows",
         help="Sync mode for orchestrator",
     )
-    parser.add_argument("--min-rows", type=int, default=None, help="Required rows when sync-mode=min_rows")
+    parser.add_argument(
+        "--min-rows", type=int, default=None, help="Required rows when sync-mode=min_rows"
+    )
     args = parser.parse_args()
 
     service = MarketDataService()

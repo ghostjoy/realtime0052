@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 import requests
@@ -15,10 +15,17 @@ from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind,
 class UsTwelveDataProvider(MarketDataProvider):
     name = "twelvedata"
     base_url = "https://api.twelvedata.com"
-    default_key_file = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "codexapp" / "twelvedatakey"
+    default_key_file = (
+        Path.home()
+        / "Library"
+        / "Mobile Documents"
+        / "com~apple~CloudDocs"
+        / "codexapp"
+        / "twelvedatakey"
+    )
 
     @classmethod
-    def _resolve_api_key(cls, api_key: Optional[str] = None) -> Optional[str]:
+    def _resolve_api_key(cls, api_key: str | None = None) -> str | None:
         direct = str(api_key or "").strip()
         if direct:
             return direct
@@ -41,11 +48,11 @@ class UsTwelveDataProvider(MarketDataProvider):
         normalized = text.strip()
         return normalized or None
 
-    def __init__(self, api_key: Optional[str] = None, timeout_sec: int = 12):
+    def __init__(self, api_key: str | None = None, timeout_sec: int = 12):
         self.api_key = self._resolve_api_key(api_key)
         self.timeout_sec = timeout_sec
 
-    def _request(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _request(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
             raise ProviderError(self.name, ProviderErrorKind.AUTH, "TWELVE_DATA_API_KEY is missing")
         params = dict(params)
@@ -54,19 +61,25 @@ class UsTwelveDataProvider(MarketDataProvider):
         try:
             resp = requests.get(url, params=params, timeout=self.timeout_sec)
         except requests.RequestException as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "Twelve Data network error", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "Twelve Data network error", exc
+            ) from exc
 
         if resp.status_code == 429:
             raise ProviderError(self.name, ProviderErrorKind.RATE_LIMIT, "Twelve Data rate limited")
         if resp.status_code == 401:
             raise ProviderError(self.name, ProviderErrorKind.AUTH, "Twelve Data auth failed")
         if resp.status_code >= 400:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, f"Twelve Data HTTP {resp.status_code}")
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, f"Twelve Data HTTP {resp.status_code}"
+            )
 
         try:
             payload = resp.json()
         except ValueError as exc:
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "Twelve Data invalid JSON", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "Twelve Data invalid JSON", exc
+            ) from exc
 
         if isinstance(payload, dict) and payload.get("status") == "error":
             code = (payload.get("code") or "").lower()
@@ -92,16 +105,27 @@ class UsTwelveDataProvider(MarketDataProvider):
         return dt.astimezone(timezone.utc)
 
     @staticmethod
-    def _to_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    def _to_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         df = pd.DataFrame(rows).rename(
-            columns={"datetime": "date", "open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}
+            columns={
+                "datetime": "date",
+                "open": "open",
+                "high": "high",
+                "low": "low",
+                "close": "close",
+                "volume": "volume",
+            }
         )
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna(subset=["date", "open", "high", "low", "close"]).set_index("date").sort_index()
+        df = (
+            df.dropna(subset=["date", "open", "high", "low", "close"])
+            .set_index("date")
+            .sort_index()
+        )
         return df[["open", "high", "low", "close", "volume"]]
 
     def quote(self, request: ProviderRequest) -> QuoteSnapshot:
@@ -140,7 +164,11 @@ class UsTwelveDataProvider(MarketDataProvider):
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
         if request.interval != "1d":
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Twelve Data provider supports 1d in this app")
+            raise ProviderError(
+                self.name,
+                ProviderErrorKind.UNSUPPORTED,
+                "Twelve Data provider supports 1d in this app",
+            )
 
         payload = self._request(
             "time_series",
@@ -148,7 +176,9 @@ class UsTwelveDataProvider(MarketDataProvider):
         )
         rows = payload.get("values") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Twelve Data OHLCV missing values")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "Twelve Data OHLCV missing values"
+            )
         df = self._to_df(rows)
         if df.empty:
             raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Twelve Data OHLCV empty")

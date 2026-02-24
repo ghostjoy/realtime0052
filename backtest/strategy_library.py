@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Dict
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -29,7 +29,9 @@ def ema_cross(bars: pd.DataFrame, fast: int = 12, slow: int = 26) -> pd.Series:
     return (fast_ema > slow_ema).astype(int).fillna(0)
 
 
-def rsi_reversion(bars: pd.DataFrame, buy_below: float = 30.0, sell_above: float = 55.0) -> pd.Series:
+def rsi_reversion(
+    bars: pd.DataFrame, buy_below: float = 30.0, sell_above: float = 55.0
+) -> pd.Series:
     close = bars["close"]
     r = rsi(close, window=14)
     signal = pd.Series(0, index=bars.index, dtype=int)
@@ -53,7 +55,9 @@ def macd_trend(bars: pd.DataFrame) -> pd.Series:
     return (line > sig).astype(int).fillna(0)
 
 
-def sma_trend_filter(bars: pd.DataFrame, fast: int = 20, slow: int = 60, trend: int = 120) -> pd.Series:
+def sma_trend_filter(
+    bars: pd.DataFrame, fast: int = 20, slow: int = 60, trend: int = 120
+) -> pd.Series:
     fast = int(fast)
     slow = int(slow)
     trend = int(trend)
@@ -112,7 +116,7 @@ def donchian_breakout(
     return signal
 
 
-STRATEGIES: Dict[str, Callable[..., pd.Series]] = {
+STRATEGIES: dict[str, Callable[..., pd.Series]] = {
     "buy_hold": buy_hold,
     "sma_cross": sma_cross,
     "ema_cross": ema_cross,
@@ -122,7 +126,7 @@ STRATEGIES: Dict[str, Callable[..., pd.Series]] = {
     "donchian_breakout": donchian_breakout,
 }
 
-STRATEGY_MIN_BARS: Dict[str, int] = {
+STRATEGY_MIN_BARS: dict[str, int] = {
     "buy_hold": 2,
     "sma_cross": 40,
     "ema_cross": 40,

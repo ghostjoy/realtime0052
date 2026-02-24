@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import streamlit as st
 
-def runtime_page_cards(base_cards: list[dict[str, str]], dynamic_cards_fn: Callable[[], list[dict[str, str]]]) -> list[dict[str, str]]:
+
+def runtime_page_cards(
+    base_cards: list[dict[str, str]], dynamic_cards_fn: Callable[[], list[dict[str, str]]]
+) -> list[dict[str, str]]:
     cards: list[dict[str, str]] = [dict(item) for item in base_cards]
     existing_keys = {str(item.get("key", "")).strip() for item in cards}
     for item in dynamic_cards_fn():
@@ -14,6 +17,7 @@ def runtime_page_cards(base_cards: list[dict[str, str]], dynamic_cards_fn: Calla
         cards.append(item)
         existing_keys.add(key)
     return cards
+
 
 def render_page_cards_nav(*, cards: list[dict[str, str]], default_active_page: str) -> str:
     page_options = [item["key"] for item in cards]
@@ -30,12 +34,15 @@ def render_page_cards_nav(*, cards: list[dict[str, str]], default_active_page: s
         desc = item["desc"]
         is_active = key == active_page
         with cols[idx % 5]:
-            st.markdown((
-                f"<div class='page-nav-card{' active' if is_active else ''}'>"
-                f"<div class='page-card-title'>{key}</div>"
-                f"<div class='page-card-desc'>{desc}</div>"
-                "</div>"
-            ), unsafe_allow_html=True)
+            st.markdown(
+                (
+                    f"<div class='page-nav-card{' active' if is_active else ''}'>"
+                    f"<div class='page-card-title'>{key}</div>"
+                    f"<div class='page-card-desc'>{desc}</div>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
             clicked = st.button(
                 "已開啟" if is_active else "開啟",
                 key=f"page-card:{key}",
@@ -47,5 +54,6 @@ def render_page_cards_nav(*, cards: list[dict[str, str]], default_active_page: s
                 st.rerun()
 
     return str(st.session_state.get("active_page", default_page))
+
 
 __all__ = ["runtime_page_cards", "render_page_cards_nav"]

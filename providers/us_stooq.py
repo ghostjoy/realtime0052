@@ -14,7 +14,9 @@ class UsStooqProvider(MarketDataProvider):
         try:
             q = fetch_stooq_quote(request.symbol)
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "Stooq quote request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "Stooq quote request failed", exc
+            ) from exc
 
         return QuoteSnapshot(
             symbol=request.symbol,
@@ -35,11 +37,15 @@ class UsStooqProvider(MarketDataProvider):
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
         if request.interval != "1d":
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Stooq only supports 1d interval")
+            raise ProviderError(
+                self.name, ProviderErrorKind.UNSUPPORTED, "Stooq only supports 1d interval"
+            )
         try:
             df = fetch_stooq_ohlcv(request.symbol, interval="1d")
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "Stooq daily request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "Stooq daily request failed", exc
+            ) from exc
         if df.empty:
             raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Stooq returned empty OHLCV")
 

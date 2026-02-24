@@ -1,7 +1,5 @@
 """URL 建構工具 - 從 app.py 重構而出"""
 
-import re
-from typing import Optional
 from urllib.parse import quote, urlencode
 
 
@@ -17,13 +15,11 @@ def build_backtest_drill_url(symbol: str, market: str) -> str:
     )
 
 
-def build_heatmap_drill_url(
-    etf_code: str, etf_name: str, *, src: str = "all_types_table"
-) -> str:
+def build_heatmap_drill_url(etf_code: str, etf_name: str, *, src: str = "all_types_table") -> str:
     """建構熱力圖 drilldown URL"""
     from ui.helpers.symbol_utils import (
-        normalize_heatmap_etf_code,
         clean_heatmap_name_for_query,
+        normalize_heatmap_etf_code,
     )
 
     code = normalize_heatmap_etf_code(etf_code)

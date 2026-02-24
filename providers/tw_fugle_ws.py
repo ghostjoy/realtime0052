@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from market_data_types import OhlcvSnapshot, QuoteSnapshot
 from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind, ProviderRequest
@@ -13,20 +13,31 @@ from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind,
 class TwFugleWebSocketProvider(MarketDataProvider):
     name = "fugle_ws"
     default_ws_url = "wss://api.fugle.tw/marketdata/v1.0/stock/streaming"
-    default_key_file = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "codexapp" / "fuglekey"
+    default_key_file = (
+        Path.home()
+        / "Library"
+        / "Mobile Documents"
+        / "com~apple~CloudDocs"
+        / "codexapp"
+        / "fuglekey"
+    )
 
     @classmethod
-    def _resolve_api_key(cls, api_key: Optional[str] = None) -> Optional[str]:
+    def _resolve_api_key(cls, api_key: str | None = None) -> str | None:
         direct = str(api_key or "").strip()
         if direct:
             return direct
 
-        env_key = str(os.getenv("FUGLE_MARKETDATA_API_KEY") or os.getenv("FUGLE_API_KEY") or "").strip()
+        env_key = str(
+            os.getenv("FUGLE_MARKETDATA_API_KEY") or os.getenv("FUGLE_API_KEY") or ""
+        ).strip()
         if env_key:
             return env_key
 
         key_file = str(
-            os.getenv("FUGLE_MARKETDATA_API_KEY_FILE") or os.getenv("FUGLE_API_KEY_FILE") or cls.default_key_file
+            os.getenv("FUGLE_MARKETDATA_API_KEY_FILE")
+            or os.getenv("FUGLE_API_KEY_FILE")
+            or cls.default_key_file
         ).strip()
         if not key_file:
             return None
@@ -37,14 +48,14 @@ class TwFugleWebSocketProvider(MarketDataProvider):
         normalized = text.strip()
         return normalized or None
 
-    def __init__(self, api_key: Optional[str] = None, timeout_sec: int = 8, ws_url: Optional[str] = None):
+    def __init__(self, api_key: str | None = None, timeout_sec: int = 8, ws_url: str | None = None):
         self.api_key = self._resolve_api_key(api_key)
         self.timeout_sec = timeout_sec
         # Supports MCP relay/proxy endpoint override when needed.
         self.ws_url = ws_url or os.getenv("FUGLE_WS_URL") or self.default_ws_url
 
     @staticmethod
-    def _to_float(value: Any) -> Optional[float]:
+    def _to_float(value: Any) -> float | None:
         if value is None:
             return None
         try:
@@ -53,7 +64,7 @@ class TwFugleWebSocketProvider(MarketDataProvider):
             return None
 
     @staticmethod
-    def _to_int(value: Any) -> Optional[int]:
+    def _to_int(value: Any) -> int | None:
         if value is None:
             return None
         try:
@@ -80,7 +91,9 @@ class TwFugleWebSocketProvider(MarketDataProvider):
                 if text.isdigit():
                     return TwFugleWebSocketProvider._parse_ts(int(text))
                 try:
-                    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+                    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(
+                        timezone.utc
+                    )
                 except ValueError:
                     pass
         return datetime.now(tz=timezone.utc)
@@ -99,7 +112,9 @@ class TwFugleWebSocketProvider(MarketDataProvider):
         return channel, payload
 
     @staticmethod
-    def _extract_books(payload: dict[str, Any]) -> tuple[list[float], list[int], list[float], list[int]]:
+    def _extract_books(
+        payload: dict[str, Any],
+    ) -> tuple[list[float], list[int], list[float], list[int]]:
         def _norm_levels(raw_levels: Any) -> tuple[list[float], list[int]]:
             prices: list[float] = []
             sizes: list[int] = []
@@ -144,11 +159,20 @@ class TwFugleWebSocketProvider(MarketDataProvider):
             or payload.get("c")
         )
         prev_close = TwFugleWebSocketProvider._to_float(
-            payload.get("previousClose") or payload.get("prevClose") or payload.get("referencePrice") or payload.get("y")
+            payload.get("previousClose")
+            or payload.get("prevClose")
+            or payload.get("referencePrice")
+            or payload.get("y")
         )
-        open_ = TwFugleWebSocketProvider._to_float(payload.get("openPrice") or payload.get("open") or payload.get("o"))
-        high = TwFugleWebSocketProvider._to_float(payload.get("highPrice") or payload.get("high") or payload.get("h"))
-        low = TwFugleWebSocketProvider._to_float(payload.get("lowPrice") or payload.get("low") or payload.get("l"))
+        open_ = TwFugleWebSocketProvider._to_float(
+            payload.get("openPrice") or payload.get("open") or payload.get("o")
+        )
+        high = TwFugleWebSocketProvider._to_float(
+            payload.get("highPrice") or payload.get("high") or payload.get("h")
+        )
+        low = TwFugleWebSocketProvider._to_float(
+            payload.get("lowPrice") or payload.get("low") or payload.get("l")
+        )
         total = payload.get("total")
         total_volume = None
         if isinstance(total, dict):
@@ -195,9 +219,15 @@ class TwFugleWebSocketProvider(MarketDataProvider):
 
     def quote(self, request: ProviderRequest) -> QuoteSnapshot:
         if request.market != "TW":
-            raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Fugle WS provider only supports TW market")
+            raise ProviderError(
+                self.name,
+                ProviderErrorKind.UNSUPPORTED,
+                "Fugle WS provider only supports TW market",
+            )
         if not self.api_key:
-            raise ProviderError(self.name, ProviderErrorKind.AUTH, "FUGLE_MARKETDATA_API_KEY is missing")
+            raise ProviderError(
+                self.name, ProviderErrorKind.AUTH, "FUGLE_MARKETDATA_API_KEY is missing"
+            )
 
         try:
             import websocket
@@ -268,10 +298,16 @@ class TwFugleWebSocketProvider(MarketDataProvider):
                     err_msg = self._extract_error_message(msg)
                     raise ProviderError(self.name, ProviderErrorKind.AUTH, err_msg)
             if not authenticated:
-                raise ProviderError(self.name, ProviderErrorKind.AUTH, "fugle websocket auth timeout")
+                raise ProviderError(
+                    self.name, ProviderErrorKind.AUTH, "fugle websocket auth timeout"
+                )
 
-            ws.send(json.dumps({"event": "subscribe", "data": {"channel": "trades", "symbol": symbol}}))
-            ws.send(json.dumps({"event": "subscribe", "data": {"channel": "books", "symbol": symbol}}))
+            ws.send(
+                json.dumps({"event": "subscribe", "data": {"channel": "trades", "symbol": symbol}})
+            )
+            ws.send(
+                json.dumps({"event": "subscribe", "data": {"channel": "books", "symbol": symbol}})
+            )
 
             while datetime.now(tz=timezone.utc).timestamp() < deadline:
                 raw = ws.recv()
@@ -316,7 +352,9 @@ class TwFugleWebSocketProvider(MarketDataProvider):
         except ProviderError:
             raise
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "Fugle websocket request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "Fugle websocket request failed", exc
+            ) from exc
         finally:
             if ws is not None:
                 try:
@@ -325,7 +363,9 @@ class TwFugleWebSocketProvider(MarketDataProvider):
                     pass
 
         if state["price"] is None:
-            raise ProviderError(self.name, ProviderErrorKind.EMPTY, "Fugle websocket returned empty quote")
+            raise ProviderError(
+                self.name, ProviderErrorKind.EMPTY, "Fugle websocket returned empty quote"
+            )
 
         return QuoteSnapshot(
             symbol=symbol,
@@ -352,4 +392,8 @@ class TwFugleWebSocketProvider(MarketDataProvider):
         )
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
-        raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "Fugle WS provider does not provide historical OHLCV")
+        raise ProviderError(
+            self.name,
+            ProviderErrorKind.UNSUPPORTED,
+            "Fugle WS provider does not provide historical OHLCV",
+        )

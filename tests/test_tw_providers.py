@@ -56,7 +56,9 @@ class _FakeWebSocketConn:
                         "high": 191.2,
                         "low": 188.8,
                         "volume": 900,
-                        "timestamp": int(datetime(2026, 2, 13, 6, 0, tzinfo=timezone.utc).timestamp() * 1000),
+                        "timestamp": int(
+                            datetime(2026, 2, 13, 6, 0, tzinfo=timezone.utc).timestamp() * 1000
+                        ),
                     }
                 }
             ),
@@ -117,7 +119,9 @@ class TwProvidersTests(unittest.TestCase):
         fake_mod = types.SimpleNamespace(create_connection=lambda *_args, **_kwargs: fake_conn)
         provider = TwFugleWebSocketProvider(api_key="fake-key", timeout_sec=2)
         with patch.dict(sys.modules, {"websocket": fake_mod}):
-            quote = provider.quote(ProviderRequest(symbol="2330", market="TW", interval="quote", exchange="tse"))
+            quote = provider.quote(
+                ProviderRequest(symbol="2330", market="TW", interval="quote", exchange="tse")
+            )
         self.assertEqual(quote.source, "fugle_ws")
         self.assertEqual(quote.price, 190.8)
         self.assertEqual(quote.prev_close, 189.0)

@@ -42,7 +42,7 @@
 
 ## Commit 時自動更新 CHANGELOG
 
-- 本 repo 提供 `pre-commit` hook：每次 `git commit` 前會自動執行 `scripts/auto_changelog.py`
+- 本 repo 提供 `pre-commit` hook：每次 `git commit` 前會自動執行 `ruff check` + `ruff format` + `scripts/auto_changelog.py`
 - 功能：偵測本次 staged 檔案，將一筆 `Changed` 條目自動寫入 `CHANGELOG.md` 的 `Unreleased`
 - 每台新電腦（每個 clone）需執行一次安裝：
 
@@ -220,7 +220,7 @@ uv run python scripts/bootstrap_market_data.py --scope both --years 5 --max-work
 ### 用 uv（建議）
 
 ```bash
-cd /Users/ztw/codexapp/realtime0052
+cd ~/codexapp/realtime0052_minimax
 uv sync
 ```
 
@@ -276,7 +276,7 @@ export FUGLE_WS_URL="wss://your-relay-or-proxy-endpoint"
 {
   "mcpServers": {
     "fugle-marketdata": {
-      "command": "/Users/ztw/codexapp/realtime0052/scripts/run_fugle_mcp_server.sh"
+      "command": "$PROJECT_DIR/scripts/run_fugle_mcp_server.sh"
     }
   }
 }
@@ -353,14 +353,14 @@ uv run python scripts/manage_tw_etf_fees.py --input-csv /path/to/fees.csv
 ## 執行
 
 ```bash
-cd /Users/ztw/codexapp/realtime0052
+cd ~/codexapp/realtime0052_minimax
 uv run streamlit run app.py
 ```
 
 一鍵啟用預設技術線（Hydra + DuckDB/Parquet + Plotly）：
 
 ```bash
-cd /Users/ztw/codexapp/realtime0052
+cd ~/codexapp/realtime0052_minimax
 ./scripts/enable_new_stack.sh
 ```
 
@@ -370,14 +370,14 @@ cd /Users/ztw/codexapp/realtime0052
 一鍵回滾舊技術線（legacy_env + SQLite + Plotly）：
 
 ```bash
-cd /Users/ztw/codexapp/realtime0052
+cd ~/codexapp/realtime0052_minimax
 ./scripts/rollback_legacy_stack.sh
 ```
 
 ## 測試
 
 ```bash
-cd /Users/ztw/codexapp/realtime0052
+cd ~/codexapp/realtime0052_minimax
 uv run python -m unittest discover -s tests -v
 ```
 

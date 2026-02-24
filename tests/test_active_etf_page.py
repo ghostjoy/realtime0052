@@ -14,39 +14,42 @@ from app import (
     BACKTEST_REPLAY_SCHEMA_VERSION,
     _apply_unified_benchmark_hover,
     _attach_tw_etf_aum_column,
-    _benchmark_candidates_tw,
     _attach_tw_etf_management_fee_column,
+    _benchmark_candidates_tw,
+    _build_consensus_representative_between,
+    _build_data_health,
+    _build_replay_source_hash,
+    _build_snapshot_health,
+    _build_symbol_line_styles,
+    _build_tw_active_etf_ytd_between,
     _build_tw_etf_all_types_performance_table,
-    _build_heatmap_drill_url,
-    _fill_unresolved_tw_names,
+    _build_tw_etf_top10_between,
+    _build_two_etf_aggressive_picks,
+    _classify_issue_level,
+    _classify_tw_etf,
+    _compute_jaccard_pct,
+    _compute_tw_equal_weight_compare_payload,
+    _consensus_threshold_candidates,
+    _consume_heatmap_drilldown_query,
     _decorate_dataframe_backtest_links,
     _decorate_tw_etf_name_heatmap_links,
     _decorate_tw_etf_top10_ytd_table,
-    _build_data_health,
-    _build_snapshot_health,
-    _build_consensus_representative_between,
-    _build_two_etf_aggressive_picks,
-    _compute_jaccard_pct,
+    _dynamic_heatmap_page_renderers,
+    _fill_unresolved_tw_names,
+    _format_weight_pct_label,
     _infer_market_target_from_symbols,
-    _consensus_threshold_candidates,
-    _build_tw_etf_top10_between,
-    _build_replay_source_hash,
-    _build_symbol_line_styles,
-    _resolve_tw_symbol_names,
-    _build_tw_active_etf_ytd_between,
-    _compute_tw_equal_weight_compare_payload,
-    _classify_issue_level,
     _is_tw_active_etf,
     _load_cached_backtest_payload,
     _load_tw_benchmark_bars,
-    _snapshot_fallback_depth,
-    _classify_tw_etf,
-    _format_weight_pct_label,
-    _normalize_heatmap_etf_code,
-    _parse_drill_symbol,
-    _consume_heatmap_drilldown_query,
-    _dynamic_heatmap_page_renderers,
     _render_heatmap_constituent_intro_sections,
+    _resolve_tw_symbol_names,
+    _snapshot_fallback_depth,
+)
+from ui.helpers import (
+    build_heatmap_drill_url,
+    normalize_heatmap_etf_code,
+    parse_drill_symbol,
+    strip_symbol_label_token,
 )
 
 
@@ -92,10 +95,15 @@ class ActiveEtfPageTests(unittest.TestCase):
 
     def test_benchmark_candidates_tw_modes(self):
         self.assertEqual(_benchmark_candidates_tw("twii"), ["^TWII"])
-        self.assertEqual(_benchmark_candidates_tw("twii", allow_twii_fallback=True), ["^TWII", "0050", "006208"])
+        self.assertEqual(
+            _benchmark_candidates_tw("twii", allow_twii_fallback=True), ["^TWII", "0050", "006208"]
+        )
         self.assertEqual(_benchmark_candidates_tw("0050"), ["0050"])
         self.assertEqual(_benchmark_candidates_tw("unknown"), ["^TWII"])
-        self.assertEqual(_benchmark_candidates_tw("unknown", allow_twii_fallback=True), ["^TWII", "0050", "006208"])
+        self.assertEqual(
+            _benchmark_candidates_tw("unknown", allow_twii_fallback=True),
+            ["^TWII", "0050", "006208"],
+        )
 
     def test_infer_market_target_from_symbols(self):
         with patch("app._infer_tw_symbol_exchanges", return_value={"8069": "OTC", "4123": "OTC"}):
@@ -114,11 +122,11 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIsNone(_infer_market_target_from_symbols(["8069", "AAPL"]))
         self.assertIsNone(_infer_market_target_from_symbols([]))
 
-    def test_parse_drill_symbol(self):
-        self.assertEqual(_parse_drill_symbol("0050 元大台灣50"), ("0050", "TW"))
-        self.assertEqual(_parse_drill_symbol("8069.TWO"), ("8069", "OTC"))
-        self.assertEqual(_parse_drill_symbol("AAPL Apple"), ("AAPL", "US"))
-        self.assertEqual(_parse_drill_symbol("—"), ("", ""))
+    def testparse_drill_symbol(self):
+        self.assertEqual(parse_drill_symbol("0050 元大台灣50"), ("0050", "TW"))
+        self.assertEqual(parse_drill_symbol("8069.TWO"), ("8069", "OTC"))
+        self.assertEqual(parse_drill_symbol("AAPL Apple"), ("AAPL", "US"))
+        self.assertEqual(parse_drill_symbol("—"), ("", ""))
 
     def test_decorate_dataframe_backtest_links(self):
         source = pd.DataFrame(
@@ -136,14 +144,14 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertTrue(str(out.iloc[2]["代碼"]).startswith("?bt_symbol=AAPL&bt_market=US"))
         self.assertTrue(pd.isna(out.iloc[3]["代碼"]))
 
-    def test_normalize_heatmap_etf_code(self):
-        self.assertEqual(_normalize_heatmap_etf_code("00935"), "00935")
-        self.assertEqual(_normalize_heatmap_etf_code("00993a"), "00993A")
-        self.assertEqual(_normalize_heatmap_etf_code("AAPL"), "")
-        self.assertEqual(_normalize_heatmap_etf_code(""), "")
+    def testnormalize_heatmap_etf_code(self):
+        self.assertEqual(normalize_heatmap_etf_code("00935"), "00935")
+        self.assertEqual(normalize_heatmap_etf_code("00993a"), "00993A")
+        self.assertEqual(normalize_heatmap_etf_code("AAPL"), "")
+        self.assertEqual(normalize_heatmap_etf_code(""), "")
 
-    def test_build_heatmap_drill_url(self):
-        url = _build_heatmap_drill_url("00935", "野村臺灣新科技50")
+    def testbuild_heatmap_drill_url(self):
+        url = build_heatmap_drill_url("00935", "野村臺灣新科技50")
         self.assertIn("hm_etf=00935", url)
         self.assertIn("hm_open=1", url)
         self.assertIn("hm_src=all_types_table", url)
@@ -162,9 +170,11 @@ class ActiveEtfPageTests(unittest.TestCase):
 
     def test_render_heatmap_constituent_intro_sections_generic_etf(self):
         fake_service = SimpleNamespace()
-        with patch("app.st.markdown") as markdown_mock, patch(
-            "app._render_tw_constituent_intro_table"
-        ) as tw_intro_mock, patch("app._render_00910_constituent_intro_table") as intro_00910_mock:
+        with (
+            patch("app.st.markdown") as markdown_mock,
+            patch("app._render_tw_constituent_intro_table") as tw_intro_mock,
+            patch("app._render_00910_constituent_intro_table") as intro_00910_mock,
+        ):
             _render_heatmap_constituent_intro_sections(
                 etf_code="00735",
                 snapshot_symbols=["00735", "2330"],
@@ -184,9 +194,11 @@ class ActiveEtfPageTests(unittest.TestCase):
     def test_render_heatmap_constituent_intro_sections_for_00910(self):
         fake_service = SimpleNamespace()
         full_rows = [{"symbol": "AAPL.US", "market": "US"}]
-        with patch("app.st.markdown") as markdown_mock, patch(
-            "app._render_tw_constituent_intro_table"
-        ) as tw_intro_mock, patch("app._render_00910_constituent_intro_table") as intro_00910_mock:
+        with (
+            patch("app.st.markdown") as markdown_mock,
+            patch("app._render_tw_constituent_intro_table") as tw_intro_mock,
+            patch("app._render_00910_constituent_intro_table") as intro_00910_mock,
+        ):
             _render_heatmap_constituent_intro_sections(
                 etf_code="00910",
                 snapshot_symbols=["2330", "2454"],
@@ -212,9 +224,11 @@ class ActiveEtfPageTests(unittest.TestCase):
 
     def test_render_heatmap_constituent_intro_sections_skip_when_no_symbols(self):
         fake_service = SimpleNamespace()
-        with patch("app.st.markdown") as markdown_mock, patch(
-            "app._render_tw_constituent_intro_table"
-        ) as tw_intro_mock, patch("app._render_00910_constituent_intro_table") as intro_00910_mock:
+        with (
+            patch("app.st.markdown") as markdown_mock,
+            patch("app._render_tw_constituent_intro_table") as tw_intro_mock,
+            patch("app._render_00910_constituent_intro_table") as intro_00910_mock,
+        ):
             _render_heatmap_constituent_intro_sections(
                 etf_code="00735",
                 snapshot_symbols=[],
@@ -227,7 +241,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         intro_00910_mock.assert_not_called()
 
     def test_heatmap_drilldown_query_routes_to_dynamic_heatmap_renderer(self):
-        url = _build_heatmap_drill_url("00735", "國泰臺韓科技", src="all_types_table")
+        url = build_heatmap_drill_url("00735", "國泰臺韓科技", src="all_types_table")
         self.assertTrue(url.startswith("?"))
         query = parse_qs(url.lstrip("?"))
 
@@ -250,9 +264,11 @@ class ActiveEtfPageTests(unittest.TestCase):
             old_active_payload = app.st.session_state.get("heatmap_hub_active_etf")
 
         try:
-            with patch("app._query_param_first", side_effect=_query_value), patch(
-                "app._upsert_heatmap_hub_entry"
-            ) as upsert_mock, patch("app._clear_query_params") as clear_mock:
+            with (
+                patch("app._query_param_first", side_effect=_query_value),
+                patch("app._upsert_heatmap_hub_entry") as upsert_mock,
+                patch("app._clear_query_params") as clear_mock,
+            ):
                 _consume_heatmap_drilldown_query()
 
             self.assertEqual(str(app.st.session_state.get("active_page", "")), "ETF熱力圖:00735")
@@ -269,14 +285,17 @@ class ActiveEtfPageTests(unittest.TestCase):
             )
             clear_mock.assert_called_once()
 
-            with patch("app._load_heatmap_hub_entries", return_value=[]), patch(
-                "app._render_tw_etf_heatmap_view"
-            ) as render_mock:
+            with (
+                patch("app._load_heatmap_hub_entries", return_value=[]),
+                patch("app._render_tw_etf_heatmap_view") as render_mock,
+            ):
                 renderers = _dynamic_heatmap_page_renderers()
                 self.assertIn("ETF熱力圖:00735", renderers)
                 renderers["ETF熱力圖:00735"]()
 
-            render_mock.assert_called_once_with("00735", page_desc="國泰臺韓科技", auto_run_if_missing=True)
+            render_mock.assert_called_once_with(
+                "00735", page_desc="國泰臺韓科技", auto_run_if_missing=True
+            )
         finally:
             if has_old_active_page:
                 app.st.session_state["active_page"] = old_active_page
@@ -365,7 +384,9 @@ class ActiveEtfPageTests(unittest.TestCase):
 
     def test_classify_issue_level(self):
         self.assertEqual(_classify_issue_level("無法建立 ETF 排行：資料缺失"), "error")
-        self.assertEqual(_classify_issue_level("部分 ETF 同步失敗，已盡量使用本地可用資料"), "warning")
+        self.assertEqual(
+            _classify_issue_level("部分 ETF 同步失敗，已盡量使用本地可用資料"), "warning"
+        )
         self.assertEqual(_classify_issue_level("快取已更新"), "info")
 
     def test_build_data_health_and_replay_hash(self):
@@ -480,10 +501,14 @@ class ActiveEtfPageTests(unittest.TestCase):
             self.assertTrue(bool(kwargs.get("allow_twii_fallback")))
             return bars, "0050", ["^TWII: unsupported"]
 
-        with patch("app._history_store", return_value=_FakeStore()), patch(
-            "app._load_tw_benchmark_bars",
-            side_effect=_fake_load_tw_benchmark_bars,
-        ), patch("app.apply_split_adjustment", side_effect=lambda bars, **kwargs: (bars, [])):
+        with (
+            patch("app._history_store", return_value=_FakeStore()),
+            patch(
+                "app._load_tw_benchmark_bars",
+                side_effect=_fake_load_tw_benchmark_bars,
+            ),
+            patch("app.apply_split_adjustment", side_effect=lambda bars, **kwargs: (bars, [])),
+        ):
             payload = _compute_tw_equal_weight_compare_payload(
                 symbols=["00980A"],
                 start_dt=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -560,10 +585,14 @@ class ActiveEtfPageTests(unittest.TestCase):
             def sync_symbol_history(self, symbol, market, start=None, end=None):
                 return SimpleNamespace(error=None)
 
-        with patch(
-            "app._fetch_twse_snapshot_with_fallback",
-            side_effect=[("20251231", start_df), ("20260214", end_df)],
-        ), patch("app._history_store", return_value=_FakeStore()), patch("app.known_split_events", return_value=[]):
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20251231", start_df), ("20260214", end_df)],
+            ),
+            patch("app._history_store", return_value=_FakeStore()),
+            patch("app.known_split_events", return_value=[]),
+        ):
             out, start_used, end_used = _build_tw_active_etf_ytd_between("20260101", "20260216")
 
         self.assertEqual(start_used, "20251231")
@@ -598,11 +627,16 @@ class ActiveEtfPageTests(unittest.TestCase):
             ]
         )
 
-        with patch(
-            "app._fetch_twse_snapshot_with_fallback",
-            side_effect=[("20251231", start_df), ("20260214", end_df)],
-        ), patch("app.known_split_events", return_value=[]):
-            out, start_used, end_used, universe_count = _build_tw_etf_top10_between("20260101", "20260216")
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20251231", start_df), ("20260214", end_df)],
+            ),
+            patch("app.known_split_events", return_value=[]),
+        ):
+            out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+                "20260101", "20260216"
+            )
 
         self.assertEqual(start_used, "20251231")
         self.assertEqual(end_used, "20260214")
@@ -616,11 +650,16 @@ class ActiveEtfPageTests(unittest.TestCase):
         start_df = pd.DataFrame([{"code": "0050", "name": "元大台灣50", "close": 100.0}])
         end_df = pd.DataFrame([{"code": "0056", "name": "元大高股息", "close": 30.0}])
 
-        with patch(
-            "app._fetch_twse_snapshot_with_fallback",
-            side_effect=[("20251231", start_df), ("20260214", end_df)],
-        ), patch("app.known_split_events", return_value=[]):
-            out, start_used, end_used, universe_count = _build_tw_etf_top10_between("20260101", "20260216")
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20251231", start_df), ("20260214", end_df)],
+            ),
+            patch("app.known_split_events", return_value=[]),
+        ):
+            out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+                "20260101", "20260216"
+            )
 
         self.assertEqual(start_used, "20251231")
         self.assertEqual(end_used, "20260214")
@@ -645,10 +684,13 @@ class ActiveEtfPageTests(unittest.TestCase):
             ]
         )
 
-        with patch(
-            "app._fetch_twse_snapshot_with_fallback",
-            side_effect=[("20251231", start_df), ("20260214", end_df)],
-        ), patch("app.known_split_events", return_value=[]):
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20251231", start_df), ("20260214", end_df)],
+            ),
+            patch("app.known_split_events", return_value=[]),
+        ):
             out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
                 "20260101",
                 "20260216",
@@ -675,16 +717,19 @@ class ActiveEtfPageTests(unittest.TestCase):
         end_df = pd.DataFrame(
             [
                 {"code": "0050", "name": "元大台灣50", "close": 120.0},  # +20%
-                {"code": "0056", "name": "元大高股息", "close": 27.0},   # -10%
+                {"code": "0056", "name": "元大高股息", "close": 27.0},  # -10%
                 {"code": "00929", "name": "復華台灣科技季配息", "close": 16.0},  # -20%
                 {"code": "00935", "name": "野村台灣創新科技50", "close": 55.0},  # +10%
             ]
         )
 
-        with patch(
-            "app._fetch_twse_snapshot_with_fallback",
-            side_effect=[("20241231", start_df), ("20251231", end_df)],
-        ), patch("app.known_split_events", return_value=[]):
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20241231", start_df), ("20251231", end_df)],
+            ),
+            patch("app.known_split_events", return_value=[]),
+        ):
             out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
                 "20250101",
                 "20251231",
@@ -715,10 +760,16 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
 
         split_event = SimpleNamespace(date="2025-06-18", ratio=0.2)
-        with patch(
-            "app._fetch_twse_snapshot_with_fallback",
-            side_effect=[("20241231", start_df), ("20251231", end_df)],
-        ), patch("app.known_split_events", side_effect=lambda symbol, market: [split_event] if str(symbol) == "0050" else []):
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20241231", start_df), ("20251231", end_df)],
+            ),
+            patch(
+                "app.known_split_events",
+                side_effect=lambda symbol, market: [split_event] if str(symbol) == "0050" else [],
+            ),
+        ):
             out, _, _, universe_count = _build_tw_etf_top10_between(
                 "20250101",
                 "20251231",
@@ -772,8 +823,12 @@ class ActiveEtfPageTests(unittest.TestCase):
             def get_tw_etf_constituents(self, etf_code, limit=None):
                 return [], "mock_fallback"
 
-        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
-            "app._market_service", return_value=_FakeService()
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                return_value=(top10_df, "20251231", "20260214", 120),
+            ),
+            patch("app._market_service", return_value=_FakeService()),
         ):
             payload = _build_consensus_representative_between(
                 start_yyyymmdd="20251231",
@@ -823,8 +878,12 @@ class ActiveEtfPageTests(unittest.TestCase):
             def get_tw_etf_constituents(self, etf_code, limit=None):
                 return [], "mock_fallback"
 
-        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
-            "app._market_service", return_value=_FakeService()
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                return_value=(top10_df, "20251231", "20260214", 120),
+            ),
+            patch("app._market_service", return_value=_FakeService()),
         ):
             payload = _build_consensus_representative_between(
                 start_yyyymmdd="20251231",
@@ -840,7 +899,9 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(str(top_pick.get("ETF代碼", "")), "0056")
 
     def test_compute_jaccard_pct(self):
-        self.assertAlmostEqual(_compute_jaccard_pct({"A", "B"}, {"B", "C"}), 33.3333333333, places=3)
+        self.assertAlmostEqual(
+            _compute_jaccard_pct({"A", "B"}, {"B", "C"}), 33.3333333333, places=3
+        )
         self.assertEqual(_compute_jaccard_pct(set(), set()), 0.0)
 
     def test_build_two_etf_aggressive_picks_normal(self):
@@ -889,9 +950,14 @@ class ActiveEtfPageTests(unittest.TestCase):
             def get_tw_etf_constituents(self, etf_code, limit=None):
                 return [], "mock_fallback"
 
-        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
-            "app._build_consensus_representative_between", return_value=consensus_payload
-        ), patch("app._market_service", return_value=_FakeService()):
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                return_value=(top10_df, "20251231", "20260214", 120),
+            ),
+            patch("app._build_consensus_representative_between", return_value=consensus_payload),
+            patch("app._market_service", return_value=_FakeService()),
+        ):
             payload = _build_two_etf_aggressive_picks(
                 start_yyyymmdd="20251231",
                 end_yyyymmdd="20260214",
@@ -938,9 +1004,14 @@ class ActiveEtfPageTests(unittest.TestCase):
             def get_tw_etf_constituents(self, etf_code, limit=None):
                 return [], "mock_fallback"
 
-        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
-            "app._build_consensus_representative_between", return_value=consensus_payload
-        ), patch("app._market_service", return_value=_FakeService()):
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                return_value=(top10_df, "20251231", "20260214", 120),
+            ),
+            patch("app._build_consensus_representative_between", return_value=consensus_payload),
+            patch("app._market_service", return_value=_FakeService()),
+        ):
             payload = _build_two_etf_aggressive_picks(
                 start_yyyymmdd="20251231",
                 end_yyyymmdd="20260214",
@@ -983,9 +1054,14 @@ class ActiveEtfPageTests(unittest.TestCase):
             def get_tw_etf_constituents(self, etf_code, limit=None):
                 return [], "mock_fallback"
 
-        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
-            "app._build_consensus_representative_between", return_value=consensus_payload
-        ), patch("app._market_service", return_value=_FakeService()):
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                return_value=(top10_df, "20251231", "20260214", 120),
+            ),
+            patch("app._build_consensus_representative_between", return_value=consensus_payload),
+            patch("app._market_service", return_value=_FakeService()),
+        ):
             payload = _build_two_etf_aggressive_picks(
                 start_yyyymmdd="20251231",
                 end_yyyymmdd="20260214",
@@ -1018,18 +1094,32 @@ class ActiveEtfPageTests(unittest.TestCase):
         class _FakeService:
             def get_etf_constituents_full(self, etf_code, limit=None, force_refresh=False):
                 data = {
-                    "0050": [{"symbol": "2330", "market": "TW"}, {"symbol": "2454", "market": "TW"}],
-                    "00910": [{"symbol": "AAPL.US", "market": "US"}, {"symbol": "GOOGL.US", "market": "US"}],
-                    "00941": [{"symbol": "3017", "market": "TW"}, {"symbol": "3661", "market": "TW"}],
+                    "0050": [
+                        {"symbol": "2330", "market": "TW"},
+                        {"symbol": "2454", "market": "TW"},
+                    ],
+                    "00910": [
+                        {"symbol": "AAPL.US", "market": "US"},
+                        {"symbol": "GOOGL.US", "market": "US"},
+                    ],
+                    "00941": [
+                        {"symbol": "3017", "market": "TW"},
+                        {"symbol": "3661", "market": "TW"},
+                    ],
                 }
                 return data.get(str(etf_code), []), "mock_full"
 
             def get_tw_etf_constituents(self, etf_code, limit=None):
                 return [], "mock_fallback"
 
-        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
-            "app._build_consensus_representative_between", return_value=consensus_payload
-        ), patch("app._market_service", return_value=_FakeService()):
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                return_value=(top10_df, "20251231", "20260214", 120),
+            ),
+            patch("app._build_consensus_representative_between", return_value=consensus_payload),
+            patch("app._market_service", return_value=_FakeService()),
+        ):
             payload = _build_two_etf_aggressive_picks(
                 start_yyyymmdd="20251231",
                 end_yyyymmdd="20260214",
@@ -1069,9 +1159,14 @@ class ActiveEtfPageTests(unittest.TestCase):
             def get_tw_etf_constituents(self, etf_code, limit=None):
                 return [], "mock_fallback"
 
-        with patch("app._build_tw_etf_top10_between", return_value=(top10_df, "20251231", "20260214", 120)), patch(
-            "app._build_consensus_representative_between", return_value=consensus_payload
-        ), patch("app._market_service", return_value=_FakeService()):
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                return_value=(top10_df, "20251231", "20260214", 120),
+            ),
+            patch("app._build_consensus_representative_between", return_value=consensus_payload),
+            patch("app._market_service", return_value=_FakeService()),
+        ):
             payload = _build_two_etf_aggressive_picks(
                 start_yyyymmdd="20251231",
                 end_yyyymmdd="20260214",
@@ -1167,18 +1262,21 @@ class ActiveEtfPageTests(unittest.TestCase):
                 {"代碼": "00935", "區間報酬(%)": 20.0},
             ]
         )
-        with patch(
-            "app._build_tw_etf_top10_between",
-            side_effect=[
-                (ytd_df, "20251231", "20260214", 2),
-                (y2025_df, "20241231", "20251231", 2),
-            ],
-        ), patch(
-            "app._load_tw_market_return_between",
-            side_effect=[
-                (10.0, "0050", []),
-                (18.0, "0050", []),
-            ],
+        with (
+            patch(
+                "app._build_tw_etf_top10_between",
+                side_effect=[
+                    (ytd_df, "20251231", "20260214", 2),
+                    (y2025_df, "20241231", "20251231", 2),
+                ],
+            ),
+            patch(
+                "app._load_tw_market_return_between",
+                side_effect=[
+                    (10.0, "0050", []),
+                    (18.0, "0050", []),
+                ],
+            ),
         ):
             out, meta = _build_tw_etf_all_types_performance_table(
                 ytd_start_yyyymmdd="20251231",
@@ -1193,7 +1291,9 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("贏輸台股大盤2025(%)", out.columns)
         self.assertIn("贏輸台股大盤2026YTD(%)", out.columns)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "贏輸台股大盤2025(%)"].iloc[0]), 12.0)
-        self.assertEqual(float(out.loc[out["代碼"] == "00935", "贏輸台股大盤2026YTD(%)"].iloc[0]), 5.0)
+        self.assertEqual(
+            float(out.loc[out["代碼"] == "00935", "贏輸台股大盤2026YTD(%)"].iloc[0]), 5.0
+        )
         self.assertEqual(str(meta.get("market_2025_symbol", "")), "0050")
         self.assertEqual(str(meta.get("market_ytd_symbol", "")), "0050")
 

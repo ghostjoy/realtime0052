@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import logging
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 try:
     from zoneinfo import ZoneInfo
@@ -34,7 +34,7 @@ class _YfQuiet:
         return False
 
 
-def _to_float(value: str | None) -> Optional[float]:
+def _to_float(value: str | None) -> float | None:
     if value is None:
         return None
     value = value.strip()
@@ -46,7 +46,7 @@ def _to_float(value: str | None) -> Optional[float]:
         return None
 
 
-def _to_int(value: str | None) -> Optional[int]:
+def _to_int(value: str | None) -> int | None:
     if value is None:
         return None
     value = value.strip()
@@ -58,11 +58,11 @@ def _to_int(value: str | None) -> Optional[int]:
         return None
 
 
-def _split_levels(levels: str | None) -> List[float]:
+def _split_levels(levels: str | None) -> list[float]:
     if not levels:
         return []
     parts = [p for p in levels.split("_") if p]
-    out: List[float] = []
+    out: list[float] = []
     for p in parts:
         v = _to_float(p)
         if v is not None:
@@ -70,11 +70,11 @@ def _split_levels(levels: str | None) -> List[float]:
     return out
 
 
-def _split_sizes(levels: str | None) -> List[int]:
+def _split_sizes(levels: str | None) -> list[int]:
     if not levels:
         return []
     parts = [p for p in levels.split("_") if p]
-    out: List[int] = []
+    out: list[int] = []
     for p in parts:
         v = _to_int(p)
         if v is not None:
@@ -88,27 +88,27 @@ class TwseQuote:
     name: str
     full_name: str
     ts: datetime
-    last: Optional[float]
-    prev_close: Optional[float]
-    open: Optional[float]
-    high: Optional[float]
-    low: Optional[float]
-    volume: Optional[int]  # cumulative volume
-    upper_limit: Optional[float]
-    lower_limit: Optional[float]
-    bid_prices: List[float]
-    bid_sizes: List[int]
-    ask_prices: List[float]
-    ask_sizes: List[int]
+    last: float | None
+    prev_close: float | None
+    open: float | None
+    high: float | None
+    low: float | None
+    volume: int | None  # cumulative volume
+    upper_limit: float | None
+    lower_limit: float | None
+    bid_prices: list[float]
+    bid_sizes: list[int]
+    ask_prices: list[float]
+    ask_sizes: list[int]
 
     @property
-    def change(self) -> Optional[float]:
+    def change(self) -> float | None:
         if self.last is None or self.prev_close is None:
             return None
         return self.last - self.prev_close
 
     @property
-    def change_pct(self) -> Optional[float]:
+    def change_pct(self) -> float | None:
         if self.change is None or not self.prev_close:
             return None
         return self.change / self.prev_close * 100.0
@@ -119,23 +119,23 @@ class YfQuote:
     symbol: str
     name: str
     ts: datetime
-    last: Optional[float]
-    prev_close: Optional[float]
-    open: Optional[float]
-    high: Optional[float]
-    low: Optional[float]
-    volume: Optional[int]
-    currency: Optional[str]
-    exchange: Optional[str]
+    last: float | None
+    prev_close: float | None
+    open: float | None
+    high: float | None
+    low: float | None
+    volume: int | None
+    currency: str | None
+    exchange: str | None
 
     @property
-    def change(self) -> Optional[float]:
+    def change(self) -> float | None:
         if self.last is None or self.prev_close is None:
             return None
         return self.last - self.prev_close
 
     @property
-    def change_pct(self) -> Optional[float]:
+    def change_pct(self) -> float | None:
         if self.change is None or not self.prev_close:
             return None
         return self.change / self.prev_close * 100.0
@@ -183,9 +183,11 @@ def fetch_twse_quote(stock_id: str, exchange: str = "tse") -> TwseQuote:
         raise DataSourceError(f"TWSE即時報價取得失敗：{e}") from e
 
     if payload.get("rtcode") != "0000" or not payload.get("msgArray"):
-        raise DataSourceError(f"TWSE回應異常：rtcode={payload.get('rtcode')} message={payload.get('rtmessage')}")
+        raise DataSourceError(
+            f"TWSE回應異常：rtcode={payload.get('rtcode')} message={payload.get('rtmessage')}"
+        )
 
-    msg: Dict[str, Any] = payload["msgArray"][0]
+    msg: dict[str, Any] = payload["msgArray"][0]
     ts_ms = _to_int(msg.get("tlong"))
     if ts_ms is None:
         ts = datetime.now(tz=TAIPEI_TZ)
@@ -326,7 +328,7 @@ def fetch_yf_quote(symbol: str) -> YfQuote:
     )
 
 
-def fetch_yf_last_close(symbol: str) -> Tuple[Optional[float], Optional[float]]:
+def fetch_yf_last_close(symbol: str) -> tuple[float | None, float | None]:
     import yfinance as yf
 
     t = yf.Ticker(symbol)
@@ -346,12 +348,12 @@ def fetch_yf_last_close(symbol: str) -> Tuple[Optional[float], Optional[float]]:
     return last, (last - prev) / prev * 100.0
 
 
-def fetch_yf_fundamentals(symbol: str) -> Dict[str, Any]:
+def fetch_yf_fundamentals(symbol: str) -> dict[str, Any]:
     import yfinance as yf
 
     t = yf.Ticker(symbol)
 
-    info: Dict[str, Any] = {}
+    info: dict[str, Any] = {}
     try:
         raw = getattr(t, "info", None) or {}
         if isinstance(raw, dict):
@@ -367,7 +369,7 @@ def fetch_yf_fundamentals(symbol: str) -> Dict[str, Any]:
             return v
         return str(v)
 
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "symbol": symbol,
         "name": pick("shortName") or pick("longName"),
         "sector": pick("sector"),

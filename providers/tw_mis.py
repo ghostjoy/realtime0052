@@ -17,7 +17,9 @@ class TwMisProvider(MarketDataProvider):
         try:
             quote = fetch_twse_quote(request.symbol, exchange=exchange)
         except Exception as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "TW MIS quote request failed", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "TW MIS quote request failed", exc
+            ) from exc
 
         return QuoteSnapshot(
             symbol=request.symbol,
@@ -45,7 +47,11 @@ class TwMisProvider(MarketDataProvider):
         )
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
-        raise ProviderError(self.name, ProviderErrorKind.UNSUPPORTED, "TW MIS provider does not provide historical OHLCV")
+        raise ProviderError(
+            self.name,
+            ProviderErrorKind.UNSUPPORTED,
+            "TW MIS provider does not provide historical OHLCV",
+        )
 
     @staticmethod
     def build_bars_from_ticks(ticks: pd.DataFrame) -> pd.DataFrame:

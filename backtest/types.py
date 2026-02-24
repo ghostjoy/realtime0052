@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
 
 import pandas as pd
 
@@ -35,10 +34,10 @@ class BacktestMetrics:
 @dataclass(frozen=True)
 class BacktestResult:
     equity_curve: pd.DataFrame
-    trades: List[Trade]
+    trades: list[Trade]
     metrics: BacktestMetrics
     drawdown_series: pd.Series
-    yearly_returns: Dict[str, float]
+    yearly_returns: dict[str, float]
     signals: pd.Series
 
 
@@ -47,16 +46,16 @@ class PortfolioBacktestResult:
     equity_curve: pd.DataFrame
     metrics: BacktestMetrics
     drawdown_series: pd.Series
-    yearly_returns: Dict[str, float]
+    yearly_returns: dict[str, float]
     trades: pd.DataFrame
     signals: pd.DataFrame
-    component_results: Dict[str, BacktestResult]
+    component_results: dict[str, BacktestResult]
 
 
 @dataclass(frozen=True)
 class WalkForwardResult:
     split_date: pd.Timestamp
-    best_params: Dict[str, float]
+    best_params: dict[str, float]
     train_result: BacktestResult
     test_result: BacktestResult
     objective: str
@@ -66,7 +65,7 @@ class WalkForwardResult:
 @dataclass(frozen=True)
 class PortfolioWalkForwardResult:
     split_date: pd.Timestamp
-    symbol_results: Dict[str, WalkForwardResult]
+    symbol_results: dict[str, WalkForwardResult]
     train_portfolio: PortfolioBacktestResult
     test_portfolio: PortfolioBacktestResult
 
@@ -76,9 +75,9 @@ class RotationRebalanceRecord:
     signal_date: pd.Timestamp
     effective_date: pd.Timestamp
     market_filter_on: bool
-    selected_symbols: List[str]
-    weights: Dict[str, float]
-    scores: Dict[str, float]
+    selected_symbols: list[str]
+    weights: dict[str, float]
+    scores: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -86,7 +85,7 @@ class RotationBacktestResult:
     equity_curve: pd.DataFrame
     metrics: BacktestMetrics
     drawdown_series: pd.Series
-    yearly_returns: Dict[str, float]
+    yearly_returns: dict[str, float]
     weights: pd.DataFrame
     trades: pd.DataFrame
-    rebalance_records: List[RotationRebalanceRecord]
+    rebalance_records: list[RotationRebalanceRecord]

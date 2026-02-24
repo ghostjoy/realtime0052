@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -23,8 +22,8 @@ class BacktestEngine:
         self,
         bars: pd.DataFrame,
         strategy_name: str,
-        strategy_params: Optional[Dict[str, float]] = None,
-        cost_model: Optional[CostModel] = None,
+        strategy_params: dict[str, float] | None = None,
+        cost_model: CostModel | None = None,
         initial_capital: float = 1_000_000.0,
     ) -> BacktestResult:
         if strategy_name not in STRATEGIES:
@@ -149,8 +148,8 @@ class BacktestEngine:
 def run_backtest(
     bars: pd.DataFrame,
     strategy_name: str,
-    strategy_params: Optional[Dict[str, float]] = None,
-    cost_model: Optional[CostModel] = None,
+    strategy_params: dict[str, float] | None = None,
+    cost_model: CostModel | None = None,
     initial_capital: float = 1_000_000.0,
 ) -> BacktestResult:
     engine = BacktestEngine()

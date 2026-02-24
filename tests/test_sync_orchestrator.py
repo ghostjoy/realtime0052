@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-import unittest
-from typing import Optional
 
 import pandas as pd
 
-from services.sync_orchestrator import bars_need_backfill, sync_symbols_history, sync_symbols_if_needed
+from services.sync_orchestrator import (
+    bars_need_backfill,
+    sync_symbols_history,
+    sync_symbols_if_needed,
+)
 
 
 def _bars(start: str, periods: int) -> pd.DataFrame:
@@ -25,7 +28,7 @@ def _bars(start: str, periods: int) -> pd.DataFrame:
 
 
 class _FakeStore:
-    def __init__(self, bars_map: dict[str, pd.DataFrame], errors: Optional[dict[str, str]] = None):
+    def __init__(self, bars_map: dict[str, pd.DataFrame], errors: dict[str, str] | None = None):
         self._bars_map = bars_map
         self._errors = errors or {}
         self.sync_calls: list[str] = []

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import re
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from services.sync_orchestrator import normalize_symbols, sync_symbols_if_needed
 
@@ -47,7 +47,7 @@ def _normalize_scope(scope: str) -> str:
     return "both"
 
 
-def _parse_us_symbols(us_symbols: Optional[list[str]] = None) -> list[str]:
+def _parse_us_symbols(us_symbols: list[str] | None = None) -> list[str]:
     if us_symbols is None:
         return normalize_symbols(DEFAULT_US_BOOTSTRAP_SYMBOLS)
     return normalize_symbols([str(item or "") for item in us_symbols])
@@ -93,7 +93,9 @@ def fetch_tw_symbol_metadata(timeout_sec: int = 12) -> tuple[list[dict[str, obje
             row["source"] = str(source).strip()
 
     try:
-        resp = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=timeout_sec)
+        resp = requests.get(
+            "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=timeout_sec
+        )
         resp.raise_for_status()
         rows = resp.json()
         if isinstance(rows, list):
@@ -130,7 +132,9 @@ def fetch_tw_symbol_metadata(timeout_sec: int = 12) -> tuple[list[dict[str, obje
         issues.append(f"tpex_daily:{exc}")
 
     try:
-        resp = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=timeout_sec)
+        resp = requests.get(
+            "https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=timeout_sec
+        )
         resp.raise_for_status()
         rows = resp.json()
         if isinstance(rows, list):
@@ -139,7 +143,9 @@ def fetch_tw_symbol_metadata(timeout_sec: int = 12) -> tuple[list[dict[str, obje
                     continue
                 _upsert(
                     str(row.get("公司代號", "") or row.get("Code", "")),
-                    name=str(row.get("公司簡稱", "") or row.get("公司名稱", "") or row.get("Name", "")),
+                    name=str(
+                        row.get("公司簡稱", "") or row.get("公司名稱", "") or row.get("Name", "")
+                    ),
                     exchange="TW",
                     industry=str(row.get("產業別", "")),
                     source="twse_t187ap03_l",
@@ -148,7 +154,9 @@ def fetch_tw_symbol_metadata(timeout_sec: int = 12) -> tuple[list[dict[str, obje
         issues.append(f"twse_profile:{exc}")
 
     try:
-        resp = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=timeout_sec)
+        resp = requests.get(
+            "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=timeout_sec
+        )
         resp.raise_for_status()
         rows = resp.json()
         if isinstance(rows, list):
@@ -157,7 +165,11 @@ def fetch_tw_symbol_metadata(timeout_sec: int = 12) -> tuple[list[dict[str, obje
                     continue
                 _upsert(
                     str(row.get("SecuritiesCompanyCode", "") or row.get("公司代號", "")),
-                    name=str(row.get("CompanyName", "") or row.get("公司簡稱", "") or row.get("SecuritiesCompanyName", "")),
+                    name=str(
+                        row.get("CompanyName", "")
+                        or row.get("公司簡稱", "")
+                        or row.get("SecuritiesCompanyName", "")
+                    ),
                     exchange="OTC",
                     industry=str(row.get("SecuritiesIndustryCode", "")),
                     source="tpex_mopsfin_t187ap03_o",
@@ -176,10 +188,10 @@ def run_market_data_bootstrap(
     years: int = 5,
     parallel: bool = True,
     max_workers: int = 6,
-    tw_limit: Optional[int] = None,
-    us_symbols: Optional[list[str]] = None,
+    tw_limit: int | None = None,
+    us_symbols: list[str] | None = None,
     sync_mode: str = "min_rows",
-    min_rows: Optional[int] = None,
+    min_rows: int | None = None,
 ) -> dict[str, object]:
     scope_token = _normalize_scope(scope)
     years_token = max(1, int(years))
@@ -365,6 +377,7 @@ def run_incremental_refresh(
     workers = max(1, int(max_workers))
 
     try:
+
         def _sync_market(market: str, symbols: list[str]):
             nonlocal synced_success, failed_symbols, skipped_symbols
             if not symbols:

@@ -1,7 +1,6 @@
 """共用輔助函數 - 從 app.py 重構而出"""
 
 import re
-from typing import Any, Optional
 
 
 def normalize_heatmap_etf_code(value: object) -> str:
@@ -84,7 +83,11 @@ def looks_like_tw_symbol(symbol: str) -> bool:
 
 def looks_like_us_symbol(symbol: str) -> bool:
     """檢查是否像美股代碼"""
-    token = symbol.strip().upper()
-    if token.startswith("^"):
-        return bool(re.fullmatch(r"\^[A-Z0-9.\-]{2,10}", token))
-    return bool(re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", token))
+    token = str(symbol or "").strip().upper()
+    if not token:
+        return False
+    if token.endswith(".TW") or token.endswith(".TWO"):
+        return False
+    if looks_like_tw_symbol(token):
+        return False
+    return bool(re.fullmatch(r"\^?[A-Z][A-Z0-9.\-]{0,11}", token))

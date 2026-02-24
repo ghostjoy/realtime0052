@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-import unittest
 
 import numpy as np
 import pandas as pd
@@ -28,7 +28,9 @@ def _bars(n: int = 60, *, seed: int = 5) -> pd.DataFrame:
 
 
 class _FakeStore:
-    def __init__(self, bars_map: dict[str, pd.DataFrame], sync_map: dict[str, pd.DataFrame] | None = None):
+    def __init__(
+        self, bars_map: dict[str, pd.DataFrame], sync_map: dict[str, pd.DataFrame] | None = None
+    ):
         self._bars_map = {k.upper(): v for k, v in bars_map.items()}
         self._sync_map = {k.upper(): v for k, v in (sync_map or {}).items()}
         self.sync_calls: list[str] = []

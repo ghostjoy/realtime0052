@@ -58,7 +58,14 @@ class RotationBacktestTests(unittest.TestCase):
             top_n=3,
             initial_capital=1_000_000.0,
         )
-        first_pick = next((rec for rec in result.rebalance_records if rec.market_filter_on and rec.selected_symbols), None)
+        first_pick = next(
+            (
+                rec
+                for rec in result.rebalance_records
+                if rec.market_filter_on and rec.selected_symbols
+            ),
+            None,
+        )
         self.assertIsNotNone(first_pick)
         assert first_pick is not None
         self.assertEqual(first_pick.selected_symbols, ["S1", "S2", "S3"])
@@ -77,7 +84,14 @@ class RotationBacktestTests(unittest.TestCase):
             top_n=2,
             initial_capital=1_000_000.0,
         )
-        first_pick = next((rec for rec in result.rebalance_records if rec.market_filter_on and rec.selected_symbols), None)
+        first_pick = next(
+            (
+                rec
+                for rec in result.rebalance_records
+                if rec.market_filter_on and rec.selected_symbols
+            ),
+            None,
+        )
         self.assertIsNotNone(first_pick)
         assert first_pick is not None
         self.assertFalse(result.trades.empty)

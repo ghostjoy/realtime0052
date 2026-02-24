@@ -58,7 +58,10 @@ def _render_backtest_view(*, ctx: object):
     symbol_prefill_text = str(st.session_state.get(BT_KEYS.symbol, "")).strip().upper()
     prefill_symbols = _parse_symbols(symbol_prefill_text)
     prefill_target = _infer_market_target_from_symbols(prefill_symbols)
-    if prefill_target in {"TW", "OTC", "US"} and st.session_state.get(BT_KEYS.market) != prefill_target:
+    if (
+        prefill_target in {"TW", "OTC", "US"}
+        and st.session_state.get(BT_KEYS.market) != prefill_target
+    ):
         st.session_state[BT_KEYS.market] = prefill_target
     if prefill_target in {"TW", "OTC", "US"}:
         st.session_state[market_auto_note_key] = prefill_target
@@ -100,17 +103,27 @@ def _render_backtest_view(*, ctx: object):
     market_code = "TW" if is_tw_market else "US"
     tw_symbol_label_enabled = market_code == "TW"
     mode = c2.selectbox("模式", ["單一標的", "投組(多標的)"], index=0, key=BT_KEYS.mode)
-    default_symbol = "0052" if market_selector == "TW" else ("8069" if market_selector == "OTC" else "TSLA")
-    default_symbol_multi = (
-        "0052,2330" if market_selector == "TW" else ("8069,4123" if market_selector == "OTC" else "AAPL,MSFT,TSLA")
+    default_symbol = (
+        "0052" if market_selector == "TW" else ("8069" if market_selector == "OTC" else "TSLA")
     )
-    symbol_input_value = symbol_prefill_text or (default_symbol if mode == "單一標的" else default_symbol_multi)
-    symbol_text = c3.text_input(
-        "代碼（投組用逗號分隔）",
-        value=symbol_input_value,
-        key=BT_KEYS.symbol,
-        on_change=_on_bt_symbol_change,
-    ).strip().upper()
+    default_symbol_multi = (
+        "0052,2330"
+        if market_selector == "TW"
+        else ("8069,4123" if market_selector == "OTC" else "AAPL,MSFT,TSLA")
+    )
+    symbol_input_value = symbol_prefill_text or (
+        default_symbol if mode == "單一標的" else default_symbol_multi
+    )
+    symbol_text = (
+        c3.text_input(
+            "代碼（投組用逗號分隔）",
+            value=symbol_input_value,
+            key=BT_KEYS.symbol,
+            on_change=_on_bt_symbol_change,
+        )
+        .strip()
+        .upper()
+    )
     strategy = c4.selectbox(
         "策略",
         options=DAILY_STRATEGY_OPTIONS,
@@ -151,7 +164,10 @@ def _render_backtest_view(*, ctx: object):
     if auto_cost_key not in st.session_state:
         st.session_state[auto_cost_key] = True
     current_cost_profile = f"{market_selector}:{','.join(symbols)}"
-    if st.session_state.get(auto_cost_key) and st.session_state.get(cost_profile_key) != current_cost_profile:
+    if (
+        st.session_state.get(auto_cost_key)
+        and st.session_state.get(cost_profile_key) != current_cost_profile
+    ):
         fee_default, tax_default, slip_default = _default_cost_params(market_code, symbols)
         st.session_state[fee_key] = float(fee_default)
         st.session_state[tax_key] = float(tax_default)
@@ -159,12 +175,27 @@ def _render_backtest_view(*, ctx: object):
         st.session_state[cost_profile_key] = current_cost_profile
 
     d1, d2 = st.columns(2)
-    start_date = d1.date_input("起始日期", value=date(date.today().year - 5, 1, 1), key=BT_KEYS.start_date)
+    start_date = d1.date_input(
+        "起始日期", value=date(date.today().year - 5, 1, 1), key=BT_KEYS.start_date
+    )
     end_date = d2.date_input("結束日期", value=date.today(), key=BT_KEYS.end_date)
     benchmark_options = (
-        [("auto", "Auto（台股加權 ^TWII，失敗時改用 0050/006208）"), ("twii", "^TWII"), ("0050", "0050（ETF代理）"), ("006208", "006208（ETF代理）"), ("off", "關閉 Benchmark")]
+        [
+            ("auto", "Auto（台股加權 ^TWII，失敗時改用 0050/006208）"),
+            ("twii", "^TWII"),
+            ("0050", "0050（ETF代理）"),
+            ("006208", "006208（ETF代理）"),
+            ("off", "關閉 Benchmark"),
+        ]
         if is_tw_market
-        else [("auto", "Auto（S&P500 ^GSPC，失敗時改用 SPY/QQQ/DIA）"), ("gspc", "^GSPC"), ("spy", "SPY（ETF代理）"), ("qqq", "QQQ（ETF代理）"), ("dia", "DIA（ETF代理）"), ("off", "關閉 Benchmark")]
+        else [
+            ("auto", "Auto（S&P500 ^GSPC，失敗時改用 SPY/QQQ/DIA）"),
+            ("gspc", "^GSPC"),
+            ("spy", "SPY（ETF代理）"),
+            ("qqq", "QQQ（ETF代理）"),
+            ("dia", "DIA（ETF代理）"),
+            ("off", "關閉 Benchmark"),
+        ]
     )
     bench_codes = [x[0] for x in benchmark_options]
     bench_labels = {x[0]: x[1] for x in benchmark_options}
@@ -245,7 +276,11 @@ def _render_backtest_view(*, ctx: object):
             value=120,
             help="長期均線濾網，避免逆大方向追突破。",
         )
-        strategy_params = {"entry_n": float(entry_n), "exit_n": float(exit_n), "trend": float(trend)}
+        strategy_params = {
+            "entry_n": float(entry_n),
+            "exit_n": float(exit_n),
+            "trend": float(trend),
+        }
     elif strategy == "rsi_reversion":
         buy_below = param1.slider(
             "RSI Buy Below",
@@ -351,7 +386,9 @@ def _render_backtest_view(*, ctx: object):
         help="Walk-Forward 會用這個指標在訓練區挑最佳參數。",
     )
     adj1, adj2, adj3 = st.columns(3)
-    use_split_adjustment = adj1.checkbox("分割調整（復權）", value=True, key=BT_KEYS.use_split_adjustment)
+    use_split_adjustment = adj1.checkbox(
+        "分割調整（復權）", value=True, key=BT_KEYS.use_split_adjustment
+    )
     auto_detect_split = adj2.checkbox("自動偵測分割事件", value=True, key=BT_KEYS.auto_detect_split)
     use_total_return_adjustment = adj3.checkbox(
         "還原權息計算（Adj Close）",
@@ -360,7 +397,9 @@ def _render_backtest_view(*, ctx: object):
         help="有 `adj_close` 時，會將 OHLC 轉成還原權息價格。若已還原，會略過額外分割調整避免重複計算。",
     )
     if use_total_return_adjustment and use_split_adjustment:
-        st.caption("已啟用還原權息：若標的 `adj_close` 覆蓋率足夠，將優先使用還原權息並略過分割調整。")
+        st.caption(
+            "已啟用還原權息：若標的 `adj_close` 覆蓋率足夠，將優先使用還原權息並略過分割調整。"
+        )
     sp1, sp2, sp3 = st.columns(3)
     if invest_mode_key not in st.session_state:
         st.session_state[invest_mode_key] = "沿用回測起始日期"
@@ -476,7 +515,12 @@ def _render_backtest_view(*, ctx: object):
     if isinstance(auto_run_payload, dict):
         req_symbol = str(auto_run_payload.get("symbol", "")).strip().upper()
         req_market = str(auto_run_payload.get("market", "")).strip().upper()
-        if len(symbols) == 1 and req_symbol and symbols[0] == req_symbol and (not req_market or req_market == market_selector):
+        if (
+            len(symbols) == 1
+            and req_symbol
+            and symbols[0] == req_symbol
+            and (not req_market or req_market == market_selector)
+        ):
             st.session_state[BACKTEST_RUN_REQUEST_KEY] = run_key
             st.session_state.pop(BACKTEST_AUTORUN_PENDING_KEY, None)
             st.caption(f"已從表格帶入 `{req_symbol}`，自動執行回測。")
@@ -647,7 +691,9 @@ def _render_backtest_view(*, ctx: object):
         if enable_wf
         else base_min_bars
     )
-    bars_by_symbol = {sym: bars for sym, bars in bars_by_symbol.items() if len(bars) >= min_required_bars}
+    bars_by_symbol = {
+        sym: bars for sym, bars in bars_by_symbol.items() if len(bars) >= min_required_bars
+    }
     if not bars_by_symbol:
         if enable_wf:
             st.warning(
@@ -713,7 +759,9 @@ def _render_backtest_view(*, ctx: object):
                     config=BacktestExecutionInput(
                         mode=mode,
                         strategy=strategy,
-                        strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+                        strategy_params=strategy_params
+                        if isinstance(strategy_params, dict)
+                        else {},
                         enable_walk_forward=bool(enable_wf),
                         train_ratio=float(train_ratio),
                         objective=objective,
@@ -778,10 +826,16 @@ def _render_backtest_view(*, ctx: object):
         target_index=pd.DatetimeIndex(strategy_equity.index),
         initial_capital=run_initial_capital,
     )
-    benchmark_raw = _load_benchmark_from_store(market_code=market_code, start=sync_start, end=sync_end, choice=benchmark_choice)
+    benchmark_raw = _load_benchmark_from_store(
+        market_code=market_code, start=sync_start, end=sync_end, choice=benchmark_choice
+    )
     if benchmark_raw.empty:
-        benchmark_raw = service.get_benchmark_series(market=market_code, start=sync_start, end=sync_end, benchmark=benchmark_choice)
-        runner_queue_benchmark_writeback(store=store, market_code=market_code, benchmark=benchmark_raw)
+        benchmark_raw = service.get_benchmark_series(
+            market=market_code, start=sync_start, end=sync_end, benchmark=benchmark_choice
+        )
+        runner_queue_benchmark_writeback(
+            store=store, market_code=market_code, benchmark=benchmark_raw
+        )
     perf_timer.mark("benchmark_loaded")
     benchmark_adj_info: dict[str, object] = {"applied": False}
     if use_total_return_adjustment and not benchmark_raw.empty:
@@ -789,7 +843,11 @@ def _render_backtest_view(*, ctx: object):
     benchmark_split_events = []
     if use_split_adjustment and not benchmark_raw.empty:
         if not bool(benchmark_adj_info.get("applied")):
-            benchmark_symbol = str(benchmark_raw.attrs.get("symbol", "")).strip() if hasattr(benchmark_raw, "attrs") else ""
+            benchmark_symbol = (
+                str(benchmark_raw.attrs.get("symbol", "")).strip()
+                if hasattr(benchmark_raw, "attrs")
+                else ""
+            )
             if not benchmark_symbol:
                 fallback_symbol_map_tw = {"twii": "^TWII", "0050": "0050", "006208": "006208"}
                 fallback_symbol_map_us = {"gspc": "^GSPC", "spy": "SPY", "qqq": "QQQ", "dia": "DIA"}
@@ -810,11 +868,17 @@ def _render_backtest_view(*, ctx: object):
                 adjusted.attrs["symbol"] = benchmark_symbol
             benchmark_raw = adjusted
 
-    benchmark_symbol_now = str(benchmark_raw.attrs.get("symbol", "")).strip() if hasattr(benchmark_raw, "attrs") else ""
+    benchmark_symbol_now = (
+        str(benchmark_raw.attrs.get("symbol", "")).strip()
+        if hasattr(benchmark_raw, "attrs")
+        else ""
+    )
     if tw_symbol_label_enabled and benchmark_symbol_now:
         extra_names = service.get_tw_symbol_names(_collect_tw_symbol_codes([benchmark_symbol_now]))
         if isinstance(extra_names, dict) and extra_names:
-            tw_name_map.update({str(k).strip().upper(): str(v).strip() for k, v in extra_names.items()})
+            tw_name_map.update(
+                {str(k).strip().upper(): str(v).strip() for k, v in extra_names.items()}
+            )
 
     benchmark_equity = pd.Series(dtype=float)
     if not benchmark_raw.empty and "close" in benchmark_raw.columns:
@@ -838,8 +902,12 @@ def _render_backtest_view(*, ctx: object):
             axis=1,
         ).dropna()
         if len(benchmark_rel) >= 2:
-            strategy_ret = float(benchmark_rel["strategy"].iloc[-1] / benchmark_rel["strategy"].iloc[0] - 1.0)
-            benchmark_ret = float(benchmark_rel["benchmark"].iloc[-1] / benchmark_rel["benchmark"].iloc[0] - 1.0)
+            strategy_ret = float(
+                benchmark_rel["strategy"].iloc[-1] / benchmark_rel["strategy"].iloc[0] - 1.0
+            )
+            benchmark_ret = float(
+                benchmark_rel["benchmark"].iloc[-1] / benchmark_rel["benchmark"].iloc[0] - 1.0
+            )
             diff_pct = (strategy_ret - benchmark_ret) * 100.0
             verdict = "贏過大盤" if diff_pct > 0 else ("輸給大盤" if diff_pct < 0 else "與大盤持平")
 
@@ -879,12 +947,18 @@ def _render_backtest_view(*, ctx: object):
                 )
                 continue
             symbol_ret = float(rel_sym["strategy"].iloc[-1] / rel_sym["strategy"].iloc[0] - 1.0)
-            symbol_bench_ret = float(rel_sym["benchmark"].iloc[-1] / rel_sym["benchmark"].iloc[0] - 1.0)
+            symbol_bench_ret = float(
+                rel_sym["benchmark"].iloc[-1] / rel_sym["benchmark"].iloc[0] - 1.0
+            )
             symbol_diff_pct = (symbol_ret - symbol_bench_ret) * 100.0
             component_comparable_count += 1
             if symbol_diff_pct > 0:
                 component_winner_count += 1
-            symbol_verdict = "勝過Benchmark" if symbol_diff_pct > 0 else ("輸給Benchmark" if symbol_diff_pct < 0 else "與Benchmark持平")
+            symbol_verdict = (
+                "勝過Benchmark"
+                if symbol_diff_pct > 0
+                else ("輸給Benchmark" if symbol_diff_pct < 0 else "與Benchmark持平")
+            )
             component_vs_benchmark_rows.append(
                 {
                     "代碼": _tw_label(symbol),
@@ -901,9 +975,16 @@ def _render_backtest_view(*, ctx: object):
             if is_portfolio:
                 k1, k2, k3, k4 = st.columns(4)
                 k1.metric("投組總報酬", f"{result.metrics.total_return * 100:.2f}%")
-                k2.metric("Benchmark總報酬", "—" if benchmark_ret is None else f"{benchmark_ret * 100:.2f}%")
+                k2.metric(
+                    "Benchmark總報酬",
+                    "—" if benchmark_ret is None else f"{benchmark_ret * 100:.2f}%",
+                )
                 k3.metric("超額報酬", "—" if diff_pct is None else f"{diff_pct:+.2f}%")
-                winner_text = "—" if component_comparable_count <= 0 else f"{component_winner_count}/{component_comparable_count}"
+                winner_text = (
+                    "—"
+                    if component_comparable_count <= 0
+                    else f"{component_winner_count}/{component_comparable_count}"
+                )
                 k4.metric("勝過Benchmark檔數", winner_text)
 
                 s1, s2, s3, s4 = st.columns(4)
@@ -941,7 +1022,9 @@ def _render_backtest_view(*, ctx: object):
 
     if is_portfolio and not multi_symbol_compare:
         with st.container(border=True):
-            _render_card_section_header("投組分項相對Benchmark", "多標的時優先看這張：每檔相對基準的超額報酬。")
+            _render_card_section_header(
+                "投組分項相對Benchmark", "多標的時優先看這張：每檔相對基準的超額報酬。"
+            )
             if component_vs_benchmark_rows:
                 comp_rel_df = pd.DataFrame(component_vs_benchmark_rows).sort_values(
                     ["相對Benchmark(%)", "代碼"],
@@ -956,7 +1039,9 @@ def _render_backtest_view(*, ctx: object):
         with st.container(border=True):
             _render_card_section_header("Walk-Forward 卡", "Train/Test 分段結果與最佳參數。")
             split_date = payload["split_date"]
-            st.caption(f"切分點：{pd.Timestamp(split_date).strftime('%Y-%m-%d')} | 目標：{objective}")
+            st.caption(
+                f"切分點：{pd.Timestamp(split_date).strftime('%Y-%m-%d')} | 目標：{objective}"
+            )
             train = payload["train_result"]
             w1, w2 = st.columns(2)
             with w1:
@@ -970,8 +1055,12 @@ def _render_backtest_view(*, ctx: object):
             best_params = payload.get("best_params")
             if best_params:
                 st.markdown("**最佳參數**")
-                if isinstance(best_params, dict) and all(isinstance(v, dict) for v in best_params.values()):
-                    rows = [{"symbol": _tw_label(s), "params": str(p)} for s, p in best_params.items()]
+                if isinstance(best_params, dict) and all(
+                    isinstance(v, dict) for v in best_params.values()
+                ):
+                    rows = [
+                        {"symbol": _tw_label(s), "params": str(p)} for s, p in best_params.items()
+                    ]
                     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
                 else:
                     st.code(str(best_params))
@@ -1007,7 +1096,11 @@ def _render_backtest_view(*, ctx: object):
             format_func=lambda sym: _tw_label(sym),
         )
 
-    focus_bars = bars_by_symbol[focus_symbol].sort_index().dropna(subset=["open", "high", "low", "close"], how="any")
+    focus_bars = (
+        bars_by_symbol[focus_symbol]
+        .sort_index()
+        .dropna(subset=["open", "high", "low", "close"], how="any")
+    )
     if focus_bars.empty:
         if not multi_symbol_compare:
             st.warning(f"{focus_symbol} 沒有可回放的有效K線資料。")
@@ -1047,7 +1140,12 @@ def _render_backtest_view(*, ctx: object):
             c5.radio("位置顯示", options=["K棒", "日期"], horizontal=True, key=display_mode_key)
             c6.selectbox(
                 "買賣點顯示",
-                options=["不顯示", "訊號點（價格圖）", "實際成交點（資產圖）", "同時顯示（訊號+成交）"],
+                options=[
+                    "不顯示",
+                    "訊號點（價格圖）",
+                    "實際成交點（資產圖）",
+                    "同時顯示（訊號+成交）",
+                ],
                 key=marker_mode_key,
             )
             q1, q2, q3 = st.columns([2, 2, 2])
@@ -1070,7 +1168,9 @@ def _render_backtest_view(*, ctx: object):
                 help="數值越大，最新K越靠右；例如 70 代表最新K大約落在畫面 70% 的位置。",
             )
             st.caption("成交連線與技術指標副圖預設固定顯示。")
-            st.caption("買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。")
+            st.caption(
+                "買賣點模式說明：訊號點=策略切換點；實際成交點=依回測規則 T+1 開盤成交；同時顯示=兩者一起顯示。"
+            )
             st.caption(
                 f"回放預設位置：第 {default_play_idx} 根K（完整區間末端）。"
                 f"若要重播動畫可按 Reset 回到第 {replay_reset_idx} 根。"
@@ -1119,10 +1219,16 @@ def _render_backtest_view(*, ctx: object):
         bars_now = focus_bars.iloc[: idx + 1]
         ind_now = focus_ind.reindex(bars_now.index)
         equity_now = result.equity_curve.iloc[: min(idx + 1, len(result.equity_curve))]
-        benchmark_now = benchmark_equity.reindex(equity_now.index).ffill() if not benchmark_equity.empty else pd.Series(dtype=float)
+        benchmark_now = (
+            benchmark_equity.reindex(equity_now.index).ffill()
+            if not benchmark_equity.empty
+            else pd.Series(dtype=float)
+        )
         panel_x_range: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
         if _replay_kline_renderer() == "lightweight":
-            strategy_series = equity_now["equity"] if "equity" in equity_now.columns else pd.Series(dtype=float)
+            strategy_series = (
+                equity_now["equity"] if "equity" in equity_now.columns else pd.Series(dtype=float)
+            )
             if st.session_state[viewport_mode_key] == "固定視窗":
                 view_window = int(st.session_state[viewport_window_key])
                 anchor_ratio = float(st.session_state[viewport_anchor_key]) / 100.0
@@ -1135,7 +1241,10 @@ def _render_backtest_view(*, ctx: object):
                     left_idx -= right_idx - max_play_idx
                     right_idx = max_play_idx
                     left_idx = max(0, left_idx)
-                panel_x_range = (pd.Timestamp(focus_bars.index[left_idx]), pd.Timestamp(focus_bars.index[right_idx]))
+                panel_x_range = (
+                    pd.Timestamp(focus_bars.index[left_idx]),
+                    pd.Timestamp(focus_bars.index[right_idx]),
+                )
             elif len(bars_now.index) >= 2:
                 panel_x_range = (pd.Timestamp(bars_now.index[0]), pd.Timestamp(bars_now.index[-1]))
 
@@ -1158,11 +1267,15 @@ def _render_backtest_view(*, ctx: object):
                     "lightweight 模式目前專注 K線+Equity+Benchmark；"
                     "訊號點/成交點僅在 Plotly 模式顯示。"
                 )
-                st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
+                st.caption(
+                    f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）"
+                )
                 return
             st.caption("lightweight-charts 渲染失敗，已自動回退 Plotly。")
 
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.018, row_heights=[0.68, 0.32])
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.018, row_heights=[0.68, 0.32]
+        )
         fig.add_trace(
             go.Candlestick(
                 x=bars_now.index,
@@ -1286,14 +1399,26 @@ def _render_backtest_view(*, ctx: object):
             if len(buy_idx) > 0:
                 buy_px = bars_now.loc[buy_idx.intersection(bars_now.index), "close"]
                 fig.add_trace(
-                    go.Scatter(x=buy_px.index, y=buy_px.values, mode="markers", name="Buy Signal", marker=signal_buy_style),
+                    go.Scatter(
+                        x=buy_px.index,
+                        y=buy_px.values,
+                        mode="markers",
+                        name="Buy Signal",
+                        marker=signal_buy_style,
+                    ),
                     row=1,
                     col=1,
                 )
             if len(sell_idx) > 0:
                 sell_px = bars_now.loc[sell_idx.intersection(bars_now.index), "close"]
                 fig.add_trace(
-                    go.Scatter(x=sell_px.index, y=sell_px.values, mode="markers", name="Sell Signal", marker=signal_sell_style),
+                    go.Scatter(
+                        x=sell_px.index,
+                        y=sell_px.values,
+                        mode="markers",
+                        name="Sell Signal",
+                        marker=signal_sell_style,
+                    ),
                     row=1,
                     col=1,
                 )
@@ -1326,7 +1451,12 @@ def _render_backtest_view(*, ctx: object):
                     if entry_dt <= cutoff and exit_dt <= cutoff:
                         y1 = eq_series.reindex([entry_dt], method="ffill")
                         y2 = eq_series.reindex([exit_dt], method="ffill")
-                        if not y1.empty and not y2.empty and pd.notna(y1.iloc[0]) and pd.notna(y2.iloc[0]):
+                        if (
+                            not y1.empty
+                            and not y2.empty
+                            and pd.notna(y1.iloc[0])
+                            and pd.notna(y2.iloc[0])
+                        ):
                             fig.add_trace(
                                 go.Scatter(
                                     x=[entry_dt, exit_dt],
@@ -1458,12 +1588,20 @@ def _render_backtest_view(*, ctx: object):
     if payload.get("walk_forward"):
         strategy_model_desc = f"{strategy_model_desc} [walk-forward]"
 
-    _render_card_section_header("Benchmark 對照卡", "策略曲線、基準曲線與買進持有（理論無摩擦）同圖比較。")
+    _render_card_section_header(
+        "Benchmark 對照卡", "策略曲線、基準曲線與買進持有（理論無摩擦）同圖比較。"
+    )
     benchmark = benchmark_raw
-    benchmark_symbol = str(benchmark.attrs.get("symbol", "")).strip() if hasattr(benchmark, "attrs") else ""
-    benchmark_source = str(benchmark.attrs.get("source", "")).strip() if hasattr(benchmark, "attrs") else ""
+    benchmark_symbol = (
+        str(benchmark.attrs.get("symbol", "")).strip() if hasattr(benchmark, "attrs") else ""
+    )
+    benchmark_source = (
+        str(benchmark.attrs.get("source", "")).strip() if hasattr(benchmark, "attrs") else ""
+    )
     hide_strategy_line = str(strategy).strip().lower() == "buy_hold"
-    benchmark_line_label = f"Benchmark ({_tw_label(benchmark_symbol)})" if benchmark_symbol else "Benchmark Equity"
+    benchmark_line_label = (
+        f"Benchmark ({_tw_label(benchmark_symbol)})" if benchmark_symbol else "Benchmark Equity"
+    )
     single_symbol_label = _tw_label(selected_symbols[0]) if selected_symbols else ""
     buy_hold_label = (
         "Buy and Hold (EW Portfolio)"
@@ -1488,17 +1626,28 @@ def _render_backtest_view(*, ctx: object):
     )
     _render_data_health_caption("Benchmark 資料健康度", benchmark_health)
     if benchmark_choice != "off" and benchmark_symbol:
-        st.caption(f"Benchmark 來源：{_tw_label(benchmark_symbol)}（{benchmark_source or 'unknown'}）")
+        st.caption(
+            f"Benchmark 來源：{_tw_label(benchmark_symbol)}（{benchmark_source or 'unknown'}）"
+        )
     if bool(benchmark_adj_info.get("applied")):
-        st.caption(f"Benchmark 已套用還原權息（Adj Close 覆蓋率 {benchmark_adj_info.get('coverage_pct', 0)}%）。")
+        st.caption(
+            f"Benchmark 已套用還原權息（Adj Close 覆蓋率 {benchmark_adj_info.get('coverage_pct', 0)}%）。"
+        )
     if benchmark_split_events:
-        split_text = ", ".join([f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f} ({ev.source})" for ev in benchmark_split_events])
+        split_text = ", ".join(
+            [
+                f"{pd.Timestamp(ev.date).date()} x{ev.ratio:.6f} ({ev.source})"
+                for ev in benchmark_split_events
+            ]
+        )
         st.caption(f"Benchmark split adjustment: {split_text}")
     if benchmark.empty:
         if benchmark_choice == "off":
             st.caption("你已關閉 Benchmark。")
         else:
-            st.caption("目前無法取得 Benchmark（可能是來源限流）；可改選 SPY/QQQ/DIA（美股）或 0050/006208（台股）。")
+            st.caption(
+                "目前無法取得 Benchmark（可能是來源限流）；可改選 SPY/QQQ/DIA（美股）或 0050/006208（台股）。"
+            )
     else:
         comp = pd.concat(
             [
@@ -1536,7 +1685,9 @@ def _render_backtest_view(*, ctx: object):
                 bars_sym = bars_by_symbol.get(sym, pd.DataFrame())
                 if bars_sym.empty or "close" not in bars_sym.columns:
                     continue
-                price_series = pd.to_numeric(bars_sym["close"], errors="coerce").reindex(comp.index).ffill()
+                price_series = (
+                    pd.to_numeric(bars_sym["close"], errors="coerce").reindex(comp.index).ffill()
+                )
                 if price_series.notna().any():
                     comp[f"asset:{sym}"] = price_series
         if comp.empty:
@@ -1657,9 +1808,15 @@ def _render_backtest_view(*, ctx: object):
                     )
                 extrema_target = "Strategy Equity"
                 if hide_strategy_line:
-                    extrema_target = buy_hold_label if any(str(line.get("name")) == buy_hold_label for line in chart_lines) else benchmark_line_label
+                    extrema_target = (
+                        buy_hold_label
+                        if any(str(line.get("name")) == buy_hold_label for line in chart_lines)
+                        else benchmark_line_label
+                    )
                 benchmark_watermark_text = (
-                    _tw_label(selected_symbols[0]) if (not is_portfolio and selected_symbols) else "EW Portfolio"
+                    _tw_label(selected_symbols[0])
+                    if (not is_portfolio and selected_symbols)
+                    else "EW Portfolio"
                 )
                 _render_benchmark_lines_chart(
                     lines=chart_lines,
@@ -1733,7 +1890,9 @@ def _render_backtest_view(*, ctx: object):
 
     def _render_component_and_trade_cards() -> None:
         if is_portfolio:
-            _render_card_section_header("投組分項策略績效卡", "此卡顯示各檔策略本身績效（不含相對Benchmark比較）。")
+            _render_card_section_header(
+                "投組分項策略績效卡", "此卡顯示各檔策略本身績效（不含相對Benchmark比較）。"
+            )
             rows = []
             for symbol, comp in result.component_results.items():
                 rows.append(
@@ -1758,7 +1917,9 @@ def _render_backtest_view(*, ctx: object):
                     enabled=tw_symbol_label_enabled,
                     columns=["symbol"],
                 )
-                trades_df["entry_date"] = pd.to_datetime(trades_df["entry_date"]).dt.date.astype(str)
+                trades_df["entry_date"] = pd.to_datetime(trades_df["entry_date"]).dt.date.astype(
+                    str
+                )
                 trades_df["exit_date"] = pd.to_datetime(trades_df["exit_date"]).dt.date.astype(str)
                 trades_df["pnl_pct%"] = (trades_df["pnl_pct"] * 100.0).round(2)
                 _render_crisp_table(trades_df.drop(columns=["pnl_pct"]), max_height=460)
@@ -1794,16 +1955,24 @@ def _render_backtest_view(*, ctx: object):
             st.caption(perf_timer.summary_text(prefix="perf/backtest"))
         return
 
-    _render_card_section_header("策略 vs 買進持有卡", "看整段與指定區間的報酬率差異（買進持有為理論無摩擦基準）。")
+    _render_card_section_header(
+        "策略 vs 買進持有卡", "看整段與指定區間的報酬率差異（買進持有為理論無摩擦基準）。"
+    )
     is_buy_hold_strategy = str(strategy).strip().lower() == "buy_hold"
     strategy_label = "Buy and Hold（策略）" if is_buy_hold_strategy else "策略"
-    hold_label = "買進持有（理論無摩擦，等權投組）" if is_portfolio else f"買進持有（理論無摩擦，{single_symbol_label or selected_symbols[0]}）"
+    hold_label = (
+        "買進持有（理論無摩擦，等權投組）"
+        if is_portfolio
+        else f"買進持有（理論無摩擦，{single_symbol_label or selected_symbols[0]}）"
+    )
     theoretical_label = (
         "Theoretical No Friction（買進持有，等權投組）"
         if is_portfolio
         else f"Theoretical No Friction（買進持有，{single_symbol_label or selected_symbols[0]}）"
     )
-    st.caption("買進持有為理論無摩擦基準：以回測標的收盤價計算，不含手續費、交易稅、滑價；若為投組則採等權配置。")
+    st.caption(
+        "買進持有為理論無摩擦基準：以回測標的收盤價計算，不含手續費、交易稅、滑價；若為投組則採等權配置。"
+    )
 
     comparison_rows = [
         {
@@ -1821,7 +1990,9 @@ def _render_backtest_view(*, ctx: object):
                 "比較項目": theoretical_label if is_buy_hold_strategy else hold_label,
                 "起始交易日(實際)": buy_hold_equity.index[0].strftime("%Y-%m-%d"),
                 "結束交易日(實際)": buy_hold_equity.index[-1].strftime("%Y-%m-%d"),
-                "報酬率%": round((buy_hold_equity.iloc[-1] / buy_hold_equity.iloc[0] - 1.0) * 100.0, 2),
+                "報酬率%": round(
+                    (buy_hold_equity.iloc[-1] / buy_hold_equity.iloc[0] - 1.0) * 100.0, 2
+                ),
             }
         )
 
@@ -1861,8 +2032,12 @@ def _render_backtest_view(*, ctx: object):
     if interval_end < interval_start:
         st.warning("指定區間迄日早於起日，請調整。")
     else:
-        strategy_interval = interval_return(strategy_equity, start_date=interval_start, end_date=interval_end)
-        hold_interval = interval_return(buy_hold_equity, start_date=interval_start, end_date=interval_end)
+        strategy_interval = interval_return(
+            strategy_equity, start_date=interval_start, end_date=interval_end
+        )
+        hold_interval = interval_return(
+            buy_hold_equity, start_date=interval_start, end_date=interval_end
+        )
         if strategy_interval.get("ok"):
             comparison_rows.append(
                 {
@@ -1899,7 +2074,9 @@ def _render_backtest_view(*, ctx: object):
         st.caption("目前沒有可計算的比較資料。")
 
     with st.container(border=True):
-        _render_card_section_header("DCA 比較卡", "期初投入 + 每月定期定額（每月首個交易日收盤；等權分配）。")
+        _render_card_section_header(
+            "DCA 比較卡", "期初投入 + 每月定期定額（每月首個交易日收盤；等權分配）。"
+        )
         dca_initial_key = f"dca_initial_lump:{run_key}"
         dca_monthly_key = f"dca_monthly_contribution:{run_key}"
         dca_c1, dca_c2 = st.columns(2)
@@ -1929,7 +2106,9 @@ def _render_backtest_view(*, ctx: object):
         monthly_dates_raw = dca_plan.get("monthly_dates", [])
         monthly_dates = list(monthly_dates_raw) if isinstance(monthly_dates_raw, list) else []
         monthly_contribution_count = int(len(monthly_dates))
-        total_dca_contribution = float(dca_initial_lump + dca_monthly_contribution * monthly_contribution_count)
+        total_dca_contribution = float(
+            dca_initial_lump + dca_monthly_contribution * monthly_contribution_count
+        )
         dca_benchmark_label = ""
         if hasattr(benchmark_raw, "attrs"):
             dca_benchmark_label = str(benchmark_raw.attrs.get("symbol", "")).strip()
@@ -1958,7 +2137,11 @@ def _render_backtest_view(*, ctx: object):
         )
 
         dca_benchmark_metrics: dict[str, float] = {}
-        if benchmark_choice != "off" and not benchmark_raw.empty and "close" in benchmark_raw.columns:
+        if (
+            benchmark_choice != "off"
+            and not benchmark_raw.empty
+            and "close" in benchmark_raw.columns
+        ):
             bench_close_series = pd.to_numeric(benchmark_raw["close"], errors="coerce").dropna()
             if not bench_close_series.empty:
                 dca_benchmark_equity = build_dca_benchmark_equity(
@@ -1976,8 +2159,16 @@ def _render_backtest_view(*, ctx: object):
                 )
 
         dca_ret = _safe_float(dca_metrics.get("total_return"))
-        dca_bench_ret = _safe_float(dca_benchmark_metrics.get("total_return")) if dca_benchmark_metrics else None
-        dca_excess_pct = (float(dca_ret) - float(dca_bench_ret)) * 100.0 if dca_ret is not None and dca_bench_ret is not None else None
+        dca_bench_ret = (
+            _safe_float(dca_benchmark_metrics.get("total_return"))
+            if dca_benchmark_metrics
+            else None
+        )
+        dca_excess_pct = (
+            (float(dca_ret) - float(dca_bench_ret)) * 100.0
+            if dca_ret is not None and dca_bench_ret is not None
+            else None
+        )
 
         def _fmt_money(v: Optional[float]) -> str:
             if v is None or not math.isfinite(float(v)):
@@ -1993,7 +2184,9 @@ def _render_backtest_view(*, ctx: object):
         dca_m1.metric("DCA 期末淨值", _fmt_money(_safe_float(dca_metrics.get("end_value"))))
         dca_m2.metric("DCA 總投入", _fmt_money(total_dca_contribution))
         dca_m3.metric("DCA 報酬率", _fmt_pct(dca_ret, scale=100.0))
-        dca_m4.metric("相對 Benchmark DCA", "—" if dca_excess_pct is None else f"{dca_excess_pct:+.2f}%")
+        dca_m4.metric(
+            "相對 Benchmark DCA", "—" if dca_excess_pct is None else f"{dca_excess_pct:+.2f}%"
+        )
 
         st.caption(
             f"投入規則：期初投入 1 次；每月定投採每月首個交易日收盤，且從次月開始。"
@@ -2016,9 +2209,7 @@ def _render_backtest_view(*, ctx: object):
                     "總投入": _fmt_money(total_dca_contribution),
                     "期末淨值": _fmt_money(_safe_float(dca_benchmark_metrics.get("end_value"))),
                     "損益": _fmt_money(_safe_float(dca_benchmark_metrics.get("pnl"))),
-                    "報酬率(%)": "—"
-                    if dca_bench_ret is None
-                    else f"{dca_bench_ret * 100.0:+.2f}%",
+                    "報酬率(%)": "—" if dca_bench_ret is None else f"{dca_bench_ret * 100.0:+.2f}%",
                 }
             )
         st.dataframe(pd.DataFrame(dca_rows), width="stretch", hide_index=True)
@@ -2029,7 +2220,9 @@ def _render_backtest_view(*, ctx: object):
 
     _render_card_section_header("逐年報酬卡")
     if result.yearly_returns:
-        yr = pd.DataFrame([{"年度": y, "報酬率%": round(v * 100.0, 2)} for y, v in result.yearly_returns.items()])
+        yr = pd.DataFrame(
+            [{"年度": y, "報酬率%": round(v * 100.0, 2)} for y, v in result.yearly_returns.items()]
+        )
         st.dataframe(yr.sort_values("年度"), width="stretch", hide_index=True)
     else:
         st.caption("樣本不足，無逐年報酬。")
@@ -2039,5 +2232,6 @@ def _render_backtest_view(*, ctx: object):
     perf_timer.mark("render_complete")
     if perf_timer.enabled:
         st.caption(perf_timer.summary_text(prefix="perf/backtest"))
+
 
 __all__ = ["_render_backtest_view"]

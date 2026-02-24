@@ -9,7 +9,11 @@ from backtest.comparison import (
 )
 from backtest.engine import BacktestEngine, CostModel, run_backtest
 from backtest.portfolio import run_portfolio_backtest
-from backtest.rotation import ROTATION_DEFAULT_UNIVERSE, ROTATION_MIN_BARS, run_tw_etf_rotation_backtest
+from backtest.rotation import (
+    ROTATION_DEFAULT_UNIVERSE,
+    ROTATION_MIN_BARS,
+    run_tw_etf_rotation_backtest,
+)
 from backtest.start_point import apply_start_to_bars_map, resolve_start_index
 from backtest.strategy_library import get_strategy_min_bars
 from backtest.types import (
@@ -22,7 +26,11 @@ from backtest.types import (
     Trade,
     WalkForwardResult,
 )
-from backtest.walkforward import required_walkforward_bars, walk_forward_portfolio, walk_forward_single
+from backtest.walkforward import (
+    required_walkforward_bars,
+    walk_forward_portfolio,
+    walk_forward_single,
+)
 
 __all__ = [
     "BacktestEngine",

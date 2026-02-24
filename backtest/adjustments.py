@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,19 +11,19 @@ import pandas as pd
 class SplitEvent:
     date: pd.Timestamp
     ratio: float  # post / pre, e.g. 1/7
-    source: str   # known / auto
+    source: str  # known / auto
 
 
 # Known split events (minimal curated list for symbols we actively use).
 # ratio = post-split price / pre-split price.
-KNOWN_SPLITS: Dict[Tuple[str, str], Sequence[Tuple[str, float]]] = {
+KNOWN_SPLITS: dict[tuple[str, str], Sequence[tuple[str, float]]] = {
     ("TW", "0050"): (("2025-06-18", 1.0 / 4.0),),
     ("TW", "0052"): (("2025-11-26", 1.0 / 7.0),),
 }
 
 
-def _candidate_ratios() -> List[float]:
-    out: List[float] = []
+def _candidate_ratios() -> list[float]:
+    out: list[float] = []
     for n in range(2, 11):
         out.append(1.0 / n)
     for n in range(2, 11):
@@ -36,7 +36,7 @@ def detect_split_events(
     jump_threshold_low: float = 0.55,
     jump_threshold_high: float = 1.8,
     tolerance: float = 0.08,
-) -> List[SplitEvent]:
+) -> list[SplitEvent]:
     if bars is None or bars.empty or "close" not in bars.columns:
         return []
 
@@ -47,7 +47,7 @@ def detect_split_events(
         return []
 
     candidates = _candidate_ratios()
-    events: List[SplitEvent] = []
+    events: list[SplitEvent] = []
     for dt, r in ratio.items():
         if not np.isfinite(r) or r <= 0:
             continue
@@ -60,15 +60,17 @@ def detect_split_events(
     return events
 
 
-def known_split_events(symbol: str, market: str) -> List[SplitEvent]:
+def known_split_events(symbol: str, market: str) -> list[SplitEvent]:
     key = (market.upper(), symbol.upper())
     rows = KNOWN_SPLITS.get(key, ())
-    return [SplitEvent(date=pd.Timestamp(d, tz="UTC"), ratio=float(r), source="known") for d, r in rows]
+    return [
+        SplitEvent(date=pd.Timestamp(d, tz="UTC"), ratio=float(r), source="known") for d, r in rows
+    ]
 
 
-def _merge_events(events: Iterable[SplitEvent]) -> List[SplitEvent]:
+def _merge_events(events: Iterable[SplitEvent]) -> list[SplitEvent]:
     # If same date has multiple sources, keep known over auto.
-    by_date: Dict[pd.Timestamp, SplitEvent] = {}
+    by_date: dict[pd.Timestamp, SplitEvent] = {}
     for e in sorted(events, key=lambda x: (x.date, x.source)):
         old = by_date.get(e.date)
         if old is None:
@@ -85,11 +87,11 @@ def apply_split_adjustment(
     market: str,
     use_known: bool = True,
     use_auto_detect: bool = True,
-) -> Tuple[pd.DataFrame, List[SplitEvent]]:
+) -> tuple[pd.DataFrame, list[SplitEvent]]:
     if bars is None or bars.empty:
         return bars.copy(), []
 
-    events: List[SplitEvent] = []
+    events: list[SplitEvent] = []
     if use_known:
         events.extend(known_split_events(symbol=symbol, market=market))
     if use_auto_detect:

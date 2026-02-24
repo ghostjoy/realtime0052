@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
 import unittest
+from datetime import date
 
 from services.backtest_cache import (
     build_backtest_run_key,
@@ -36,14 +36,12 @@ class BacktestCacheTests(unittest.TestCase):
             "invest_start_k": 0,
         }
 
-
     def test_stable_json_dumps_and_source_hash_are_stable(self):
         payload_a = {"b": 2, "a": 1}
         payload_b = {"a": 1, "b": 2}
         self.assertEqual(stable_json_dumps(payload_a), stable_json_dumps(payload_b))
         self.assertEqual(build_source_hash(payload_a), build_source_hash(payload_b))
         self.assertNotEqual(build_source_hash({"a": 1, "b": 3}), build_source_hash(payload_a))
-
 
     def test_build_backtest_run_key_is_deterministic_and_sensitive_to_params(self):
         kwargs = self._base_kwargs()
@@ -55,7 +53,6 @@ class BacktestCacheTests(unittest.TestCase):
         kwargs_mutated["fee_rate"] = 0.002
         key_3 = build_backtest_run_key(**kwargs_mutated)
         self.assertNotEqual(key_3, key_1)
-
 
     def test_build_backtest_run_params_and_replay_signature(self):
         params_base = build_backtest_run_params_base(
@@ -81,7 +78,9 @@ class BacktestCacheTests(unittest.TestCase):
             invest_start_k=0,
         )
         self.assertEqual(params_base["objective"], "")
-        replay_params, source_hash = build_replay_params_with_signature(params_base=params_base, schema_version=2)
+        replay_params, source_hash = build_replay_params_with_signature(
+            params_base=params_base, schema_version=2
+        )
         self.assertEqual(replay_params["schema_version"], 2)
         self.assertEqual(replay_params["source_hash"], source_hash)
         self.assertEqual(source_hash, build_source_hash(params_base))

@@ -21,20 +21,26 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(config_loader.get_config_source(), "hydra")
         self.assertEqual(config_loader.cfg_get("features.storage_backend", "sqlite"), "duckdb")
         os.environ["REALTIME0052_SYNC_YEARS"] = "7"
-        years = config_loader.cfg_or_env("sync.years", "REALTIME0052_SYNC_YEARS", default=5, cast=int)
+        years = config_loader.cfg_or_env(
+            "sync.years", "REALTIME0052_SYNC_YEARS", default=5, cast=int
+        )
         self.assertEqual(years, 7)
 
     def test_hydra_source_via_env(self):
         os.environ["REALTIME0052_CONFIG_SOURCE"] = "hydra"
         self.assertEqual(config_loader.get_config_source(), "hydra")
         self.assertEqual(config_loader.cfg_get("features.storage_backend", "sqlite"), "duckdb")
-        self.assertEqual(config_loader.cfg_get("features.kline_renderer_replay", "plotly"), "plotly")
+        self.assertEqual(
+            config_loader.cfg_get("features.kline_renderer_replay", "plotly"), "plotly"
+        )
 
     def test_env_overrides_hydra_value(self):
         os.environ["REALTIME0052_CONFIG_SOURCE"] = "hydra"
         os.environ["REALTIME0052_STORAGE_BACKEND"] = "duckdb"
         self.assertEqual(
-            config_loader.cfg_or_env_str("features.storage_backend", "REALTIME0052_STORAGE_BACKEND", "duckdb"),
+            config_loader.cfg_or_env_str(
+                "features.storage_backend", "REALTIME0052_STORAGE_BACKEND", "duckdb"
+            ),
             "duckdb",
         )
 

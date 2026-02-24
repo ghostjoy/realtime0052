@@ -29,7 +29,9 @@ class LightweightAdapterTests(unittest.TestCase):
             captured["key"] = key
             return None
 
-        with patch("ui.charts.lightweight_adapter.renderLightweightCharts", side_effect=_fake_render):
+        with patch(
+            "ui.charts.lightweight_adapter.renderLightweightCharts", side_effect=_fake_render
+        ):
             ok = render_lightweight_multi_line_chart(
                 lines=[{"name": "Strategy", "series": series, "color": "#16a34a"}],
                 palette={
@@ -66,7 +68,9 @@ class LightweightAdapterTests(unittest.TestCase):
             calls.append((charts, key))
             return None
 
-        with patch("ui.charts.lightweight_adapter.renderLightweightCharts", side_effect=_fake_render):
+        with patch(
+            "ui.charts.lightweight_adapter.renderLightweightCharts", side_effect=_fake_render
+        ):
             ok = render_lightweight_live_chart(
                 ind=bars,
                 palette={
@@ -109,7 +113,9 @@ class LightweightAdapterTests(unittest.TestCase):
             calls.append((charts, key))
             return None
 
-        with patch("ui.charts.lightweight_adapter.renderLightweightCharts", side_effect=_fake_render):
+        with patch(
+            "ui.charts.lightweight_adapter.renderLightweightCharts", side_effect=_fake_render
+        ):
             ok = render_lightweight_kline_equity_chart(
                 bars=bars,
                 strategy=strategy,

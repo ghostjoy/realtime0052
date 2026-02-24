@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Callable, Optional, Protocol
+from typing import Protocol
 
 import pandas as pd
 
@@ -11,11 +12,11 @@ from services.sync_orchestrator import sync_symbols_history
 
 
 class HistoryStoreLike(Protocol):
-    def load_daily_bars(self, symbol: str, market: str, start: datetime, end: datetime) -> pd.DataFrame:
-        ...
+    def load_daily_bars(
+        self, symbol: str, market: str, start: datetime, end: datetime
+    ) -> pd.DataFrame: ...
 
-    def sync_symbol_history(self, symbol: str, market: str, start: datetime, end: datetime):
-        ...
+    def sync_symbol_history(self, symbol: str, market: str, start: datetime, end: datetime): ...
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ def prepare_rotation_bars(
     parallel_sync: bool,
     normalize_ohlcv_frame: Callable[[pd.DataFrame], pd.DataFrame],
     min_required: int = ROTATION_MIN_BARS,
-    progress_callback: Optional[Callable[[float], None]] = None,
+    progress_callback: Callable[[float], None] | None = None,
 ) -> RotationBarsPreparationResult:
     symbol_sync_issues: list[str] = []
     if sync_before_run and symbols:
@@ -68,14 +69,18 @@ def prepare_rotation_bars(
         )
         symbol_sync_issues.extend(lazy_sync_issues)
         for symbol in symbols_need_sync:
-            bars_local = store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            bars_local = store.load_daily_bars(
+                symbol=symbol, market="TW", start=start_dt, end=end_dt
+            )
             bars_cache[symbol] = normalize_ohlcv_frame(bars_local)
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     skipped_symbols: list[str] = []
     total = max(len(symbols), 1)
     for idx, symbol in enumerate(symbols):
-        bars = bars_cache.get(symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"]))
+        bars = bars_cache.get(
+            symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        )
         if bars.empty:
             skipped_symbols.append(symbol)
             if progress_callback:
@@ -104,24 +109,28 @@ def prepare_rotation_bars(
 
 def build_rotation_holding_rank(
     *,
-    weights_df: Optional[pd.DataFrame],
+    weights_df: pd.DataFrame | None,
     selected_symbol_lists: list[list[str]],
     universe_symbols: list[str],
     name_map: dict[str, str],
 ) -> list[dict[str, object]]:
-    selected_counts = {sym: 0 for sym in universe_symbols}
+    selected_counts = dict.fromkeys(universe_symbols, 0)
     for symbols in selected_symbol_lists:
         for sym in symbols:
             if sym in selected_counts:
                 selected_counts[sym] += 1
 
-    total_days = int(len(weights_df)) if isinstance(weights_df, pd.DataFrame) and not weights_df.empty else 0
+    total_days = (
+        int(len(weights_df)) if isinstance(weights_df, pd.DataFrame) and not weights_df.empty else 0
+    )
     total_signals = max(1, len(selected_symbol_lists))
     rows: list[dict[str, object]] = []
     for sym in universe_symbols:
         hold_days = 0
         if total_days > 0 and weights_df is not None and sym in weights_df.columns:
-            hold_days = int((pd.to_numeric(weights_df[sym], errors="coerce").fillna(0.0) > 1e-10).sum())
+            hold_days = int(
+                (pd.to_numeric(weights_df[sym], errors="coerce").fillna(0.0) > 1e-10).sum()
+            )
         selected_months = int(selected_counts.get(sym, 0))
         if hold_days <= 0 and selected_months <= 0:
             continue

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Iterable, Optional
+from collections.abc import Iterable
 
 import pandas as pd
 
@@ -11,7 +11,7 @@ from backtest.strategy_library import get_strategy_min_bars
 from backtest.types import PortfolioWalkForwardResult, WalkForwardResult
 
 
-def strategy_param_grid(strategy_name: str) -> list[Dict[str, float]]:
+def strategy_param_grid(strategy_name: str) -> list[dict[str, float]]:
     if strategy_name in {"sma_cross", "ema_cross"}:
         fast_values = [5.0, 10.0, 15.0, 20.0]
         slow_values = [20.0, 30.0, 50.0, 80.0, 120.0]
@@ -67,17 +67,19 @@ def required_walkforward_bars(strategy_name: str, train_ratio: float = 0.7) -> i
 def walk_forward_single(
     bars: pd.DataFrame,
     strategy_name: str,
-    cost_model: Optional[CostModel] = None,
+    cost_model: CostModel | None = None,
     train_ratio: float = 0.7,
     objective: str = "sharpe",
     initial_capital: float = 1_000_000.0,
-    custom_grid: Optional[Iterable[Dict[str, float]]] = None,
+    custom_grid: Iterable[dict[str, float]] | None = None,
 ) -> WalkForwardResult:
     if train_ratio <= 0.4 or train_ratio >= 0.9:
         raise ValueError("train_ratio must be between 0.4 and 0.9")
     required_bars = required_walkforward_bars(strategy_name, train_ratio)
     if len(bars) < required_bars:
-        raise ValueError(f"not enough bars for walk-forward ({strategy_name} need >= {required_bars})")
+        raise ValueError(
+            f"not enough bars for walk-forward ({strategy_name} need >= {required_bars})"
+        )
 
     frame = bars.sort_index().dropna(subset=["open", "high", "low", "close"], how="any")
     split_idx = int(len(frame) * train_ratio)
@@ -94,8 +96,10 @@ def walk_forward_single(
     test = frame.iloc[split_idx - 1 :]
     split_date = pd.Timestamp(frame.index[split_idx])
 
-    candidates = list(custom_grid) if custom_grid is not None else strategy_param_grid(strategy_name)
-    best_params: Dict[str, float] = {}
+    candidates = (
+        list(custom_grid) if custom_grid is not None else strategy_param_grid(strategy_name)
+    )
+    best_params: dict[str, float] = {}
     best_train = None
     best_score = float("-inf")
 
@@ -138,9 +142,9 @@ def walk_forward_single(
 
 
 def walk_forward_portfolio(
-    bars_by_symbol: Dict[str, pd.DataFrame],
+    bars_by_symbol: dict[str, pd.DataFrame],
     strategy_name: str,
-    cost_model: Optional[CostModel] = None,
+    cost_model: CostModel | None = None,
     train_ratio: float = 0.7,
     objective: str = "sharpe",
     initial_capital: float = 1_000_000.0,
@@ -148,12 +152,16 @@ def walk_forward_portfolio(
     if not bars_by_symbol:
         raise ValueError("bars_by_symbol cannot be empty")
 
-    valid = {symbol: bars for symbol, bars in bars_by_symbol.items() if bars is not None and not bars.empty}
+    valid = {
+        symbol: bars
+        for symbol, bars in bars_by_symbol.items()
+        if bars is not None and not bars.empty
+    }
     if not valid:
         raise ValueError("all symbols have empty bars")
 
     capital_per_symbol = initial_capital / float(len(valid))
-    symbol_results: Dict[str, WalkForwardResult] = {}
+    symbol_results: dict[str, WalkForwardResult] = {}
     split_date = None
     for symbol, bars in valid.items():
         wf = walk_forward_single(
@@ -165,9 +173,7 @@ def walk_forward_portfolio(
             initial_capital=capital_per_symbol,
         )
         symbol_results[symbol] = wf
-        if split_date is None:
-            split_date = wf.split_date
-        elif wf.split_date < split_date:
+        if split_date is None or wf.split_date < split_date:
             split_date = wf.split_date
 
     train_component = {symbol: wf.train_result for symbol, wf in symbol_results.items()}
