@@ -100,8 +100,23 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated .githooks/pre-commit, .github/workflows/ci.yml, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, ... (+4) [id:f09ec6a4f6]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, advice.py, app.py, backtest/__init__.py, ... (+70) [id:0714b64ee6]
 - Auto: updated .githooks/pre-commit, app.py, pyproject.toml, services/backtest_runner.py, services/benchmark_loader.py, storage/duck_store.py, ... (+10) [id:74fc551790]
+- 補齊工程品質基線：
+  - `pyproject.toml` 新增 `pytest` 設定（`pythonpath=["."]`），讓 `uv run pytest` 可直接執行
+  - `pyproject.toml` 將 `mypy` 收斂為可落地的初始掃描範圍（`utils`、`ui/helpers`）
+  - `.githooks/pre-commit` 新增 `uv run mypy`（沿用既有 `ruff` + changelog 自動補記）
+  - 新增 `.github/workflows/ci.yml`，在 Python `3.10/3.12` 執行 `compileall`、`unittest`、`pytest smoke`、`ruff`、`mypy`
+- 修正 `回測工作台` 在 `ctx=globals()` 過渡模式下的 NameError（`runner_parse_symbols` 未定義）：
+  - `app.py` 補回 `ui/pages/backtest.py` 依賴的 runner/cache/chart/import aliases
+  - 避免進入回測頁時因依賴未注入而中斷
+- 移除 `ctx=globals()` 相容層的執行期 deprecation 噪音：
+  - `app.py` 不再主動發出 `Passing ctx=globals() is deprecated` 警告
+  - `ui/pages/live.py`、`ui/pages/backtest.py`、`ui/core/charts.py` 的 `_bind_ctx` 改為靜默相容橋接
+- 修正 `即時看盤` fragment 偶發 NameError（`_normalize_ohlcv_frame` 未定義）：
+  - `app.py` 新增 `_normalize_ohlcv_frame = normalize_ohlcv_frame` 相容 alias
+  - 確保 `ui/pages/live.py` 在 `ctx=globals()` 過渡期可穩定取得 OHLCV 正規化函式
 - Auto: updated README.md, providers/us_twelve.py, tests/test_us_twelve_provider.py [id:c44e63caba]
 - Auto: updated data_sources.py, tests/test_data_sources.py [id:b435b20941]
 - Auto: updated services/sync_orchestrator.py, tests/test_sync_orchestrator.py [id:2487a039f8]

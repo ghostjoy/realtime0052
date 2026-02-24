@@ -42,7 +42,7 @@
 
 ## Commit 時自動更新 CHANGELOG
 
-- 本 repo 提供 `pre-commit` hook：每次 `git commit` 前會自動執行 `ruff check` + `ruff format` + `scripts/auto_changelog.py`
+- 本 repo 提供 `pre-commit` hook：每次 `git commit` 前會自動執行 `ruff check` + `ruff format` + `mypy` + `scripts/auto_changelog.py`
 - 功能：偵測本次 staged 檔案，將一筆 `Changed` 條目自動寫入 `CHANGELOG.md` 的 `Unreleased`
 - 每台新電腦（每個 clone）需執行一次安裝：
 
@@ -379,6 +379,9 @@ cd ~/codexapp/realtime0052_minimax
 ```bash
 cd ~/codexapp/realtime0052_minimax
 uv run python -m unittest discover -s tests -v
+uv run pytest -q
+uv run ruff check .
+uv run mypy
 ```
 
 ## 專案結構（主要）

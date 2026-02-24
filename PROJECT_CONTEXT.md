@@ -139,5 +139,8 @@
 3. 修改後跑：
    - `uv run python -m compileall app.py`
    - `uv run python -m unittest discover -s tests -v`
+   - `uv run pytest -q`
+   - `uv run ruff check .`
+   - `uv run mypy`
 4. 更新 `CHANGELOG.md` 的 `Unreleased`
    - 若已啟用 `./scripts/setup_git_hooks.sh`，commit 前會自動補一筆

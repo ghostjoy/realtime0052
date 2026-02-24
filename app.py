@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from backtest import (
     ROTATION_DEFAULT_UNIVERSE,
@@ -28,18 +29,50 @@ from backtest import (
     PortfolioBacktestResult,
     Trade,
     apply_split_adjustment,
+    apply_start_to_bars_map,
     build_buy_hold_equity,
+    build_dca_benchmark_equity,
+    build_dca_contribution_plan,
+    build_dca_equity,
+    dca_summary_metrics,
     get_strategy_min_bars,
+    interval_return,
+    required_walkforward_bars,
+    run_backtest,
     run_tw_etf_rotation_backtest,
 )
 from backtest.adjustments import known_split_events
 from config_loader import cfg_or_env, cfg_or_env_bool, cfg_or_env_str, get_config_source
+from indicators import add_indicators
 from market_data_types import DataHealth
 from providers import TwMisProvider
-from services import MarketDataService
+from services import LiveOptions, MarketDataService
 from services.backtest_cache import (
+    build_backtest_run_key,
+    build_backtest_run_params_base,
+    build_replay_params_with_signature,
     build_source_hash,
     stable_json_dumps,
+)
+from services.backtest_runner import (
+    BacktestExecutionInput,
+    execute_backtest_run,
+    load_and_prepare_symbol_bars,
+)
+from services.backtest_runner import (
+    default_cost_params as runner_default_cost_params,
+)
+from services.backtest_runner import (
+    load_benchmark_from_store as runner_load_benchmark_from_store,
+)
+from services.backtest_runner import (
+    parse_symbols as runner_parse_symbols,
+)
+from services.backtest_runner import (
+    queue_benchmark_writeback as runner_queue_benchmark_writeback,
+)
+from services.backtest_runner import (
+    series_metrics as runner_series_metrics,
 )
 from services.benchmark_loader import (
     benchmark_candidates_tw,
@@ -63,8 +96,14 @@ from services.sync_orchestrator import (
 from services.sync_orchestrator import (
     sync_symbols_history as orchestrated_sync_symbols_history,
 )
+from services.sync_orchestrator import sync_symbols_if_needed
 from state_keys import BT_KEYS
 from storage import HistoryStore
+from ui.charts import (
+    render_lightweight_kline_equity_chart,
+    render_lightweight_live_chart,
+    render_lightweight_multi_line_chart,
+)
 from ui.helpers import (
     build_backtest_drill_url,
     build_heatmap_drill_url,
@@ -74,7 +113,11 @@ from ui.helpers import (
     strip_symbol_label_token,
 )
 from ui.shared.perf import PerfTimer, perf_debug_enabled
+from ui.shared.session_utils import ensure_defaults
 from utils import normalize_ohlcv_frame
+
+# Compatibility alias for ui/pages/* ctx-injection bridge.
+_normalize_ohlcv_frame = normalize_ohlcv_frame
 
 # Streamlit may emit repetitive INFO logs when a scheduled fragment rerun arrives
 # after a full-app rerun removed that fragment. This is harmless but noisy.
@@ -6305,42 +6348,27 @@ def _render_quality_bar(ctx, refresh_sec: int):
     st.caption(f"最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}（fragment 局部刷新）")
 
 
-import warnings
-
-
-def _warn_ctx_deprecated():
-    warnings.warn(
-        "Passing ctx=globals() is deprecated. Refactor pages to use explicit imports.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-
-
 def _render_benchmark_lines_chart(*args, **kwargs):
     from ui.core.charts import _render_benchmark_lines_chart as impl
 
-    _warn_ctx_deprecated()
     return impl(ctx=globals(), *args, **kwargs)
 
 
 def _render_live_chart(*args, **kwargs):
     from ui.core.charts import _render_live_chart as impl
 
-    _warn_ctx_deprecated()
     return impl(ctx=globals(), *args, **kwargs)
 
 
 def _render_indicator_panels(*args, **kwargs):
     from ui.core.charts import _render_indicator_panels as impl
 
-    _warn_ctx_deprecated()
     return impl(ctx=globals(), *args, **kwargs)
 
 
 def _render_live_view():
     from ui.pages.live import _render_live_view as impl
 
-    _warn_ctx_deprecated()
     return impl(ctx=globals())
 
 
@@ -6825,7 +6853,6 @@ def _load_cached_backtest_payload(
 def _render_backtest_view():
     from ui.pages.backtest import _render_backtest_view as impl
 
-    _warn_ctx_deprecated()
     return impl(ctx=globals())
 
 

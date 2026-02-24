@@ -1,17 +1,10 @@
 from __future__ import annotations
 
-import warnings
-
 _CTX_BOUND = False
 
 
 def _bind_ctx(ctx: object):
-    """Deprecated: Use explicit imports instead of ctx injection."""
-    warnings.warn(
-        "_bind_ctx is deprecated. Pass dependencies explicitly instead of using ctx=globals()",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    """Compatibility bridge: bind app globals into this module."""
     global _CTX_BOUND
     if _CTX_BOUND:
         return

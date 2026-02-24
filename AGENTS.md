@@ -32,6 +32,9 @@
 ```bash
 uv run streamlit run app.py
 uv run python -m unittest discover -s tests -v
+uv run pytest -q
+uv run ruff check .
+uv run mypy
 uv run python -m compileall app.py
 ```
 
