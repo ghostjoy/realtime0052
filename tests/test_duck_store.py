@@ -220,6 +220,36 @@ class DuckStoreTests(unittest.TestCase):
             self.assertTrue((bars["source"] == "yfinance").all())
             self.assertAlmostEqual(float(bars["close"].iloc[-1]), 102.5, places=6)
 
+    def test_queue_daily_bars_writeback_accepts_date_column_without_datetime_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+
+            frame = pd.DataFrame(
+                {
+                    "date": ["2025-01-01", "2025-01-02", "2025-01-03"],
+                    "close": [100.0, 101.0, 102.5],
+                }
+            )
+            queued = store.queue_daily_bars_writeback(
+                symbol="^GSPC", market="US", bars=frame, source="yfinance"
+            )
+            self.assertTrue(queued)
+            self.assertTrue(store.flush_writeback_queue(timeout_sec=3.0))
+
+            bars = store.load_daily_bars(symbol="^GSPC", market="US")
+            self.assertEqual(len(bars), 3)
+            self.assertEqual(
+                [idx.strftime("%Y-%m-%d") for idx in bars.index],
+                ["2025-01-01", "2025-01-02", "2025-01-03"],
+            )
+            self.assertAlmostEqual(float(bars["close"].iloc[-1]), 102.5, places=6)
+
     def test_upsert_and_list_heatmap_hub_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
