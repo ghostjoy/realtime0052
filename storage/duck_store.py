@@ -161,8 +161,7 @@ class DuckHistoryStore:
         return int(row[0] or 1)
 
     def _init_db(self):
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS instruments (
@@ -306,8 +305,6 @@ class DuckHistoryStore:
                 )
                 """
             )
-        finally:
-            conn.close()
 
     def _default_legacy_sqlite_path(self) -> Path:
         env = str(os.getenv("REALTIME0052_DB_PATH", "")).strip()
@@ -813,8 +810,7 @@ class DuckHistoryStore:
     def _get_or_create_instrument(self, symbol: str, market: str, name: str | None = None) -> int:
         symbol = self._normalize_symbol_token(symbol)
         market = self._normalize_market_token(market)
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 "SELECT id FROM instruments WHERE symbol=? AND market=?",
                 (symbol, market),
@@ -831,8 +827,6 @@ class DuckHistoryStore:
                 (inst_id, symbol, market, str(name or ""), "", "UTC", 1),
             )
             return inst_id
-        finally:
-            conn.close()
 
     def _load_first_bar_date(self, symbol: str, market: str) -> datetime | None:
         bars = self.load_daily_bars(symbol=symbol, market=market)
@@ -862,8 +856,7 @@ class DuckHistoryStore:
         source: str | None,
         error: str | None,
     ):
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             conn.execute("DELETE FROM sync_state WHERE instrument_id=?", (int(instrument_id),))
             conn.execute(
                 "INSERT INTO sync_state(instrument_id, last_success_date, last_source, last_error, updated_at) VALUES(?, ?, ?, ?, ?)",
@@ -875,8 +868,6 @@ class DuckHistoryStore:
                     datetime.now(tz=timezone.utc).isoformat(),
                 ),
             )
-        finally:
-            conn.close()
 
     def sync_symbol_history(
         self,
@@ -1170,8 +1161,7 @@ class DuckHistoryStore:
                 )
             )
 
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             for p in payload:
                 conn.execute(
                     "DELETE FROM symbol_metadata WHERE symbol=? AND market=?", (p[0], p[1])
@@ -1180,8 +1170,6 @@ class DuckHistoryStore:
                     "INSERT INTO symbol_metadata(symbol, market, name, exchange, industry, asset_type, currency, source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     p,
                 )
-        finally:
-            conn.close()
         return len(payload)
 
     def load_symbol_metadata(self, symbols: list[str], market: str) -> dict[str, dict[str, object]]:
@@ -1275,8 +1263,7 @@ class DuckHistoryStore:
 
     def start_bootstrap_run(self, scope: str, params: dict[str, object]) -> str:
         run_id = f"bootstrap:{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S%f')}"
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             rid = self._next_id(conn, "bootstrap_runs")
             conn.execute(
                 "INSERT INTO bootstrap_runs(id, run_id, scope, status, started_at, params_json, total_symbols, synced_symbols, failed_symbols, summary_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1293,8 +1280,6 @@ class DuckHistoryStore:
                     "{}",
                 ),
             )
-        finally:
-            conn.close()
         return run_id
 
     def finish_bootstrap_run(
@@ -1311,8 +1296,7 @@ class DuckHistoryStore:
         key = self._normalize_text(run_id)
         if not key:
             return
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             conn.execute(
                 "UPDATE bootstrap_runs SET status=?, finished_at=?, total_symbols=?, synced_symbols=?, failed_symbols=?, summary_json=?, error=? WHERE run_id=?",
                 (
@@ -1326,8 +1310,6 @@ class DuckHistoryStore:
                     key,
                 ),
             )
-        finally:
-            conn.close()
 
     def load_latest_bootstrap_run(self) -> BootstrapRun | None:
         conn = self._connect()
@@ -1380,8 +1362,7 @@ class DuckHistoryStore:
         cost: dict[str, object],
         result: dict[str, object],
     ) -> int:
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             rid = self._next_id(conn, "backtest_runs")
             conn.execute(
                 "INSERT INTO backtest_runs(id, created_at, symbol, market, strategy, params_json, cost_json, result_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1397,8 +1378,6 @@ class DuckHistoryStore:
                 ),
             )
             return int(rid)
-        finally:
-            conn.close()
 
     def save_backtest_replay_run(
         self,
@@ -1409,8 +1388,7 @@ class DuckHistoryStore:
         key = str(run_key or "").strip()
         if not key:
             raise ValueError("run_key is required")
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             rid = self._next_id(conn, "backtest_replay_runs")
             conn.execute(
                 "INSERT INTO backtest_replay_runs(id, run_key, created_at, params_json, payload_json) VALUES(?, ?, ?, ?, ?)",
@@ -1423,8 +1401,6 @@ class DuckHistoryStore:
                 ),
             )
             return int(rid)
-        finally:
-            conn.close()
 
     def load_latest_backtest_replay_run(self, run_key: str) -> BacktestReplayRun | None:
         key = str(run_key or "").strip()
@@ -1474,15 +1450,12 @@ class DuckHistoryStore:
         payload = json.dumps(norm_symbols, ensure_ascii=False)
         now = datetime.now(tz=timezone.utc).isoformat()
         key = str(universe_id or "").strip().upper()
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             conn.execute("DELETE FROM universe_snapshots WHERE universe_id=?", (key,))
             conn.execute(
                 "INSERT INTO universe_snapshots(universe_id, symbols_json, source, fetched_at, updated_at) VALUES(?, ?, ?, ?, ?)",
                 (key, payload, source, now, now),
             )
-        finally:
-            conn.close()
 
     def load_universe_snapshot(self, universe_id: str) -> UniverseSnapshot | None:
         key = str(universe_id or "").strip().upper()
@@ -1513,8 +1486,7 @@ class DuckHistoryStore:
 
     def save_heatmap_run(self, universe_id: str, payload: dict[str, object]) -> int:
         key = str(universe_id or "").strip().upper()
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             rid = self._next_id(conn, "heatmap_runs")
             conn.execute(
                 "INSERT INTO heatmap_runs(id, universe_id, created_at, payload_json) VALUES(?, ?, ?, ?)",
@@ -1526,8 +1498,6 @@ class DuckHistoryStore:
                 ),
             )
             return int(rid)
-        finally:
-            conn.close()
 
     def load_latest_heatmap_run(self, universe_id: str) -> HeatmapRun | None:
         universe_key = str(universe_id or "").strip().upper()
@@ -1572,8 +1542,7 @@ class DuckHistoryStore:
             return
         name = self._normalize_text(etf_name) or code
         now = datetime.now(tz=timezone.utc).isoformat()
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 """
                 SELECT etf_name, pin_as_card, open_count, last_opened_at, created_at
@@ -1619,8 +1588,6 @@ class DuckHistoryStore:
                 """,
                 (next_name, next_pin, next_open, next_last, created_at, now, code),
             )
-        finally:
-            conn.close()
 
     def list_heatmap_hub_entries(self, *, pinned_only: bool = False) -> list[HeatmapHubEntry]:
         where_sql = "WHERE pin_as_card=1" if bool(pinned_only) else ""
@@ -1660,8 +1627,7 @@ class DuckHistoryStore:
         if not code:
             return False
         now = datetime.now(tz=timezone.utc).isoformat()
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             row = conn.execute(
                 "SELECT 1 FROM heatmap_hub_entries WHERE etf_code=? LIMIT 1", (code,)
             ).fetchone()
@@ -1672,8 +1638,6 @@ class DuckHistoryStore:
                 (1 if bool(pin_as_card) else 0, now, code),
             )
             return True
-        finally:
-            conn.close()
 
     def save_rotation_run(
         self,
@@ -1685,8 +1649,7 @@ class DuckHistoryStore:
         universe_key = str(universe_id or "").strip().upper()
         if not universe_key:
             raise ValueError("universe_id is required")
-        conn = self._connect()
-        try:
+        with self._connect_ctx() as conn:
             rid = self._next_id(conn, "rotation_runs")
             conn.execute(
                 "INSERT INTO rotation_runs(id, universe_id, run_key, created_at, params_json, payload_json) VALUES(?, ?, ?, ?, ?, ?)",
@@ -1700,8 +1663,6 @@ class DuckHistoryStore:
                 ),
             )
             return int(rid)
-        finally:
-            conn.close()
 
     def load_latest_rotation_run(self, universe_id: str) -> RotationRun | None:
         universe_key = str(universe_id or "").strip().upper()

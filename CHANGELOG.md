@@ -100,6 +100,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated storage/duck_store.py [id:fe2ef6efc2]
 - Auto: updated .githooks/pre-commit, .github/workflows/ci.yml, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, ... (+4) [id:f09ec6a4f6]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, advice.py, app.py, backtest/__init__.py, ... (+70) [id:0714b64ee6]
 - Auto: updated .githooks/pre-commit, app.py, pyproject.toml, services/backtest_runner.py, services/benchmark_loader.py, storage/duck_store.py, ... (+10) [id:74fc551790]
