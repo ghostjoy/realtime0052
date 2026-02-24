@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -14,9 +15,34 @@ from providers.base import MarketDataProvider, ProviderError, ProviderErrorKind,
 class UsTwelveDataProvider(MarketDataProvider):
     name = "twelvedata"
     base_url = "https://api.twelvedata.com"
+    default_key_file = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "codexapp" / "twelvedatakey"
+
+    @classmethod
+    def _resolve_api_key(cls, api_key: Optional[str] = None) -> Optional[str]:
+        direct = str(api_key or "").strip()
+        if direct:
+            return direct
+
+        env_key = str(os.getenv("TWELVE_DATA_API_KEY") or "").strip()
+        if env_key:
+            return env_key
+
+        key_file = str(
+            os.getenv("TWELVE_DATA_API_KEY_FILE")
+            or os.getenv("TWELVEDATA_API_KEY_FILE")
+            or cls.default_key_file
+        ).strip()
+        if not key_file:
+            return None
+        try:
+            text = Path(key_file).expanduser().read_text(encoding="utf-8")
+        except Exception:
+            return None
+        normalized = text.strip()
+        return normalized or None
 
     def __init__(self, api_key: Optional[str] = None, timeout_sec: int = 12):
-        self.api_key = api_key or os.getenv("TWELVE_DATA_API_KEY")
+        self.api_key = self._resolve_api_key(api_key)
         self.timeout_sec = timeout_sec
 
     def _request(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:

@@ -100,6 +100,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated README.md, providers/us_twelve.py, tests/test_us_twelve_provider.py [id:c44e63caba]
 - Auto: updated data_sources.py, tests/test_data_sources.py [id:b435b20941]
 - Auto: updated services/sync_orchestrator.py, tests/test_sync_orchestrator.py [id:2487a039f8]
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, ui/core/__init__.py, ui/core/charts.py, ui/core/health.py, ... (+4) [id:2c82b8503d]
@@ -191,6 +192,10 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- Twelve Data API key 讀取新增 key file fallback：
+  - 預設讀取 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/twelvedatakey`
+  - 可用 `TWELVE_DATA_API_KEY_FILE` / `TWELVEDATA_API_KEY_FILE` 覆蓋
+  - 仍保留 `TWELVE_DATA_API_KEY` 作為最高優先來源
 - 修正回測/同步時 Yahoo 缺資料的終端噪音洗版：
   - `data_sources.fetch_yf_ohlcv` 改為優先使用 `Ticker.history(...)` 取單一標的日K
   - 對 `yfinance` logger 加入靜音保護，避免 `$XXXX.TW: possibly delisted` 與 `Failed downloads` 重複訊息刷屏

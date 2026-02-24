@@ -234,6 +234,18 @@ export TWELVE_DATA_API_KEY="your_api_key"
 
 未設定時，系統會自動從下一個來源（Yahoo）開始。
 
+若你不想每次 export，也可把 key 放到預設檔案（會自動讀）：
+
+```text
+~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/twelvedatakey
+```
+
+也可用環境變數改成其他檔案路徑：
+
+```bash
+export TWELVE_DATA_API_KEY_FILE="/your/path/twelvedatakey"
+```
+
 若要啟用 Fugle（台股即時 + 台股歷史日K優先），請設定：
 
 ```bash
