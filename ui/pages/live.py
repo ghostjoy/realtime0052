@@ -157,15 +157,6 @@ def _render_live_view(*, ctx: object):
             col6.metric("時間", quote.ts.strftime("%Y-%m-%d %H:%M:%S"))
             st.caption("非投資建議；僅供教育/研究。")
 
-        def _render_reference_card():
-            with st.container(border=True):
-                st.markdown("#### 外部參考")
-                refs = service.get_reference_context("TW" if market == "台股(TWSE)" else "US")
-                if refs.empty:
-                    st.caption("目前無法取得外部參考資料。")
-                else:
-                    st.dataframe(refs, width="stretch", hide_index=True)
-
         bars_intraday = _normalize_ohlcv_frame(ctx.intraday)
         if market == "台股(TWSE)":
             assert stock_id is not None
@@ -191,7 +182,6 @@ def _render_live_view(*, ctx: object):
                         )
         if bars_intraday.empty:
             st.warning("目前無法取得走勢資料。")
-            _render_reference_card()
             return
 
         intraday_split_events = []
@@ -369,7 +359,13 @@ def _render_live_view(*, ctx: object):
                     st.markdown("#### 基本面快照（Yahoo）")
                     st.dataframe(pd.DataFrame([ctx.fundamentals]), width="stretch", hide_index=True)
 
-            _render_reference_card()
+            with st.container(border=True):
+                st.markdown("#### 外部參考")
+                refs = service.get_reference_context("TW" if market == "台股(TWSE)" else "US")
+                if refs.empty:
+                    st.caption("目前無法取得外部參考資料。")
+                else:
+                    st.dataframe(refs, width="stretch", hide_index=True)
 
     live_fragment()
 

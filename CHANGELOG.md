@@ -100,7 +100,6 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
-- Auto: updated ui/pages/live.py [id:5baaa862be]
 - Auto: updated .githooks/pre-commit, .github/workflows/ci.yml, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, ... (+4) [id:f09ec6a4f6]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, advice.py, app.py, backtest/__init__.py, ... (+70) [id:0714b64ee6]
 - Auto: updated .githooks/pre-commit, app.py, pyproject.toml, services/backtest_runner.py, services/benchmark_loader.py, storage/duck_store.py, ... (+10) [id:74fc551790]
@@ -210,7 +209,6 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
-- DuckDB 寫入路徑改為統一使用 `_connect_ctx()` 交易包裝（commit/rollback/close），降低連線遺漏關閉與寫入流程不一致風險；未變更圖表/指標邏輯。
 - 修正熱力圖平行同步偶發 DuckDB 交易衝突（例如 `TransactionContext Error: Conflict on tuple deletion!`）：
   - `services/sync_orchestrator.py` 的可重試錯誤判斷新增 `tuple deletion/update conflict`
   - 平行同步遇到此類衝突時，會對失敗 symbol 自動做一次序列重試，降低 00735/00910 海外成分同步噪音
