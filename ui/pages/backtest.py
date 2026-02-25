@@ -1286,9 +1286,7 @@ def _render_backtest_view(*, ctx: object):
             else None
         )
         atr_ratio = (
-            float(atr_14) / float(close)
-            if atr_14 is not None and close not in {None, 0}
-            else None
+            float(atr_14) / float(close) if atr_14 is not None and close not in {None, 0} else None
         )
 
         bull_align = bool(
@@ -1392,10 +1390,10 @@ def _render_backtest_view(*, ctx: object):
             macd_hist_text = "動能轉弱（hist < 0）"
         else:
             macd_hist_text = "動能中性（hist = 0）"
-        macd_bias_bull = bool(
-            macd is not None and macd_signal is not None and macd > macd_signal
+        macd_bias_bull = bool(macd is not None and macd_signal is not None and macd > macd_signal)
+        macd_bias_text = (
+            "多方較強（macd > signal）" if macd_bias_bull else "多方較弱（macd <= signal）"
         )
-        macd_bias_text = "多方較強（macd > signal）" if macd_bias_bull else "多方較弱（macd <= signal）"
 
         if close is None or bb_upper is None or bb_mid is None or bb_lower is None:
             bb_zone_text = "資料不足"
@@ -1441,10 +1439,7 @@ def _render_backtest_view(*, ctx: object):
             close is not None
             and bb_upper is not None
             and close > bb_upper
-            and (
-                (macd_hist is not None and macd_hist <= 0)
-                or (kd_overheat and kd_death_cross)
-            )
+            and ((macd_hist is not None and macd_hist <= 0) or (kd_overheat and kd_death_cross))
         )
 
         trend_score = 50.0
@@ -1512,7 +1507,13 @@ def _render_backtest_view(*, ctx: object):
             risk_score += 20.0
         if false_breakout_risk:
             risk_score += 12.0
-        if macd_hist is not None and macd_hist < 0 and close is not None and sma_20 is not None and close < sma_20:
+        if (
+            macd_hist is not None
+            and macd_hist < 0
+            and close is not None
+            and sma_20 is not None
+            and close < sma_20
+        ):
             risk_score += 10.0
         risk_score_int = _clamp_score(risk_score)
 
@@ -1557,7 +1558,9 @@ def _render_backtest_view(*, ctx: object):
                 f"{_fmt_num(entry_low)} ~ {_fmt_num(entry_high)}（以 {entry_anchor_name} 為中心）"
             )
             stop_main = float(entry_anchor) - stop_loss_atr_mult * float(atr_14)
-            stop_conservative = float(entry_anchor) - stop_loss_atr_conservative_mult * float(atr_14)
+            stop_conservative = float(entry_anchor) - stop_loss_atr_conservative_mult * float(
+                atr_14
+            )
             stop_text = (
                 f"{_fmt_num(stop_main)}（1.5*ATR） / {_fmt_num(stop_conservative)}（2*ATR，保守）"
             )
@@ -1578,7 +1581,9 @@ def _render_backtest_view(*, ctx: object):
             hold_exit_parts.append("macd_hist >= 0 視為動能維持")
             macd_hist_series = pd.to_numeric(ind_now.get("macd_hist"), errors="coerce").dropna()
             if len(macd_hist_series) >= 2:
-                latest_two_neg = bool(macd_hist_series.iloc[-1] < 0 and macd_hist_series.iloc[-2] < 0)
+                latest_two_neg = bool(
+                    macd_hist_series.iloc[-1] < 0 and macd_hist_series.iloc[-2] < 0
+                )
                 if latest_two_neg:
                     hold_exit_parts.append("macd_hist 已連2根負值，偏向防守")
                 else:
@@ -1605,7 +1610,10 @@ def _render_backtest_view(*, ctx: object):
             (
                 "sma_5 > sma_20 > sma_60 ?",
                 _tf(
-                    sma_5 is not None and sma_20 is not None and sma_60 is not None and sma_5 > sma_20 > sma_60
+                    sma_5 is not None
+                    and sma_20 is not None
+                    and sma_60 is not None
+                    and sma_5 > sma_20 > sma_60
                 ),
                 "均線多頭排列判斷",
                 "加分（趨勢）" if bull_align else "提醒（未形成多頭排列）",
@@ -1614,7 +1622,9 @@ def _render_backtest_view(*, ctx: object):
                 "close > sma_20 ?",
                 _tf(close is not None and sma_20 is not None and close > sma_20),
                 f"close={_fmt_num(close)}, sma_20={_fmt_num(sma_20)}",
-                "加分（守住中期趨勢）" if close is not None and sma_20 is not None and close > sma_20 else "扣分（跌破中期均線）",
+                "加分（守住中期趨勢）"
+                if close is not None and sma_20 is not None and close > sma_20
+                else "扣分（跌破中期均線）",
             ),
             (
                 "乖離 > +6% ?",
@@ -1626,7 +1636,9 @@ def _render_backtest_view(*, ctx: object):
                 "乖離 < -3% ?",
                 _tf(bias_pct is not None and bias_pct < bias_weak_pct),
                 f"bias={_fmt_pct(bias_pct)}",
-                "扣分（偏弱/回測）" if bias_pct is not None and bias_pct < bias_weak_pct else "中性",
+                "扣分（偏弱/回測）"
+                if bias_pct is not None and bias_pct < bias_weak_pct
+                else "中性",
             ),
             (
                 "RSI > 70 ?",
@@ -1644,7 +1656,9 @@ def _render_backtest_view(*, ctx: object):
                 "macd_hist > 0 ?",
                 _tf(macd_hist is not None and macd_hist > 0),
                 f"macd_hist={_fmt_num(macd_hist, 4)}",
-                "加分（動能偏多）" if macd_hist is not None and macd_hist > 0 else "扣分（動能偏弱）",
+                "加分（動能偏多）"
+                if macd_hist is not None and macd_hist > 0
+                else "扣分（動能偏弱）",
             ),
             (
                 "macd > macd_signal ?",
@@ -1656,13 +1670,17 @@ def _render_backtest_view(*, ctx: object):
                 "close > bb_upper ?",
                 _tf(close is not None and bb_upper is not None and close > bb_upper),
                 f"close={_fmt_num(close)}, upper={_fmt_num(bb_upper)}",
-                "提醒（突破或過熱）" if close is not None and bb_upper is not None and close > bb_upper else "中性",
+                "提醒（突破或過熱）"
+                if close is not None and bb_upper is not None and close > bb_upper
+                else "中性",
             ),
             (
                 "close < bb_lower ?",
                 _tf(close is not None and bb_lower is not None and close < bb_lower),
                 f"close={_fmt_num(close)}, lower={_fmt_num(bb_lower)}",
-                "提醒（恐慌/超賣）" if close is not None and bb_lower is not None and close < bb_lower else "中性",
+                "提醒（恐慌/超賣）"
+                if close is not None and bb_lower is not None and close < bb_lower
+                else "中性",
             ),
             (
                 "|close-vwap|/vwap > 3% ?",
@@ -1676,23 +1694,27 @@ def _render_backtest_view(*, ctx: object):
                 "ATR/close > 3.5% ?",
                 _tf(atr_ratio is not None and atr_ratio > atr_high_vol_ratio),
                 f"ATR/close={_fmt_pct(atr_ratio)}",
-                "扣分（波動過大）" if atr_ratio is not None and atr_ratio > atr_high_vol_ratio else "中性",
+                "扣分（波動過大）"
+                if atr_ratio is not None and atr_ratio > atr_high_vol_ratio
+                else "中性",
             ),
         ]
         decision_md_lines = [
             "| 條件 | 目前結果 | 解釋 | 對波段意義 |",
             "|---|---|---|---|",
         ]
-        decision_md_lines.extend(
-            [f"| {c} | {r} | {e} | {m} |" for c, r, e, m in decision_rows]
-        )
+        decision_md_lines.extend([f"| {c} | {r} | {e} | {m} |" for c, r, e, m in decision_rows])
 
         symbol_title = str(focus_symbol or "").strip().upper() or "UNKNOWN"
         trend_line = (
             f"close={_fmt_num(close)} / sma_5={_fmt_num(sma_5)} / sma_20={_fmt_num(sma_20)} / "
             f"sma_60={_fmt_num(sma_60)}，乖離={_fmt_pct(bias_pct)}"
         )
-        kd_relation = "K>D（偏強）" if stoch_k is not None and stoch_d is not None and stoch_k > stoch_d else "K<=D（偏弱）"
+        kd_relation = (
+            "K>D（偏強）"
+            if stoch_k is not None and stoch_d is not None and stoch_k > stoch_d
+            else "K<=D（偏弱）"
+        )
         macd_line = (
             f"macd={_fmt_num(macd, 4)}, signal={_fmt_num(macd_signal, 4)}, hist={_fmt_num(macd_hist, 4)}；"
             f"{macd_hist_text}，{macd_bias_text}"

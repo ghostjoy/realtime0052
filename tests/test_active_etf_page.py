@@ -403,7 +403,12 @@ class ActiveEtfPageTests(unittest.TestCase):
         source = pd.DataFrame(
             [
                 {"編號": 1, "台股代號": "0050", "ETF名稱": "元大台灣50", "2026-01-03(億)": 1200},
-                {"編號": 2, "台股代號": "00935", "ETF名稱": "野村臺灣新科技50", "2026-01-03(億)": 800},
+                {
+                    "編號": 2,
+                    "台股代號": "00935",
+                    "ETF名稱": "野村臺灣新科技50",
+                    "2026-01-03(億)": 800,
+                },
             ]
         )
         out, cfg = _decorate_tw_etf_aum_history_links(source)
@@ -422,7 +427,9 @@ class ActiveEtfPageTests(unittest.TestCase):
             "20260107": True,
             "20260106": True,
         }
-        with patch("app._is_twse_trading_day", side_effect=lambda token: bool(is_trading.get(token))):
+        with patch(
+            "app._is_twse_trading_day", side_effect=lambda token: bool(is_trading.get(token))
+        ):
             out = _recent_twse_trading_days(anchor_yyyymmdd="20260112", count=3, max_scan_days=7)
         self.assertEqual(out, ["20260107", "20260108", "20260109"])
 
@@ -720,6 +727,7 @@ class ActiveEtfPageTests(unittest.TestCase):
                 {"code": "00632R", "name": "元大台灣50反1", "close": 4.0},
             ]
         )
+
         class _EmptyStore:
             def load_daily_bars(self, symbol, market, start=None, end=None):
                 return pd.DataFrame()
@@ -811,6 +819,7 @@ class ActiveEtfPageTests(unittest.TestCase):
 
         start_df = pd.DataFrame([{"code": "0050", "name": "元大台灣50", "close": 100.0}])
         end_df = pd.DataFrame([{"code": "0056", "name": "元大高股息", "close": 30.0}])
+
         class _EmptyStore:
             def load_daily_bars(self, symbol, market, start=None, end=None):
                 return pd.DataFrame()
@@ -1483,9 +1492,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "開盤"].iloc[0]), 113.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 58.0)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "輸贏大盤2025(%)"].iloc[0]), 12.33)
-        self.assertEqual(
-            float(out.loc[out["代碼"] == "00935", "輸贏大盤2026YTD(%)"].iloc[0]), 5.11
-        )
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "輸贏大盤2026YTD(%)"].iloc[0]), 5.11)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "今日漲幅"].iloc[0]), 4.2)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "今日贏大盤%"].iloc[0]), 0.7)
         self.assertEqual(str(meta.get("market_2025_symbol", "")), "0050")

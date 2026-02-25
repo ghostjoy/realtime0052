@@ -444,7 +444,9 @@ def _tw_etf_precision_column_config(frame: pd.DataFrame) -> dict[str, object]:
     if "2026YTD績效(%)" in frame.columns:
         cfg["2026YTD績效(%)"] = st.column_config.NumberColumn("2026YTD績效(%)", format="%.2f")
     if "輸贏大盤2026YTD(%)" in frame.columns:
-        cfg["輸贏大盤2026YTD(%)"] = st.column_config.NumberColumn("輸贏大盤2026YTD(%)", format="%.2f")
+        cfg["輸贏大盤2026YTD(%)"] = st.column_config.NumberColumn(
+            "輸贏大盤2026YTD(%)", format="%.2f"
+        )
     return cfg
 
 
@@ -3358,7 +3360,9 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
         token = str(target_yyyymmdd or "").strip()
         if re.fullmatch(r"\d{8}", token):
             params["date"] = token
-        resp = requests.get("https://www.twse.com.tw/zh/ETFortune/etfExcel", params=params, timeout=20)
+        resp = requests.get(
+            "https://www.twse.com.tw/zh/ETFortune/etfExcel", params=params, timeout=20
+        )
         resp.raise_for_status()
         text = resp.content.decode("cp950", errors="ignore")
         rows = csv.reader(StringIO(text))
@@ -3471,7 +3475,12 @@ def _attach_tw_etf_aum_column(
     out[column_name] = _truncate_integer_series(out[code_col].map(_lookup_tw_etf_aum_billion))
 
     anchor_col = next(
-        (col for col in ("管理費(%)", "管理費", "ETF", "ETF名稱", "代碼", "ETF代碼") if col in out.columns), ""
+        (
+            col
+            for col in ("管理費(%)", "管理費", "ETF", "ETF名稱", "代碼", "ETF代碼")
+            if col in out.columns
+        ),
+        "",
     )
     if not anchor_col:
         return out
@@ -3619,6 +3628,7 @@ def _build_tw_etf_aum_history_wide(
     )
     pivot = pivot.rename(columns={"etf_code": "台股代號", "etf_name": "ETF名稱"})
     date_cols = [col for col in pivot.columns if col not in {"台股代號", "ETF名稱"}]
+
     def _date_sort_key(value: object) -> tuple[int, str]:
         dt = pd.to_datetime(str(value), errors="coerce")
         if pd.isna(dt):
@@ -3872,7 +3882,9 @@ def _attach_tw_etf_management_fee_column(
         return frame
 
     out = frame.copy()
-    out[column_name] = _truncate_series(out[code_col].map(_lookup_tw_etf_management_fee_pct), digits=2)
+    out[column_name] = _truncate_series(
+        out[code_col].map(_lookup_tw_etf_management_fee_pct), digits=2
+    )
 
     anchor_col = next(
         (col for col in ("ETF", "ETF名稱", "代碼", "ETF代碼") if col in out.columns), ""
@@ -4506,7 +4518,15 @@ def _with_tw_today_fields(
     else:
         out["今日贏大盤%"] = np.nan
 
-    drop_cols = ["期初收盤", "復權期初", "期末收盤", "復權事件", "start_close", "adj_start_close", "end_close"]
+    drop_cols = [
+        "期初收盤",
+        "復權期初",
+        "期末收盤",
+        "復權事件",
+        "start_close",
+        "adj_start_close",
+        "end_close",
+    ]
     return out.drop(columns=[col for col in drop_cols if col in out.columns], errors="ignore")
 
 
@@ -4593,7 +4613,8 @@ def _decorate_tw_etf_top10_ytd_table(
     etf_df["贏輸台股大盤(%)"] = np.nan
     if market_return_pct is not None and math.isfinite(float(market_return_pct)):
         etf_df["贏輸台股大盤(%)"] = _truncate_series(
-            pd.to_numeric(etf_df[performance_col_label], errors="coerce") - float(market_return_pct),
+            pd.to_numeric(etf_df[performance_col_label], errors="coerce")
+            - float(market_return_pct),
             digits=2,
         )
     underperform_label = str(underperform_col_label or "").strip()
@@ -4704,8 +4725,8 @@ def _build_tw_etf_all_types_performance_table(
     )
     daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(ytd_end_used)
     _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or ytd_end_used)
-    market_daily_return, market_daily_symbol, _, _, market_daily_issues = _load_tw_market_daily_return(
-        ytd_end_used, force_sync=False
+    market_daily_return, market_daily_symbol, _, _, market_daily_issues = (
+        _load_tw_market_daily_return(ytd_end_used, force_sync=False)
     )
 
     table_df = ytd_df.rename(columns={"區間報酬(%)": "2026YTD績效(%)"}).copy()
@@ -5586,7 +5607,9 @@ def _render_tw_etf_top10_page(
                 f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{daily_prev_used} -> {daily_end_used}）"
             )
         if market_daily_issues:
-            _render_sync_issues("更新今日大盤漲幅時有部分同步錯誤", market_daily_issues, preview_limit=2)
+            _render_sync_issues(
+                "更新今日大盤漲幅時有部分同步錯誤", market_daily_issues, preview_limit=2
+            )
         st.dataframe(top10_display, width="stretch", hide_index=True)
 
         with st.expander("分類說明", expanded=False):
@@ -5707,7 +5730,12 @@ def _render_tw_etf_all_types_view():
         market_daily_symbol = str(meta.get("market_daily_symbol", "")).strip()
         daily_prev_used = str(meta.get("daily_prev_used", "")).strip()
         daily_end_used = str(meta.get("daily_end_used", "")).strip()
-        if market_daily_return is not None and market_daily_symbol and daily_prev_used and daily_end_used:
+        if (
+            market_daily_return is not None
+            and market_daily_symbol
+            and daily_prev_used
+            and daily_end_used
+        ):
             st.caption(
                 f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{daily_prev_used} -> {daily_end_used}）"
             )
@@ -5731,11 +5759,15 @@ def _render_tw_etf_all_types_view():
                 _set_tw_etf_aum_track_anchor_date(store, trade_date=today_trade_date)
                 aum_track_anchor_date = today_trade_date
                 if removed > 0:
-                    st.info(f"基金規模追蹤已重新起算（刪除 {removed} 筆舊資料），第一日為 {today_trade_date}。")
+                    st.info(
+                        f"基金規模追蹤已重新起算（刪除 {removed} 筆舊資料），第一日為 {today_trade_date}。"
+                    )
             except Exception as exc:
                 aum_track_anchor_date = today_trade_date
                 st.warning(f"初始化基金規模追蹤起算日失敗：{exc}")
-        aum_track_anchor_date = str(aum_track_anchor_date or today_trade_date).strip() or today_trade_date
+        aum_track_anchor_date = (
+            str(aum_track_anchor_date or today_trade_date).strip() or today_trade_date
+        )
 
         if reset_aum_track:
             try:
@@ -5761,7 +5793,9 @@ def _render_tw_etf_all_types_view():
                             trade_date=today_trade_date,
                             keep_days=0,  # <=0: DB 永久保留
                         )
-                        st.success(f"已累積 ETF 規模追蹤：{updated} 檔（日期 {today_trade_date}）。")
+                        st.success(
+                            f"已累積 ETF 規模追蹤：{updated} 檔（日期 {today_trade_date}）。"
+                        )
             except Exception as exc:
                 st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
 
@@ -5777,7 +5811,9 @@ def _render_tw_etf_all_types_view():
         history_with_links, history_link_config = _decorate_tw_etf_aum_history_links(history_wide)
         st.markdown("#### 基金規模追蹤（最近 10 交易日）")
         st.caption("欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以粉紅標示。")
-        st.caption(f"起算日：{aum_track_anchor_date}；資料庫採累積保存（不覆蓋），畫面僅顯示最近 10 個交易日。")
+        st.caption(
+            f"起算日：{aum_track_anchor_date}；資料庫採累積保存（不覆蓋），畫面僅顯示最近 10 個交易日。"
+        )
         if history_wide.empty:
             st.info("尚無規模追蹤資料，請按「更新規模追蹤」。")
         else:
@@ -5824,7 +5860,8 @@ def _render_heatmap_hub_view():
         entries = [
             row
             for row in _load_heatmap_hub_entries(pinned_only=False)
-            if _normalize_heatmap_etf_code(getattr(row, "etf_code", "")) not in HEATMAP_CARD_BLOCKLIST
+            if _normalize_heatmap_etf_code(getattr(row, "etf_code", ""))
+            not in HEATMAP_CARD_BLOCKLIST
         ]
         if not entries:
             st.caption(
@@ -6067,8 +6104,8 @@ def _render_top10_etf_2026_ytd_view(
         )
         daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
         _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or end_used)
-        market_daily_return, market_daily_symbol, _, _, market_daily_issues = _load_tw_market_daily_return(
-            end_used, force_sync=False
+        market_daily_return, market_daily_symbol, _, _, market_daily_issues = (
+            _load_tw_market_daily_return(end_used, force_sync=False)
         )
         market_issues.extend(market_daily_issues)
         table_df = _with_tw_today_fields(
@@ -6842,8 +6879,8 @@ def _render_active_etf_2026_ytd_view():
         table_df = pd.concat([pd.DataFrame([benchmark_row]), etf_df], ignore_index=True)
         daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
         _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or end_used)
-        market_daily_return, market_daily_symbol, _, _, market_daily_issues = _load_tw_market_daily_return(
-            end_used, force_sync=False
+        market_daily_return, market_daily_symbol, _, _, market_daily_issues = (
+            _load_tw_market_daily_return(end_used, force_sync=False)
         )
         market_issues.extend(market_daily_issues)
         table_df = _with_tw_today_fields(
@@ -9864,6 +9901,7 @@ def _render_0050_heatmap_view():
 
 def _render_0052_heatmap_view():
     _render_tw_etf_heatmap_view("0052", page_desc="科技ETF")
+
 
 def _render_db_browser_view():
     store = _history_store()
