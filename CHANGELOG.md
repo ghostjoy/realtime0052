@@ -100,10 +100,18 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated app.py, tests/test_active_etf_page.py, ui/pages/backtest.py [id:9de9c361b8]
 - Auto: updated storage/duck_store.py [id:fe2ef6efc2]
 - Auto: updated .githooks/pre-commit, .github/workflows/ci.yml, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, ... (+4) [id:f09ec6a4f6]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, advice.py, app.py, backtest/__init__.py, ... (+70) [id:0714b64ee6]
 - Auto: updated .githooks/pre-commit, app.py, pyproject.toml, services/backtest_runner.py, services/benchmark_loader.py, storage/duck_store.py, ... (+10) [id:74fc551790]
+- `台股 ETF 全類型總表` 的基金規模追蹤表升級：
+  - `更新規模追蹤` 改為以當日（若遇非交易日則取最近交易日）逐日累積寫入基金規模快照
+  - 基金規模資料改為資料庫永久保留（`keep_days<=0` 不裁切），後續可按需求回查全量歷史
+  - 追蹤表畫面改為僅顯示最近 `10` 個交易日
+  - 追蹤表新增左側 `編號` 欄，日期欄改為 `YYYY-MM-DD(億)`，數值顯示整數（無小數）
+  - `台股代號` 改為可點擊帶入回測，`ETF名稱` 改為可點擊開啟 ETF 成分股熱力圖
+  - 色塊規則調整為僅標示 `單日規模成長 > 10%`（粉紅底）
 - 補齊工程品質基線：
   - `pyproject.toml` 新增 `pytest` 設定（`pythonpath=["."]`），讓 `uv run pytest` 可直接執行
   - `pyproject.toml` 將 `mypy` 收斂為可落地的初始掃描範圍（`utils`、`ui/helpers`）
@@ -121,6 +129,28 @@
 - Auto: updated README.md, providers/us_twelve.py, tests/test_us_twelve_provider.py [id:c44e63caba]
 - Auto: updated data_sources.py, tests/test_data_sources.py [id:b435b20941]
 - Auto: updated services/sync_orchestrator.py, tests/test_sync_orchestrator.py [id:2487a039f8]
+- 同步/儲存效能優化（第一階段）：
+  - `DuckHistoryStore` 初始化新增常用查詢索引（`symbol_metadata`、`sync_state`、`heatmap_runs`、`rotation_runs`、`backtest_replay_runs` 等），降低資料量成長後的全表掃描風險。
+  - 新增 `load_sync_state(...)` 與 `load_daily_coverage(...)`（DuckDB/SQLite 都支援），供同步規劃優先走輕量 metadata/coverage 查詢。
+  - `sync_symbols_if_needed(...)` 優先使用 `sync_state` + `daily_coverage` 判斷是否需同步，僅在缺少 coverage API 時才回退 `load_daily_bars(...)`。
+  - `DuckHistoryStore.load_daily_bars(...)` 改為 DuckDB `read_parquet` 視窗化查詢（先篩日期再載入），降低短區間查詢的不必要反序列化成本。
+  - 新增對應測試：`tests/test_sync_orchestrator.py`（fast-path/coverage）與 `tests/test_duck_store.py`（coverage/sync_state）。
+- 效能優化（第二階段）：
+  - `DuckHistoryStore.queue_daily_bars_writeback(...)` 改為同 key coalescing（併單）機制：同一標的重複寫回不再丟棄，改為合併後由背景 worker 批次落盤。
+  - 背景寫回 executor 由固定單 worker 改為可設定並行（`REALTIME0052_DUCK_WRITEBACK_WORKERS`，預設 2），提升多標的回寫吞吐。
+  - 熱力圖 `compute_heatmap_rows(...)` 新增 `max_workers`，可平行計算多檔標的回測列，縮短大成分池等待時間。
+  - 輪動 `prepare_rotation_bars(...)` 新增平行預處理（split adjustment）路徑，並保留輸出順序。
+  - 回測頁 `session_state` 大型 payload 快取改為僅保留最近 3 筆，降低長時間操作後的記憶體膨脹與 rerun 序列化負擔。
+  - 新增對應測試：`tests/test_duck_store.py`（writeback coalescing）、`tests/test_heatmap_runner.py`（parallel heatmap）、`tests/test_rotation_runner.py`（parallel rotation）。
+- 效能優化（第三階段）：
+  - `DuckHistoryStore` 的日K/分時寫入改為 `append delta parquet`，不再每次 upsert 都讀舊檔並整檔重寫。
+  - 讀取日K/分時時，會合併 `base + delta` 並以 `date/ts_utc` 去重（依 `fetched_at` 最新優先），確保查詢結果一致。
+  - 新增 compact 機制：當 delta 檔數達門檻時自動 roll-up 成 base 檔（可用環境變數 `REALTIME0052_DAILY_DELTA_COMPACT_THRESHOLD`、`REALTIME0052_INTRADAY_DELTA_COMPACT_THRESHOLD` 調整）。
+  - 新增測試：`tests/test_duck_store.py`（daily/intraday delta compaction 路徑）。
+- `台股 ETF 全類型總表` 新增「基金規模追蹤（最近22交易日）」：
+  - 新增 `tw_etf_aum_history` 持久化資料表（SQLite/DuckDB），記錄 `etf_code/etf_name/trade_date/aum_billion`，目前改為可永久累積保留。
+  - 全類型頁面新增「更新規模追蹤」按鈕，手動更新當日規模快照；追蹤表顯示寬表日期欄位並標示異常變動（`>+10%` 粉紅）。
+  - 新增測試：`tests/test_history_store.py`、`tests/test_duck_store.py`（AUM history API），`tests/test_active_etf_page.py`（寬表/異常標示）。
 - Auto: updated PROJECT_CONTEXT.md, README.md, app.py, ui/core/__init__.py, ui/core/charts.py, ui/core/health.py, ... (+4) [id:2c82b8503d]
 - 架構重構（第一波，瘦身 `app.py`）：
   - 新增 `ui/pages/live.py`、`ui/pages/backtest.py`，將 `即時看盤` 與 `回測工作台` 主流程搬離 `app.py`

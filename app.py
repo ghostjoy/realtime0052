@@ -281,6 +281,7 @@ def _store_data_source(store: object, dataset: str) -> str:
 BACKTEST_DRILL_CODE_COLUMNS = {
     "代碼",
     "ETF代碼",
+    "台股代號",
     "symbol",
     "Symbol",
     "代號",
@@ -294,6 +295,20 @@ BACKTEST_AUTORUN_PENDING_KEY = "bt_autorun_pending"
 HEATMAP_DRILL_QUERY_KEYS = ("hm_etf", "hm_name", "hm_label", "hm_open", "hm_src")
 HEATMAP_HUB_SESSION_ACTIVE_KEY = "heatmap_hub_active_etf"
 HEATMAP_DYNAMIC_CARD_PREFIX = "ETF熱力圖:"
+HEATMAP_CARD_BLOCKLIST = {"00993A"}
+HEATMAP_STATIC_CARD_CODES = {"00910", "00935", "00735", "0050", "0052"}
+HEATMAP_STATIC_PAGE_BY_CODE = {
+    "00910": "00910 熱力圖",
+    "00935": "00935 熱力圖",
+    "00735": "00735 熱力圖",
+    "0050": "0050 熱力圖",
+    "0052": "0052 熱力圖",
+}
+
+
+def _heatmap_page_key_for_code(code: str) -> str:
+    code_text = str(code or "").strip().upper()
+    return HEATMAP_STATIC_PAGE_BY_CODE.get(code_text, f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code_text}")
 
 
 def _normalize_heatmap_etf_code(value: object) -> str:
@@ -329,28 +344,34 @@ def _normalize_market_tag_for_drill(value: object) -> str:
     return ""
 
 
-def _decorate_tw_etf_name_heatmap_links(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+def _decorate_tw_etf_name_heatmap_links(
+    df: pd.DataFrame,
+    *,
+    code_col: str = "代碼",
+    name_col: str = "ETF",
+    src: str = "all_types_table",
+) -> tuple[pd.DataFrame, dict[str, object]]:
     if not isinstance(df, pd.DataFrame) or df.empty:
         return df, {}
-    if ("ETF" not in df.columns) or ("代碼" not in df.columns):
+    if (name_col not in df.columns) or (code_col not in df.columns):
         return df, {}
     out = df.copy()
     links: list[str | None] = []
     linked_count = 0
     for _, row in out.iterrows():
-        code = _normalize_heatmap_etf_code(row.get("代碼"))
-        name = str(row.get("ETF", "")).strip()
+        code = _normalize_heatmap_etf_code(row.get(code_col))
+        name = str(row.get(name_col, "")).strip()
         if not code:
             links.append(None)
             continue
-        links.append(build_heatmap_drill_url(code, name))
+        links.append(build_heatmap_drill_url(code, name, src=src))
         linked_count += 1
     if linked_count <= 0:
         return out, {}
-    out["ETF"] = links
+    out[name_col] = links
     return out, {
-        "ETF": st.column_config.LinkColumn(
-            label="ETF",
+        name_col: st.column_config.LinkColumn(
+            label=str(name_col),
             help="點擊 ETF 名稱可在新分頁開啟對應熱力圖（內容比照 00935 熱力圖）",
             display_text=r"hm_label=([^&]+)",
         )
@@ -408,20 +429,45 @@ def _decorate_dataframe_backtest_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
 _ORIGINAL_ST_DATAFRAME = st.dataframe
 
 
+def _tw_etf_precision_column_config(frame: pd.DataFrame) -> dict[str, object]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return {}
+    cfg: dict[str, object] = {}
+    if "管理費(%)" in frame.columns:
+        cfg["管理費(%)"] = st.column_config.NumberColumn("管理費(%)", format="%.2f")
+    if "ETF規模(億)" in frame.columns:
+        cfg["ETF規模(億)"] = st.column_config.NumberColumn("ETF規模(億)", format="%d")
+    if "2025績效(%)" in frame.columns:
+        cfg["2025績效(%)"] = st.column_config.NumberColumn("2025績效(%)", format="%.2f")
+    if "輸贏大盤2025(%)" in frame.columns:
+        cfg["輸贏大盤2025(%)"] = st.column_config.NumberColumn("輸贏大盤2025(%)", format="%.2f")
+    if "2026YTD績效(%)" in frame.columns:
+        cfg["2026YTD績效(%)"] = st.column_config.NumberColumn("2026YTD績效(%)", format="%.2f")
+    if "輸贏大盤2026YTD(%)" in frame.columns:
+        cfg["輸贏大盤2026YTD(%)"] = st.column_config.NumberColumn("輸贏大盤2026YTD(%)", format="%.2f")
+    return cfg
+
+
 def _dataframe_with_backtest_drilldown(data: Any = None, *args, **kwargs):
     opts = dict(kwargs)
     disable_drilldown = bool(opts.pop("disable_backtest_drilldown", False))
     frame = data
     if isinstance(frame, pd.DataFrame) and (not disable_drilldown):
+        precision_config = _tw_etf_precision_column_config(frame)
         frame, auto_config = _decorate_dataframe_backtest_links(frame)
+        merged_config: dict[str, object] = {}
+        existing = opts.get("column_config")
+        if isinstance(existing, dict):
+            merged_config.update(existing)
+        if precision_config:
+            for col_name, cfg in precision_config.items():
+                if col_name not in merged_config:
+                    merged_config[col_name] = cfg
         if auto_config:
-            merged_config: dict[str, object] = {}
-            existing = opts.get("column_config")
-            if isinstance(existing, dict):
-                merged_config.update(existing)
             for col_name, cfg in auto_config.items():
                 if col_name not in merged_config:
                     merged_config[col_name] = cfg
+        if merged_config:
             opts["column_config"] = merged_config
     return _ORIGINAL_ST_DATAFRAME(frame, *args, **opts)
 
@@ -513,6 +559,8 @@ def _upsert_heatmap_hub_entry(
     code = _normalize_heatmap_etf_code(etf_code)
     if not code:
         return
+    if code in HEATMAP_CARD_BLOCKLIST:
+        return
     store = _history_store()
     writer = getattr(store, "upsert_heatmap_hub_entry", None)
     if not callable(writer):
@@ -531,6 +579,8 @@ def _upsert_heatmap_hub_entry(
 def _set_heatmap_hub_pin(*, etf_code: str, pin_as_card: bool) -> bool:
     code = _normalize_heatmap_etf_code(etf_code)
     if not code:
+        return False
+    if code in HEATMAP_CARD_BLOCKLIST:
         return False
     store = _history_store()
     setter = getattr(store, "set_heatmap_hub_pin", None)
@@ -558,7 +608,7 @@ def _dynamic_heatmap_cards() -> list[dict[str, str]]:
     seen_codes: set[str] = set()
     for row in _load_heatmap_hub_entries(pinned_only=True):
         code = _normalize_heatmap_etf_code(getattr(row, "etf_code", ""))
-        if not code:
+        if not code or code in HEATMAP_CARD_BLOCKLIST or code in HEATMAP_STATIC_CARD_CODES:
             continue
         seen_codes.add(code)
         name = str(getattr(row, "etf_name", "") or code).strip()
@@ -569,7 +619,12 @@ def _dynamic_heatmap_cards() -> list[dict[str, str]]:
             }
         )
     active_code, active_name = _session_active_heatmap()
-    if active_code and active_code not in seen_codes:
+    if (
+        active_code
+        and active_code not in seen_codes
+        and active_code not in HEATMAP_CARD_BLOCKLIST
+        and active_code not in HEATMAP_STATIC_CARD_CODES
+    ):
         cards.append(
             {
                 "key": f"{HEATMAP_DYNAMIC_CARD_PREFIX}{active_code}",
@@ -594,7 +649,7 @@ def _dynamic_heatmap_page_renderers() -> dict[str, Any]:
     built_keys: set[str] = set()
     for row in rows:
         code = _normalize_heatmap_etf_code(getattr(row, "etf_code", ""))
-        if not code:
+        if not code or code in HEATMAP_CARD_BLOCKLIST or code in HEATMAP_STATIC_CARD_CODES:
             continue
         name = str(getattr(row, "etf_name", "") or code).strip() or code
         key = f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}"
@@ -617,13 +672,17 @@ def _consume_heatmap_drilldown_query() -> None:
     if not code:
         _clear_query_params(HEATMAP_DRILL_QUERY_KEYS)
         return
+    if code in HEATMAP_CARD_BLOCKLIST:
+        _clear_query_params(HEATMAP_DRILL_QUERY_KEYS)
+        st.warning(f"{code} 熱力圖卡片已停用。")
+        return
     name = _query_param_first("hm_name")
     if name:
         name = unquote(name)
     if not name:
         name = _query_param_first("hm_label")
     name = _clean_heatmap_name_for_query(name) or code
-    st.session_state["active_page"] = f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}"
+    st.session_state["active_page"] = _heatmap_page_key_for_code(code)
     st.session_state[HEATMAP_HUB_SESSION_ACTIVE_KEY] = {"code": code, "name": name}
     opened_flag = _query_param_first("hm_open").strip().lower()
     opened = opened_flag in {"1", "true", "yes", "y", "on", "open"}
@@ -1725,6 +1784,39 @@ def _render_heatmap_constituent_intro_sections(
     )
 
 
+def _render_00735_heatmap_intro_tabs(
+    *,
+    snapshot_symbols: list[str],
+    service: MarketDataService,
+    full_rows: list[dict[str, object]],
+):
+    symbols = [
+        str(symbol or "").strip().upper()
+        for symbol in snapshot_symbols
+        if str(symbol or "").strip()
+    ]
+    if not symbols:
+        return
+
+    st.markdown("---")
+    st.markdown("#### 00735 成分股資訊")
+    tab_global, tab_tw = st.tabs(["全球成分股", "台股可回測"])
+    with tab_global:
+        st.caption("全球成分股公司簡介（已合併重複區塊）。")
+        _render_global_constituent_intro_table(
+            etf_code="00735",
+            service=service,
+            full_rows=full_rows,
+        )
+    with tab_tw:
+        st.caption("台股可回測成分股公司簡介。")
+        _render_tw_constituent_intro_table(
+            etf_code="00735",
+            symbols=symbols,
+            service=service,
+        )
+
+
 PAGE_CARDS = [
     {"key": "即時看盤", "desc": "台股/美股即時報價、即時走勢與技術快照。"},
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
@@ -1746,7 +1838,6 @@ PAGE_CARDS = [
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
     {"key": "00935 熱力圖", "desc": "00935 成分股回測的相對大盤熱力圖。"},
     {"key": "00735 熱力圖", "desc": "00735 成分股回測的相對大盤熱力圖。"},
-    {"key": "00993A 熱力圖", "desc": "00993A 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "0052 熱力圖", "desc": "0052 成分股回測的相對大盤熱力圖。"},
     {"key": "資料庫檢視", "desc": "直接查看 SQLite / DuckDB 各表筆數、欄位與內容。"},
@@ -3054,6 +3145,7 @@ def _fetch_twse_snapshot_with_fallback(
         idx_code = fields.index("證券代號")
         idx_name = fields.index("證券名稱")
         idx_close = fields.index("收盤價")
+        idx_open = fields.index("開盤價") if "開盤價" in fields else -1
         out_rows: list[dict[str, object]] = []
         for row in rows:
             if not isinstance(row, list):
@@ -3069,7 +3161,17 @@ def _fetch_twse_snapshot_with_fallback(
                 close = float(close_raw)
             except Exception:
                 continue
-            out_rows.append({"code": code, "name": name, "close": close})
+            open_price: float | None = None
+            if idx_open >= 0 and idx_open < len(row):
+                open_raw = str(row[idx_open] or "").strip().replace(",", "")
+                if open_raw not in {"", "--", "-"}:
+                    try:
+                        open_candidate = float(open_raw)
+                        if math.isfinite(open_candidate) and open_candidate > 0:
+                            open_price = float(open_candidate)
+                    except Exception:
+                        pass
+            out_rows.append({"code": code, "name": name, "open": open_price, "close": close})
         if out_rows:
             return date_token, pd.DataFrame(out_rows)
         errors.append(f"{date_token}:no parsable rows")
@@ -3247,12 +3349,16 @@ def _normalize_tw_etf_management_fee_label(value: object) -> str:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_tw_etf_aum_billion_map() -> dict[str, float]:
+def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
     import requests
 
     out: dict[str, float] = {}
     try:
-        resp = requests.get("https://www.twse.com.tw/zh/ETFortune/etfExcel", timeout=20)
+        params: dict[str, str] = {}
+        token = str(target_yyyymmdd or "").strip()
+        if re.fullmatch(r"\d{8}", token):
+            params["date"] = token
+        resp = requests.get("https://www.twse.com.tw/zh/ETFortune/etfExcel", params=params, timeout=20)
         resp.raise_for_status()
         text = resp.content.decode("cp950", errors="ignore")
         rows = csv.reader(StringIO(text))
@@ -3276,6 +3382,50 @@ def _load_tw_etf_aum_billion_map() -> dict[str, float]:
             out[code] = float(aum)
     except Exception:
         return {}
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _is_twse_trading_day(target_yyyymmdd: str) -> bool:
+    import requests
+
+    token = str(target_yyyymmdd or "").strip()
+    if not re.fullmatch(r"\d{8}", token):
+        return False
+    try:
+        resp = requests.get(
+            "https://www.twse.com.tw/exchangeReport/MI_INDEX",
+            params={"response": "json", "date": token, "type": "ALLBUT0999"},
+            timeout=12,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return False
+    return str(payload.get("stat", "")).strip().upper() == "OK"
+
+
+def _recent_twse_trading_days(
+    *,
+    anchor_yyyymmdd: str,
+    count: int = 22,
+    max_scan_days: int = 90,
+) -> list[str]:
+    token = str(anchor_yyyymmdd or "").strip()
+    if not re.fullmatch(r"\d{8}", token):
+        token = datetime.now().strftime("%Y%m%d")
+    target_dt = datetime.strptime(token, "%Y%m%d").date()
+    out: list[str] = []
+    for offset in range(max(1, int(max_scan_days))):
+        query_dt = target_dt - pd.Timedelta(days=offset)
+        day_token = query_dt.strftime("%Y%m%d")
+        if _is_twse_trading_day(day_token):
+            out.append(day_token)
+        if len(out) >= max(1, int(count)):
+            break
+    out = sorted(set(out))
+    if len(out) > max(1, int(count)):
+        out = out[-int(count) :]
     return out
 
 
@@ -3318,10 +3468,10 @@ def _attach_tw_etf_aum_column(
         return frame
 
     out = frame.copy()
-    out[column_name] = out[code_col].map(_format_tw_etf_aum_billion)
+    out[column_name] = _truncate_integer_series(out[code_col].map(_lookup_tw_etf_aum_billion))
 
     anchor_col = next(
-        (col for col in ("管理費", "ETF", "ETF名稱", "代碼", "ETF代碼") if col in out.columns), ""
+        (col for col in ("管理費(%)", "管理費", "ETF", "ETF名稱", "代碼", "ETF代碼") if col in out.columns), ""
     )
     if not anchor_col:
         return out
@@ -3332,6 +3482,290 @@ def _attach_tw_etf_aum_column(
         cols.insert(insert_at, column_name)
         out = out[cols]
     return out
+
+
+def _build_tw_etf_aum_snapshot_rows(
+    frame: pd.DataFrame,
+    *,
+    aum_map: dict[str, float],
+) -> list[dict[str, object]]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    code_col = next((col for col in ("代碼", "ETF代碼", "台股代號") if col in frame.columns), "")
+    name_col = next((col for col in ("ETF", "ETF名稱", "etf_name") if col in frame.columns), "")
+    if not code_col:
+        return []
+
+    rows: dict[str, dict[str, object]] = {}
+    for _, row in frame.iterrows():
+        code_token = str(row.get(code_col, "")).strip().upper()
+        code_match = re.fullmatch(r"\d{4,6}[A-Z]?", code_token)
+        if not code_match:
+            continue
+        code = code_match.group(0)
+        raw_value = aum_map.get(code)
+        if raw_value is None:
+            continue
+        try:
+            value = float(raw_value)
+        except Exception:
+            continue
+        if (not math.isfinite(value)) or value < 0:
+            continue
+        name = str(row.get(name_col, "")).strip() if name_col else ""
+        rows[code] = {
+            "etf_code": code,
+            "etf_name": name or code,
+            "aum_billion": value,
+        }
+    return list(rows.values())
+
+
+_TW_ETF_AUM_TRACK_ANCHOR_CODE = "__AUM_TRACK_ANCHOR__"
+_TW_ETF_AUM_TRACK_ANCHOR_NAME = "AUM_TRACK_ANCHOR"
+
+
+def _resolve_latest_tw_trade_day_token(anchor_yyyymmdd: str | None = None) -> str:
+    token = re.sub(r"\D", "", str(anchor_yyyymmdd or "").strip())
+    if not token:
+        token = datetime.now().strftime("%Y%m%d")
+    trade_days = _recent_twse_trading_days(anchor_yyyymmdd=token, count=1, max_scan_days=7)
+    return trade_days[-1] if trade_days else token
+
+
+def _resolve_latest_tw_trade_date_iso(anchor_yyyymmdd: str | None = None) -> str:
+    trade_token = _resolve_latest_tw_trade_day_token(anchor_yyyymmdd=anchor_yyyymmdd)
+    try:
+        return pd.Timestamp(trade_token).date().isoformat()
+    except Exception:
+        return datetime.now().date().isoformat()
+
+
+def _load_tw_etf_aum_track_anchor_date(store) -> str | None:
+    try:
+        meta_df = store.load_tw_etf_aum_history(
+            etf_codes=[_TW_ETF_AUM_TRACK_ANCHOR_CODE],
+            keep_days=1,
+        )
+    except Exception:
+        return None
+    if not isinstance(meta_df, pd.DataFrame) or meta_df.empty:
+        return None
+    token = str(meta_df.iloc[-1].get("trade_date", "")).strip()
+    try:
+        return pd.Timestamp(token).date().isoformat()
+    except Exception:
+        return None
+
+
+def _set_tw_etf_aum_track_anchor_date(store, *, trade_date: str) -> bool:
+    try:
+        trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
+    except Exception:
+        return False
+    try:
+        store.save_tw_etf_aum_snapshot(
+            rows=[
+                {
+                    "etf_code": _TW_ETF_AUM_TRACK_ANCHOR_CODE,
+                    "etf_name": _TW_ETF_AUM_TRACK_ANCHOR_NAME,
+                    "aum_billion": 0.0,
+                }
+            ],
+            trade_date=trade_date_iso,
+            keep_days=1,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _build_tw_etf_aum_history_wide(
+    history_df: pd.DataFrame,
+    *,
+    start_date: str | None = None,
+    max_date_cols: int = 10,
+) -> pd.DataFrame:
+    if not isinstance(history_df, pd.DataFrame) or history_df.empty:
+        return pd.DataFrame(columns=["編號", "台股代號", "ETF名稱"])
+    required = {"etf_code", "etf_name", "trade_date", "aum_billion"}
+    if not required.issubset(set(history_df.columns)):
+        return pd.DataFrame(columns=["編號", "台股代號", "ETF名稱"])
+
+    work = history_df.copy()
+    work["etf_code"] = work["etf_code"].astype(str).str.strip().str.upper()
+    work["etf_name"] = work["etf_name"].astype(str).str.strip()
+    work["trade_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
+    work["aum_billion"] = pd.to_numeric(work["aum_billion"], errors="coerce")
+    work = work.dropna(subset=["trade_date", "aum_billion"])
+    if start_date:
+        start_ts = pd.to_datetime(start_date, errors="coerce")
+        if pd.notna(start_ts):
+            work = work[work["trade_date"] >= pd.Timestamp(start_ts).normalize()]
+    work["trade_date"] = pd.to_datetime(work["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    work = work.dropna(subset=["trade_date"])
+    if work.empty:
+        return pd.DataFrame(columns=["編號", "台股代號", "ETF名稱"])
+
+    pivot = (
+        work.pivot_table(
+            index=["etf_code", "etf_name"],
+            columns="trade_date",
+            values="aum_billion",
+            aggfunc="last",
+        )
+        .sort_index(axis=1)
+        .reset_index()
+    )
+    pivot = pivot.rename(columns={"etf_code": "台股代號", "etf_name": "ETF名稱"})
+    date_cols = [col for col in pivot.columns if col not in {"台股代號", "ETF名稱"}]
+    def _date_sort_key(value: object) -> tuple[int, str]:
+        dt = pd.to_datetime(str(value), errors="coerce")
+        if pd.isna(dt):
+            return (1, str(value))
+        return (0, pd.Timestamp(dt).strftime("%Y-%m-%d"))
+
+    date_cols = sorted(date_cols, key=_date_sort_key)
+    try:
+        max_cols = int(max_date_cols)
+    except Exception:
+        max_cols = 10
+    if max_cols > 0 and len(date_cols) > max_cols:
+        date_cols = date_cols[-max_cols:]
+    out = pivot[["台股代號", "ETF名稱", *date_cols]].copy()
+    date_header_map = {col: f"{col}(億)" for col in date_cols}
+    out = out.rename(columns=date_header_map)
+    out = out.sort_values(["台股代號", "ETF名稱"]).reset_index(drop=True)
+    out.insert(0, "編號", range(1, len(out) + 1))
+    return out
+
+
+def _extract_aum_history_trade_date(label: object) -> pd.Timestamp | None:
+    text = str(label or "").strip()
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", text)
+    if not m:
+        return None
+    ts = pd.to_datetime(m.group(1), errors="coerce")
+    if pd.isna(ts):
+        return None
+    return pd.Timestamp(ts)
+
+
+def _aum_history_date_columns(frame: pd.DataFrame) -> list[str]:
+    cols: list[tuple[pd.Timestamp, str]] = []
+    for col in frame.columns:
+        if str(col) in {"編號", "台股代號", "ETF名稱"}:
+            continue
+        dt = _extract_aum_history_trade_date(col)
+        if dt is None:
+            continue
+        cols.append((dt, str(col)))
+    cols.sort(key=lambda item: item[0])
+    return [col for _, col in cols]
+
+
+def _compute_tw_etf_aum_alert_mask(
+    frame: pd.DataFrame,
+    *,
+    up_threshold: float = 0.10,
+    down_threshold: float | None = None,
+) -> dict[tuple[int, str], str]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return {}
+    date_cols = _aum_history_date_columns(frame)
+    if len(date_cols) < 2:
+        return {}
+
+    out: dict[tuple[int, str], str] = {}
+    for row_idx in range(len(frame)):
+        for idx in range(1, len(date_cols)):
+            prev_col = date_cols[idx - 1]
+            curr_col = date_cols[idx]
+            prev_raw = pd.to_numeric(frame.iloc[row_idx][prev_col], errors="coerce")
+            curr_raw = pd.to_numeric(frame.iloc[row_idx][curr_col], errors="coerce")
+            if not pd.notna(prev_raw) or not pd.notna(curr_raw):
+                continue
+            prev_val = float(prev_raw)
+            curr_val = float(curr_raw)
+            if prev_val <= 0:
+                continue
+            pct = (curr_val - prev_val) / prev_val
+            if pct > float(up_threshold):
+                out[(row_idx, curr_col)] = "#ffd1dc"
+            elif (down_threshold is not None) and (pct < float(down_threshold)):
+                out[(row_idx, curr_col)] = "#d8ecff"
+    return out
+
+
+def _style_tw_etf_aum_history_table(frame: pd.DataFrame):
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    work = frame.copy()
+    date_cols = _aum_history_date_columns(work)
+    for col in date_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    alert_mask = _compute_tw_etf_aum_alert_mask(work, up_threshold=0.10, down_threshold=None)
+
+    def _apply_row(row: pd.Series) -> list[str]:
+        ridx = int(row.name)
+        styles: list[str] = []
+        for col in work.columns:
+            color = alert_mask.get((ridx, str(col)))
+            styles.append(f"background-color: {color}" if color else "")
+        return styles
+
+    styler = work.style.apply(_apply_row, axis=1)
+    if date_cols:
+        styler = styler.format(
+            {
+                col: (lambda val: "—" if pd.isna(val) else f"{int(round(float(val))):,}")
+                for col in date_cols
+            }
+        )
+    return styler
+
+
+def _decorate_tw_etf_aum_history_links(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df, {}
+    if ("台股代號" not in df.columns) or ("ETF名稱" not in df.columns):
+        return df, {}
+    out = df.copy()
+
+    code_links: list[str | None] = []
+    name_links: list[str | None] = []
+    linked_code_count = 0
+    linked_name_count = 0
+
+    for _, row in out.iterrows():
+        code = _normalize_heatmap_etf_code(row.get("台股代號"))
+        name = str(row.get("ETF名稱", "")).strip()
+        if not code:
+            code_links.append(None)
+            name_links.append(None)
+            continue
+        code_links.append(build_backtest_drill_url(symbol=code, market="TW"))
+        linked_code_count += 1
+        name_links.append(build_heatmap_drill_url(code, name, src="aum_history_table"))
+        linked_name_count += 1
+
+    cfg: dict[str, object] = {}
+    if linked_code_count > 0:
+        out["台股代號"] = code_links
+        cfg["台股代號"] = st.column_config.LinkColumn(
+            label="台股代號",
+            help="點擊代號可帶入回測工作台並自動執行回測",
+            display_text=r"bt_symbol=([^&]+)",
+            max_chars=20,
+        )
+    if linked_name_count > 0:
+        out["ETF名稱"] = name_links
+        cfg["ETF名稱"] = st.column_config.LinkColumn(
+            label="ETF名稱",
+            help="點擊 ETF 名稱可在新分頁開啟對應熱力圖（內容比照 00935 熱力圖）",
+            display_text=r"hm_label=([^&]+)",
+        )
+    return out, cfg
 
 
 def _tw_etf_management_fee_config_path() -> Path:
@@ -3397,6 +3831,27 @@ def _lookup_tw_etf_management_fee_pct(code: object) -> float | None:
         return None
 
 
+def _truncate_series(values: pd.Series, *, digits: int = 2) -> pd.Series:
+    factor = 10.0 ** max(0, int(digits))
+    numeric = pd.to_numeric(values, errors="coerce")
+    out = np.trunc(numeric * factor) / factor
+    return pd.Series(out, index=numeric.index, dtype="float64")
+
+
+def _truncate_integer_series(values: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    truncated = pd.Series(np.trunc(numeric), index=numeric.index)
+    return truncated.where(pd.notna(numeric)).astype("Int64")
+
+
+def _truncate_value(value: object, *, digits: int = 2) -> float | None:
+    number = _safe_float(value)
+    if number is None or (not math.isfinite(number)):
+        return None
+    factor = 10.0 ** max(0, int(digits))
+    return math.trunc(float(number) * factor) / factor
+
+
 def _format_tw_etf_management_fee(code: object) -> str:
     label = _lookup_tw_etf_management_fee_label(code)
     if not label:
@@ -3408,7 +3863,7 @@ def _attach_tw_etf_management_fee_column(
     frame: pd.DataFrame,
     *,
     code_col_candidates: tuple[str, ...] = ("代碼", "ETF代碼"),
-    column_name: str = "管理費",
+    column_name: str = "管理費(%)",
 ) -> pd.DataFrame:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return frame
@@ -3417,7 +3872,7 @@ def _attach_tw_etf_management_fee_column(
         return frame
 
     out = frame.copy()
-    out[column_name] = out[code_col].map(_format_tw_etf_management_fee)
+    out[column_name] = _truncate_series(out[code_col].map(_lookup_tw_etf_management_fee_pct), digits=2)
 
     anchor_col = next(
         (col for col in ("ETF", "ETF名稱", "代碼", "ETF代碼") if col in out.columns), ""
@@ -3506,6 +3961,16 @@ def _is_tw_equity_etf(code: str, name: str) -> bool:
     return True
 
 
+def _is_tw_any_etf(code: str, name: str) -> bool:
+    code_text = str(code or "").strip().upper()
+    name_text = str(name or "").strip()
+    if not code_text.startswith("00"):
+        return False
+    if not name_text:
+        return False
+    return True
+
+
 def _is_tw_active_etf(code: str, name: str) -> bool:
     code_text = str(code or "").strip().upper()
     name_text = str(name or "").strip()
@@ -3547,39 +4012,103 @@ def _build_tw_etf_top10_between(
     top_n: int = 10,
     sort_ascending: bool = False,
     exclude_split_event: bool = False,
+    include_all_etf: bool = False,
 ) -> tuple[pd.DataFrame, str, str, int]:
     start_used, start_df = _fetch_twse_snapshot_with_fallback(start_yyyymmdd)
     end_used, end_df = _fetch_twse_snapshot_with_fallback(end_yyyymmdd)
 
-    # 台股股票型 ETF（排除槓反/期貨/海外與債券商品）。
+    # 預設為台股股票型 ETF；可切換為納入所有 ETF 類型。
+    etf_filter_fn = _is_tw_any_etf if bool(include_all_etf) else _is_tw_equity_etf
     start_df = start_df[
         start_df.apply(
-            lambda r: _is_tw_equity_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1
+            lambda r: etf_filter_fn(str(r.get("code", "")), str(r.get("name", ""))), axis=1
         )
     ].copy()
     end_df = end_df[
         end_df.apply(
-            lambda r: _is_tw_equity_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1
+            lambda r: etf_filter_fn(str(r.get("code", "")), str(r.get("name", ""))), axis=1
         )
     ].copy()
-    if start_df.empty or end_df.empty:
+    if end_df.empty:
         return pd.DataFrame(), start_used, end_used, 0
 
-    merged = end_df.merge(
-        start_df[["code", "close"]].rename(columns={"close": "start_close"}),
-        on="code",
-        how="inner",
+    start_close_map: dict[str, float] = {}
+    if not start_df.empty:
+        start_close_series = pd.to_numeric(start_df["close"], errors="coerce")
+        for code, close in zip(start_df["code"].astype(str), start_close_series, strict=False):
+            code_text = str(code).strip().upper()
+            close_value = float(close) if pd.notna(close) else float("nan")
+            if code_text and math.isfinite(close_value) and close_value > 0:
+                start_close_map[code_text] = close_value
+
+    start_trade_date_map: dict[str, str] = {}
+    if start_close_map:
+        start_trade_date_map = dict.fromkeys(start_close_map, start_used)
+
+    end_dt = datetime.combine(
+        datetime.strptime(end_used, "%Y%m%d").date(), datetime.min.time()
+    ).replace(tzinfo=timezone.utc)
+    start_dt = datetime.combine(
+        datetime.strptime(start_used, "%Y%m%d").date(), datetime.min.time()
+    ).replace(tzinfo=timezone.utc)
+    missing_symbols: list[str] = []
+    for code in end_df["code"].astype(str).tolist():
+        symbol = str(code).strip().upper()
+        if not symbol or symbol in start_close_map or symbol in missing_symbols:
+            continue
+        missing_symbols.append(symbol)
+    if missing_symbols:
+        store = _history_store()
+        for symbol in missing_symbols:
+            bars = normalize_ohlcv_frame(
+                store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+            )
+            need_sync = True
+            if isinstance(bars, pd.DataFrame) and not bars.empty:
+                idx = pd.to_datetime(bars.index, utc=True, errors="coerce").dropna()
+                if not idx.empty:
+                    last_ts = pd.Timestamp(idx.max()).to_pydatetime().replace(tzinfo=timezone.utc)
+                    need_sync = last_ts < end_dt
+            if need_sync:
+                store.sync_symbol_history(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+                bars = normalize_ohlcv_frame(
+                    store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+                )
+            if bars.empty or "close" not in bars.columns:
+                continue
+            closes = pd.to_numeric(bars["close"], errors="coerce")
+            closes.index = pd.to_datetime(closes.index, utc=True, errors="coerce")
+            closes = closes.dropna().sort_index()
+            closes = closes[(closes.index >= start_dt) & (closes.index <= end_dt)]
+            if closes.empty:
+                continue
+            first_close = float(closes.iloc[0])
+            if not math.isfinite(first_close) or first_close <= 0:
+                continue
+            start_close_map[symbol] = first_close
+            start_trade_date_map[symbol] = pd.Timestamp(closes.index[0]).strftime("%Y%m%d")
+
+    merged = end_df.copy()
+    merged["code"] = merged["code"].astype(str).str.strip().str.upper()
+    merged["end_close"] = pd.to_numeric(merged["close"], errors="coerce")
+    merged["start_close"] = merged["code"].map(start_close_map)
+    merged["start_trade_date"] = merged["code"].map(start_trade_date_map)
+    merged = merged.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["start_close", "end_close", "start_trade_date"]
     )
     if merged.empty:
         return pd.DataFrame(), start_used, end_used, 0
-    merged = merged.rename(columns={"name": "name", "close": "end_close"})
-    factor_info = merged["code"].map(
-        lambda c: _split_factor_and_events_between(
-            symbol=str(c), start_used=start_used, end_used=end_used
-        )
+    merged["split_info"] = merged.apply(
+        lambda r: _split_factor_and_events_between(
+            symbol=str(r.get("code", "")),
+            start_used=str(r.get("start_trade_date", "")),
+            end_used=end_used,
+        ),
+        axis=1,
     )
-    merged["split_factor"] = factor_info.map(lambda x: float(x[0]))
-    merged["split_events"] = factor_info.map(lambda x: str(x[1]))
+    merged["split_factor"] = merged["split_info"].map(lambda x: float(x[0]))
+    merged["split_events"] = merged["split_info"].map(lambda x: str(x[1]))
+    merged = merged.drop(columns=["split_info"])
     if bool(exclude_split_event):
         merged = merged[merged["split_events"].astype(str).str.strip() == ""].copy()
         if merged.empty:
@@ -3623,10 +4152,8 @@ def _build_tw_etf_top10_between(
             "code",
             "name",
             "type",
-            "start_close",
             "adj_start_close",
             "end_close",
-            "split_events",
             "return_pct",
         ]
     ].copy()
@@ -3636,18 +4163,14 @@ def _build_tw_etf_top10_between(
             "code": "代碼",
             "name": "ETF",
             "type": "類型",
-            "start_close": "期初收盤",
-            "adj_start_close": "復權期初",
-            "end_close": "期末收盤",
-            "split_events": "復權事件",
+            "adj_start_close": "開盤",
+            "end_close": "收盤",
             "return_pct": "區間報酬(%)",
         }
     )
     out["區間報酬(%)"] = pd.to_numeric(out["區間報酬(%)"], errors="coerce").round(2)
-    out["期初收盤"] = pd.to_numeric(out["期初收盤"], errors="coerce").round(2)
-    out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
-    out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
-    out["復權事件"] = out["復權事件"].replace("", "—")
+    out["開盤"] = pd.to_numeric(out["開盤"], errors="coerce").round(2)
+    out["收盤"] = pd.to_numeric(out["收盤"], errors="coerce").round(2)
     out = _attach_tw_etf_management_fee_column(out, code_col_candidates=("代碼",))
     return out, start_used, end_used, universe_count
 
@@ -3769,12 +4292,10 @@ def _build_tw_active_etf_ytd_between(
             "rank",
             "code",
             "name",
-            "start_close",
             "adj_start_close",
             "end_close",
             "start_trade_date",
             "end_trade_date",
-            "split_events",
             "return_pct",
         ]
     ].copy()
@@ -3783,20 +4304,16 @@ def _build_tw_active_etf_ytd_between(
             "rank": "排名",
             "code": "代碼",
             "name": "ETF",
-            "start_close": "期初收盤",
-            "adj_start_close": "復權期初",
-            "end_close": "期末收盤",
+            "adj_start_close": "開盤",
+            "end_close": "收盤",
             "start_trade_date": "績效起算日",
             "end_trade_date": "績效終點日",
-            "split_events": "復權事件",
             "return_pct": "YTD報酬(%)",
         }
     )
     out["YTD報酬(%)"] = pd.to_numeric(out["YTD報酬(%)"], errors="coerce").round(2)
-    out["期初收盤"] = pd.to_numeric(out["期初收盤"], errors="coerce").round(2)
-    out["復權期初"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
-    out["期末收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
-    out["復權事件"] = out["復權事件"].replace("", "—")
+    out["開盤"] = pd.to_numeric(out["開盤"], errors="coerce").round(2)
+    out["收盤"] = pd.to_numeric(out["收盤"], errors="coerce").round(2)
     out = _attach_tw_etf_management_fee_column(out, code_col_candidates=("代碼",))
     return out, start_used, end_used
 
@@ -3870,6 +4387,188 @@ def _load_tw_market_return_between(
     return None, "", issues
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_tw_snapshot_close_map(target_yyyymmdd: str) -> tuple[str, dict[str, float]]:
+    used, frame = _fetch_twse_snapshot_with_fallback(target_yyyymmdd)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return used, {}
+    out: dict[str, float] = {}
+    for _, row in frame.iterrows():
+        code = str(row.get("code", "")).strip().upper()
+        if not code:
+            continue
+        close_val = _safe_float(row.get("close"))
+        if close_val is None or (not math.isfinite(close_val)) or close_val <= 0:
+            continue
+        out[code] = float(close_val)
+    return used, out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_tw_snapshot_open_map(target_yyyymmdd: str) -> tuple[str, dict[str, float]]:
+    used, frame = _fetch_twse_snapshot_with_fallback(target_yyyymmdd)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return used, {}
+    out: dict[str, float] = {}
+    for _, row in frame.iterrows():
+        code = str(row.get("code", "")).strip().upper()
+        if not code:
+            continue
+        open_val = _safe_float(row.get("open"))
+        if open_val is None or (not math.isfinite(open_val)) or open_val <= 0:
+            continue
+        out[code] = float(open_val)
+    return used, out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_tw_etf_daily_change_map(
+    anchor_yyyymmdd: str,
+) -> tuple[dict[str, float], str, str]:
+    end_used, end_close_map = _load_tw_snapshot_close_map(anchor_yyyymmdd)
+    end_token = re.sub(r"\D", "", str(end_used or "").strip()) or str(anchor_yyyymmdd or "").strip()
+    trade_days = _recent_twse_trading_days(anchor_yyyymmdd=end_token, count=2, max_scan_days=20)
+    if len(trade_days) < 2:
+        return {}, end_used, ""
+    prev_token = trade_days[-2]
+    prev_used, prev_close_map = _load_tw_snapshot_close_map(prev_token)
+    out: dict[str, float] = {}
+    for code, end_close in end_close_map.items():
+        prev_close = prev_close_map.get(code)
+        if prev_close is None or prev_close <= 0:
+            continue
+        pct = (float(end_close) / float(prev_close) - 1.0) * 100.0
+        if not math.isfinite(pct):
+            continue
+        out[code] = float(pct)
+    return out, end_used, prev_used
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_tw_market_daily_return(
+    anchor_yyyymmdd: str,
+    *,
+    force_sync: bool = False,
+) -> tuple[float | None, str, str, str, list[str]]:
+    token = re.sub(r"\D", "", str(anchor_yyyymmdd or "").strip())
+    if not token:
+        token = datetime.now().strftime("%Y%m%d")
+    trade_days = _recent_twse_trading_days(anchor_yyyymmdd=token, count=2, max_scan_days=20)
+    if len(trade_days) < 2:
+        return None, "", "", "", []
+    prev_token = trade_days[-2]
+    end_token = trade_days[-1]
+    value, symbol, issues = _load_tw_market_return_between(
+        start_yyyymmdd=prev_token,
+        end_yyyymmdd=end_token,
+        force_sync=force_sync,
+    )
+    return value, symbol, prev_token, end_token, issues
+
+
+def _with_tw_today_fields(
+    frame: pd.DataFrame,
+    *,
+    daily_change_map: dict[str, float] | None = None,
+    daily_open_map: dict[str, float] | None = None,
+    market_daily_return_pct: float | None = None,
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    out = frame.copy()
+    code_series = out.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
+
+    open_map = daily_open_map if isinstance(daily_open_map, dict) else {}
+    if open_map:
+        out["開盤"] = pd.to_numeric(code_series.map(open_map), errors="coerce").round(2)
+    elif "開盤" in out.columns:
+        out["開盤"] = pd.to_numeric(out["開盤"], errors="coerce").round(2)
+    elif "復權期初" in out.columns:
+        out["開盤"] = pd.to_numeric(out["復權期初"], errors="coerce").round(2)
+    elif "期初收盤" in out.columns:
+        out["開盤"] = pd.to_numeric(out["期初收盤"], errors="coerce").round(2)
+    if "收盤" in out.columns:
+        out["收盤"] = pd.to_numeric(out["收盤"], errors="coerce").round(2)
+    elif "期末收盤" in out.columns:
+        out["收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
+
+    daily_map = daily_change_map or {}
+    out["今日漲幅"] = pd.to_numeric(code_series.map(daily_map), errors="coerce").round(2)
+
+    market_daily = _safe_float(market_daily_return_pct)
+    if market_daily is not None and math.isfinite(float(market_daily)):
+        benchmark_mask = code_series.str.startswith("^")
+        out.loc[benchmark_mask, "今日漲幅"] = float(market_daily)
+        out["今日贏大盤%"] = (
+            pd.to_numeric(out["今日漲幅"], errors="coerce") - float(market_daily)
+        ).round(2)
+        out.loc[benchmark_mask, "今日贏大盤%"] = 0.0
+    else:
+        out["今日贏大盤%"] = np.nan
+
+    drop_cols = ["期初收盤", "復權期初", "期末收盤", "復權事件", "start_close", "adj_start_close", "end_close"]
+    return out.drop(columns=[col for col in drop_cols if col in out.columns], errors="ignore")
+
+
+def _style_tw_today_move_table(frame: pd.DataFrame):
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    work = frame.copy()
+    for col in ("今日漲幅", "今日贏大盤%"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+    for col in ("開盤", "收盤"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    def _apply_row(row: pd.Series) -> list[str]:
+        styles: list[str] = []
+        today_move = _safe_float(row.get("今日漲幅")) if "今日漲幅" in work.columns else None
+        today_vs_market = (
+            _safe_float(row.get("今日贏大盤%")) if "今日贏大盤%" in work.columns else None
+        )
+        for col in work.columns:
+            style_parts: list[str] = []
+            if col == "今日漲幅" and today_move is not None:
+                if today_move > 3.0:
+                    style_parts.append("background-color: #e8f7e8")
+                elif today_move < -3.0:
+                    style_parts.append("background-color: #fdecec")
+            if col == "今日贏大盤%" and today_vs_market is not None:
+                if today_vs_market > 0:
+                    style_parts.append("color: #1f7a1f")
+                elif today_vs_market < 0:
+                    style_parts.append("color: #b42318")
+            styles.append(";".join(style_parts))
+        return styles
+
+    styler = work.style.apply(_apply_row, axis=1)
+    formatters: dict[str, Any] = {}
+    if "今日漲幅" in work.columns:
+        formatters["今日漲幅"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}%"
+    if "今日贏大盤%" in work.columns:
+        formatters["今日贏大盤%"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}%"
+    if "開盤" in work.columns:
+        formatters["開盤"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if "收盤" in work.columns:
+        formatters["收盤"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if "管理費(%)" in work.columns:
+        formatters["管理費(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if "ETF規模(億)" in work.columns:
+        formatters["ETF規模(億)"] = lambda v: "—" if pd.isna(v) else f"{int(float(v))}"
+    if "2025績效(%)" in work.columns:
+        formatters["2025績效(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if "輸贏大盤2025(%)" in work.columns:
+        formatters["輸贏大盤2025(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if "2026YTD績效(%)" in work.columns:
+        formatters["2026YTD績效(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if "輸贏大盤2026YTD(%)" in work.columns:
+        formatters["輸贏大盤2026YTD(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if formatters:
+        styler = styler.format(formatters)
+    return styler
+
+
 def _decorate_tw_etf_top10_ytd_table(
     top10_df: pd.DataFrame,
     *,
@@ -3890,12 +4589,13 @@ def _decorate_tw_etf_top10_ytd_table(
 
     code_series = etf_df.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
     etf_df[compare_col_label] = code_series.map(compare_return_map)
-    etf_df[compare_col_label] = pd.to_numeric(etf_df[compare_col_label], errors="coerce").round(2)
+    etf_df[compare_col_label] = _truncate_series(etf_df[compare_col_label], digits=2)
     etf_df["贏輸台股大盤(%)"] = np.nan
     if market_return_pct is not None and math.isfinite(float(market_return_pct)):
-        etf_df["贏輸台股大盤(%)"] = (
-            pd.to_numeric(etf_df[performance_col_label], errors="coerce") - float(market_return_pct)
-        ).round(2)
+        etf_df["贏輸台股大盤(%)"] = _truncate_series(
+            pd.to_numeric(etf_df[performance_col_label], errors="coerce") - float(market_return_pct),
+            digits=2,
+        )
     underperform_label = str(underperform_col_label or "").strip()
     if underperform_label:
         etf_df[underperform_label] = np.nan
@@ -3903,23 +4603,28 @@ def _decorate_tw_etf_top10_ytd_table(
             underperform_series = float(market_return_pct) - pd.to_numeric(
                 etf_df[performance_col_label], errors="coerce"
             )
-            etf_df[underperform_label] = underperform_series.clip(lower=0.0).round(2)
+            etf_df[underperform_label] = _truncate_series(
+                underperform_series.clip(lower=0.0),
+                digits=2,
+            )
 
     benchmark_row = {
         "排名": "—",
         "代碼": str(benchmark_code or "^TWII"),
         "ETF": "台股大盤",
         "類型": "大盤",
-        "期初收盤": np.nan,
-        "復權期初": np.nan,
-        "期末收盤": np.nan,
-        "復權事件": "—",
-        compare_col_label: round(float(market_compare_return_pct), 2)
-        if market_compare_return_pct is not None
-        else np.nan,
-        performance_col_label: round(float(market_return_pct), 2)
-        if market_return_pct is not None
-        else np.nan,
+        "開盤": np.nan,
+        "收盤": np.nan,
+        compare_col_label: (
+            _truncate_value(market_compare_return_pct, digits=2)
+            if market_compare_return_pct is not None
+            else np.nan
+        ),
+        performance_col_label: (
+            _truncate_value(market_return_pct, digits=2)
+            if market_return_pct is not None
+            else np.nan
+        ),
         "贏輸台股大盤(%)": 0.0 if market_return_pct is not None else np.nan,
         "績效終點日": str(end_used),
     }
@@ -3933,13 +4638,11 @@ def _decorate_tw_etf_top10_ytd_table(
         "排名",
         "代碼",
         "ETF",
-        "管理費",
+        "管理費(%)",
         "ETF規模(億)",
         "類型",
-        "期初收盤",
-        "復權期初",
-        "期末收盤",
-        "復權事件",
+        "開盤",
+        "收盤",
         compare_col_label,
         performance_col_label,
         "贏輸台股大盤(%)",
@@ -3962,6 +4665,7 @@ def _build_tw_etf_all_types_performance_table(
         end_yyyymmdd=ytd_end_yyyymmdd,
         top_n=99999,
         sort_ascending=False,
+        include_all_etf=True,
     )
     if ytd_df.empty:
         return pd.DataFrame(), {
@@ -3978,6 +4682,7 @@ def _build_tw_etf_all_types_performance_table(
         end_yyyymmdd=compare_end_yyyymmdd,
         top_n=99999,
         sort_ascending=False,
+        include_all_etf=True,
     )
     compare_map: dict[str, float] = {}
     if isinstance(compare_df, pd.DataFrame) and not compare_df.empty:
@@ -3997,47 +4702,63 @@ def _build_tw_etf_all_types_performance_table(
         end_yyyymmdd=compare_end_used,
         force_sync=False,
     )
+    daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(ytd_end_used)
+    _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or ytd_end_used)
+    market_daily_return, market_daily_symbol, _, _, market_daily_issues = _load_tw_market_daily_return(
+        ytd_end_used, force_sync=False
+    )
 
     table_df = ytd_df.rename(columns={"區間報酬(%)": "2026YTD績效(%)"}).copy()
     code_series = table_df.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
     table_df["2025績效(%)"] = code_series.map(compare_map)
-    table_df["2025績效(%)"] = pd.to_numeric(table_df["2025績效(%)"], errors="coerce").round(2)
-    table_df["2026YTD績效(%)"] = pd.to_numeric(table_df["2026YTD績效(%)"], errors="coerce").round(2)
-    table_df["贏輸台股大盤2025(%)"] = np.nan
-    table_df["贏輸台股大盤2026YTD(%)"] = np.nan
+    table_df["2025績效(%)"] = _truncate_series(table_df["2025績效(%)"], digits=2)
+    table_df["2026YTD績效(%)"] = _truncate_series(table_df["2026YTD績效(%)"], digits=2)
+    table_df["輸贏大盤2025(%)"] = np.nan
+    table_df["輸贏大盤2026YTD(%)"] = np.nan
     if market_2025_return is not None and math.isfinite(float(market_2025_return)):
-        table_df["贏輸台股大盤2025(%)"] = (
-            table_df["2025績效(%)"] - float(market_2025_return)
-        ).round(2)
+        table_df["輸贏大盤2025(%)"] = _truncate_series(
+            table_df["2025績效(%)"] - float(market_2025_return),
+            digits=2,
+        )
     if market_ytd_return is not None and math.isfinite(float(market_ytd_return)):
-        table_df["贏輸台股大盤2026YTD(%)"] = (
-            table_df["2026YTD績效(%)"] - float(market_ytd_return)
-        ).round(2)
+        table_df["輸贏大盤2026YTD(%)"] = _truncate_series(
+            table_df["2026YTD績效(%)"] - float(market_ytd_return),
+            digits=2,
+        )
 
+    table_df = _with_tw_today_fields(
+        table_df,
+        daily_change_map=daily_change_map,
+        daily_open_map=daily_open_map,
+        market_daily_return_pct=market_daily_return,
+    )
+    table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
     table_df = table_df.sort_values(
         ["類型", "2026YTD績效(%)"], ascending=[True, False], na_position="last"
     ).reset_index(drop=True)
-    table_df["排名"] = range(1, len(table_df) + 1)
+    table_df["編號"] = range(1, len(table_df) + 1)
     columns_order = [
-        "排名",
+        "編號",
         "代碼",
         "ETF",
-        "管理費",
+        "管理費(%)",
         "ETF規模(億)",
         "類型",
         "2025績效(%)",
+        "輸贏大盤2025(%)",
         "2026YTD績效(%)",
-        "贏輸台股大盤2025(%)",
-        "贏輸台股大盤2026YTD(%)",
-        "期初收盤",
-        "復權期初",
-        "期末收盤",
-        "復權事件",
+        "輸贏大盤2026YTD(%)",
+        "開盤",
+        "收盤",
+        "今日漲幅",
+        "今日贏大盤%",
     ]
     table_df = table_df[[col for col in columns_order if col in table_df.columns]]
     return table_df, {
         "ytd_start_used": ytd_start_used,
         "ytd_end_used": ytd_end_used,
+        "daily_prev_used": daily_prev_used,
+        "daily_end_used": daily_end_used,
         "compare_start_used": compare_start_used,
         "compare_end_used": compare_end_used,
         "universe_count": int(universe_count),
@@ -4045,7 +4766,9 @@ def _build_tw_etf_all_types_performance_table(
         "market_ytd_symbol": market_ytd_symbol,
         "market_2025_return": market_2025_return,
         "market_2025_symbol": market_2025_symbol,
-        "issues": [*market_ytd_issues, *market_2025_issues],
+        "market_daily_return": market_daily_return,
+        "market_daily_symbol": market_daily_symbol,
+        "issues": [*market_ytd_issues, *market_2025_issues, *market_daily_issues],
     }
 
 
@@ -4822,6 +5545,17 @@ def _render_tw_etf_top10_page(
         if top10.empty:
             st.warning(empty_warning_text)
             return
+        daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
+        _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or end_used)
+        market_daily_return, market_daily_symbol, _, _, market_daily_issues = (
+            _load_tw_market_daily_return(end_used, force_sync=False)
+        )
+        top10_display = _with_tw_today_fields(
+            top10,
+            daily_change_map=daily_change_map,
+            daily_open_map=daily_open_map,
+            market_daily_return_pct=market_daily_return,
+        )
 
         top10_ratio_text = (
             "—" if universe_count <= 0 else f"{(len(top10) / universe_count) * 100.0:.1f}%"
@@ -4830,9 +5564,9 @@ def _render_tw_etf_top10_page(
         m1.metric(count_label, str(len(top10)))
         m2.metric("母體檔數（可比較）", str(universe_count))
         m3.metric(ratio_label, top10_ratio_text)
-        m4.metric("市值型", str(int((top10["類型"] == "市值型").sum())))
-        m5.metric("股利型", str(int((top10["類型"] == "股利型").sum())))
-        m6.metric("有復權事件", str(int((top10["復權事件"] != "—").sum())))
+        m4.metric("市值型", str(int((top10_display["類型"] == "市值型").sum())))
+        m5.metric("股利型", str(int((top10_display["類型"] == "股利型").sum())))
+        m6.metric("今日上漲檔數", str(int((top10_display["今日漲幅"] > 0).sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
             end_used=end_used,
@@ -4842,8 +5576,18 @@ def _render_tw_etf_top10_page(
         _render_data_health_caption("快照資料健康度", snapshot_health)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
         st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
-        st.caption("報酬計算：以復權期初（套用已知 split 事件）對比期末收盤。")
-        st.dataframe(top10, width="stretch", hide_index=True)
+        if (
+            market_daily_return is not None
+            and market_daily_symbol
+            and daily_prev_used
+            and daily_end_used
+        ):
+            st.caption(
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{daily_prev_used} -> {daily_end_used}）"
+            )
+        if market_daily_issues:
+            _render_sync_issues("更新今日大盤漲幅時有部分同步錯誤", market_daily_issues, preview_limit=2)
+        st.dataframe(top10_display, width="stretch", hide_index=True)
 
         with st.expander("分類說明", expanded=False):
             st.markdown(
@@ -4869,7 +5613,7 @@ def _render_top10_etf_2025_view():
 
 
 def _render_tw_etf_all_types_view():
-    title_col, refresh_col = st.columns([6, 1])
+    title_col, refresh_col, aum_track_col = st.columns([5, 1, 1])
     with title_col:
         st.subheader("台股 ETF 全類型總表（2025 / 2026 YTD）")
     with refresh_col:
@@ -4879,10 +5623,24 @@ def _render_tw_etf_all_types_view():
             width="stretch",
             type="primary",
         )
+    with aum_track_col:
+        refresh_aum_track = st.button(
+            "更新規模追蹤",
+            key="tw_etf_all_types_update_aum_track",
+            width="stretch",
+        )
+        reset_aum_track = st.button(
+            "從今日重置",
+            key="tw_etf_all_types_reset_aum_track",
+            width="stretch",
+        )
     if refresh_market:
         _fetch_twse_snapshot_with_fallback.clear()
         _build_tw_etf_top10_between.clear()
         _load_tw_market_return_between.clear()
+        _load_tw_etf_daily_change_map.clear()
+        _load_tw_snapshot_open_map.clear()
+        _load_tw_market_daily_return.clear()
         _build_tw_etf_all_types_performance_table.clear()
         st.rerun()
 
@@ -4904,6 +5662,8 @@ def _render_tw_etf_all_types_view():
         if table_df.empty:
             st.warning("目前沒有可顯示的台股 ETF 全類型資料。")
             return
+
+        store = _history_store()
 
         universe_count = int(meta.get("universe_count", len(table_df)))
         type_series = table_df.get("類型", pd.Series(dtype=str)).astype(str)
@@ -4935,32 +5695,116 @@ def _render_tw_etf_all_types_view():
         if market_2025_return is not None and market_2025_symbol:
             st.caption(f"2025 台股大盤：{market_2025_symbol} 區間報酬 {market_2025_return:.2f}%")
         else:
-            st.caption("2025 台股大盤：目前無法取得，`贏輸台股大盤2025(%)` 先顯示空白。")
+            st.caption("2025 台股大盤：目前無法取得，`輸贏大盤2025(%)` 先顯示空白。")
 
         market_ytd_return = _safe_float(meta.get("market_ytd_return"))
         market_ytd_symbol = str(meta.get("market_ytd_symbol", "")).strip()
         if market_ytd_return is not None and market_ytd_symbol:
             st.caption(f"2026 YTD 台股大盤：{market_ytd_symbol} 區間報酬 {market_ytd_return:.2f}%")
         else:
-            st.caption("2026 YTD 台股大盤：目前無法取得，`贏輸台股大盤2026YTD(%)` 先顯示空白。")
+            st.caption("2026 YTD 台股大盤：目前無法取得，`輸贏大盤2026YTD(%)` 先顯示空白。")
+        market_daily_return = _safe_float(meta.get("market_daily_return"))
+        market_daily_symbol = str(meta.get("market_daily_symbol", "")).strip()
+        daily_prev_used = str(meta.get("daily_prev_used", "")).strip()
+        daily_end_used = str(meta.get("daily_end_used", "")).strip()
+        if market_daily_return is not None and market_daily_symbol and daily_prev_used and daily_end_used:
+            st.caption(
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{daily_prev_used} -> {daily_end_used}）"
+            )
+        else:
+            st.caption("今日大盤漲幅：目前無法取得，`今日贏大盤%` 先顯示空白。")
 
         issues = meta.get("issues", [])
         if isinstance(issues, list) and issues:
             _render_sync_issues(
                 "大盤資料同步有部分錯誤，已盡量使用本地可用資料", issues, preview_limit=2
             )
-        st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
+        st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已納入所有 ETF 類型。")
         st.caption("排序規則：先依 ETF 類型，再依 2026 YTD 績效由高到低。")
 
+        today_trade_token = _resolve_latest_tw_trade_day_token()
+        today_trade_date = _resolve_latest_tw_trade_date_iso(today_trade_token)
+        aum_track_anchor_date = _load_tw_etf_aum_track_anchor_date(store)
+        if not aum_track_anchor_date:
+            try:
+                removed = store.clear_tw_etf_aum_history()
+                _set_tw_etf_aum_track_anchor_date(store, trade_date=today_trade_date)
+                aum_track_anchor_date = today_trade_date
+                if removed > 0:
+                    st.info(f"基金規模追蹤已重新起算（刪除 {removed} 筆舊資料），第一日為 {today_trade_date}。")
+            except Exception as exc:
+                aum_track_anchor_date = today_trade_date
+                st.warning(f"初始化基金規模追蹤起算日失敗：{exc}")
+        aum_track_anchor_date = str(aum_track_anchor_date or today_trade_date).strip() or today_trade_date
+
+        if reset_aum_track:
+            try:
+                removed = store.clear_tw_etf_aum_history()
+                _set_tw_etf_aum_track_anchor_date(store, trade_date=today_trade_date)
+                aum_track_anchor_date = today_trade_date
+                st.success(f"已重置基金規模追蹤資料（刪除 {removed} 筆），從今日開始累積。")
+            except Exception as exc:
+                st.warning(f"重置基金規模追蹤失敗：{exc}")
+
+        if refresh_aum_track:
+            try:
+                with st.spinner("更新今日 ETF 基金規模中..."):
+                    aum_rows = _build_tw_etf_aum_snapshot_rows(
+                        table_df,
+                        aum_map=_load_tw_etf_aum_billion_map(today_trade_token),
+                    )
+                    if not aum_rows:
+                        st.warning("今日沒有可更新的 ETF 規模資料。")
+                    else:
+                        updated = store.save_tw_etf_aum_snapshot(
+                            rows=aum_rows,
+                            trade_date=today_trade_date,
+                            keep_days=0,  # <=0: DB 永久保留
+                        )
+                        st.success(f"已累積 ETF 規模追蹤：{updated} 檔（日期 {today_trade_date}）。")
+            except Exception as exc:
+                st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
+
+        history_df = store.load_tw_etf_aum_history(
+            etf_codes=table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
+            keep_days=0,
+        )
+        history_wide = _build_tw_etf_aum_history_wide(
+            history_df,
+            start_date=aum_track_anchor_date,
+            max_date_cols=10,
+        )
+        history_with_links, history_link_config = _decorate_tw_etf_aum_history_links(history_wide)
+        st.markdown("#### 基金規模追蹤（最近 10 交易日）")
+        st.caption("欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以粉紅標示。")
+        st.caption(f"起算日：{aum_track_anchor_date}；資料庫採累積保存（不覆蓋），畫面僅顯示最近 10 個交易日。")
+        if history_wide.empty:
+            st.info("尚無規模追蹤資料，請按「更新規模追蹤」。")
+        else:
+            st.dataframe(
+                _style_tw_etf_aum_history_table(history_with_links),
+                width="stretch",
+                hide_index=True,
+                height=min(_full_table_height(history_wide), 720),
+                column_config=history_link_config if history_link_config else None,
+            )
+            st.caption("可點擊 `台股代號` 開啟回測；可點擊 `ETF名稱` 開啟該檔 ETF 成分股熱力圖。")
+
         table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(table_df)
-        if table_link_config:
+        table_with_links, code_link_config = _decorate_dataframe_backtest_links(table_with_links)
+        merged_link_config: dict[str, object] = {}
+        if isinstance(code_link_config, dict):
+            merged_link_config.update(code_link_config)
+        if isinstance(table_link_config, dict):
+            merged_link_config.update(table_link_config)
+        if merged_link_config:
             st.caption("可直接點擊 `ETF` 中文名稱，在新分頁開啟對應熱力圖（內容同 00935 熱力圖）。")
         st.dataframe(
-            table_with_links,
+            _style_tw_today_move_table(table_with_links),
             width="stretch",
             hide_index=True,
             height=min(_full_table_height(table_with_links), 1200),
-            column_config=table_link_config if table_link_config else None,
+            column_config=merged_link_config if merged_link_config else None,
         )
         hub_col1, hub_col2 = st.columns([2, 1])
         with hub_col1:
@@ -4977,7 +5821,11 @@ def _render_heatmap_hub_view():
         _render_card_section_header(
             "已快取 ETF 熱力圖", "集中管理你曾開啟過的 ETF 熱力圖，並可釘選成獨立卡片。"
         )
-        entries = _load_heatmap_hub_entries(pinned_only=False)
+        entries = [
+            row
+            for row in _load_heatmap_hub_entries(pinned_only=False)
+            if _normalize_heatmap_etf_code(getattr(row, "etf_code", "")) not in HEATMAP_CARD_BLOCKLIST
+        ]
         if not entries:
             st.caption(
                 "目前尚無已開啟的 ETF 熱力圖紀錄。先到「台股 ETF 全類型總表」點擊 ETF 名稱即可新增。"
@@ -5031,7 +5879,7 @@ def _render_heatmap_hub_view():
             if c6.button("開啟", key=f"heatmap_hub_open:{code}", width="stretch"):
                 _upsert_heatmap_hub_entry(etf_code=code, etf_name=name, opened=True)
                 st.session_state[HEATMAP_HUB_SESSION_ACTIVE_KEY] = {"code": code, "name": name}
-                st.session_state["active_page"] = f"{HEATMAP_DYNAMIC_CARD_PREFIX}{code}"
+                st.session_state["active_page"] = _heatmap_page_key_for_code(code)
                 st.rerun()
 
 
@@ -5105,6 +5953,9 @@ def _render_top10_etf_2026_ytd_view(
         _build_tw_etf_top10_between.clear()
         _build_tw_active_etf_ytd_between.clear()
         _load_tw_market_return_between.clear()
+        _load_tw_etf_daily_change_map.clear()
+        _load_tw_snapshot_open_map.clear()
+        _load_tw_market_daily_return.clear()
         st.session_state.pop(payload_key, None)
         st.rerun()
 
@@ -5214,6 +6065,24 @@ def _render_top10_etf_2026_ytd_view(
             performance_col_label=performance_col_label,
             underperform_col_label=underperform_col_label if rank_by_underperform else None,
         )
+        daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
+        _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or end_used)
+        market_daily_return, market_daily_symbol, _, _, market_daily_issues = _load_tw_market_daily_return(
+            end_used, force_sync=False
+        )
+        market_issues.extend(market_daily_issues)
+        table_df = _with_tw_today_fields(
+            table_df,
+            daily_change_map=daily_change_map,
+            daily_open_map=daily_open_map,
+            market_daily_return_pct=market_daily_return,
+        )
+        top10_today_df = _with_tw_today_fields(
+            top10_etf_df,
+            daily_change_map=daily_change_map,
+            daily_open_map=daily_open_map,
+            market_daily_return_pct=market_daily_return,
+        )
 
         top10_ratio_text = (
             "—" if universe_count <= 0 else f"{(len(top10_etf_df) / universe_count) * 100.0:.1f}%"
@@ -5229,8 +6098,7 @@ def _render_top10_etf_2026_ytd_view(
         else:
             m4.metric("市值型", str(int((type_series == "市值型").sum())))
             m5.metric("股利型", str(int((type_series == "股利型").sum())))
-        split_metric_label = "有復權事件（已排除）" if exclude_split_event else "有復權事件"
-        m6.metric(split_metric_label, str(int((top10_etf_df["復權事件"] != "—").sum())))
+        m6.metric("今日上漲檔數", str(int((top10_today_df["今日漲幅"] > 0).sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
             end_used=end_used,
@@ -5247,6 +6115,17 @@ def _render_top10_etf_2026_ytd_view(
             )
         else:
             st.caption("大盤對照：目前無法取得，`贏輸台股大盤(%)` 先顯示為空白。")
+        if (
+            market_daily_return is not None
+            and market_daily_symbol
+            and daily_prev_used
+            and daily_end_used
+        ):
+            st.caption(
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{daily_prev_used} -> {daily_end_used}）"
+            )
+        else:
+            st.caption("今日大盤漲幅：目前無法取得，`今日贏大盤%` 先顯示空白。")
         if market_issues:
             _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
@@ -5255,7 +6134,7 @@ def _render_top10_etf_2026_ytd_view(
                 "篩選條件：僅納入 `股利型`（名稱含高股息/股利/股息/收益/配息/月配/季配/年配）ETF。"
             )
         if exclude_split_event:
-            st.caption("復權處理：已排除區間內有復權事件的標的（避免分割影響價格比較）。")
+            st.caption("區間處理：已排除區間內含分割事件的標的（避免價格比較失真）。")
         if rank_by_underperform:
             st.caption(
                 f"排行規則：以 `贏輸台股大盤(%)` 最低（輸給大盤最多）排序，取倒數 {display_n} 名。"
@@ -5617,7 +6496,7 @@ def _render_consensus_representative_etf_view():
                     "排名",
                     "ETF代碼",
                     "ETF名稱",
-                    "管理費",
+                    "管理費(%)",
                     "ETF規模(億)",
                     "交集股數",
                     "交集權重總和(%)",
@@ -5659,7 +6538,7 @@ def _render_consensus_representative_etf_view():
                     "排名",
                     "ETF代碼",
                     "ETF名稱",
-                    "管理費",
+                    "管理費(%)",
                     "ETF規模(億)",
                     "交集股數",
                     "交集權重總和(%)",
@@ -5811,7 +6690,7 @@ def _render_two_etf_pick_view():
                     "角色",
                     "ETF代碼",
                     "ETF名稱",
-                    "管理費",
+                    "管理費(%)",
                     "ETF規模(億)",
                     "ETF類型",
                     "YTD報酬(%)",
@@ -5837,7 +6716,7 @@ def _render_two_etf_pick_view():
                     "前10排名",
                     "ETF代碼",
                     "ETF名稱",
-                    "管理費",
+                    "管理費(%)",
                     "ETF規模(億)",
                     "ETF類型",
                     "YTD報酬(%)",
@@ -5866,6 +6745,9 @@ def _render_active_etf_2026_ytd_view():
         _fetch_twse_snapshot_with_fallback.clear()
         _build_tw_active_etf_ytd_between.clear()
         _load_tw_market_return_between.clear()
+        _load_tw_etf_daily_change_map.clear()
+        _load_tw_snapshot_open_map.clear()
+        _load_tw_market_daily_return.clear()
         st.session_state.pop("active_etf_ytd_compare_payload", None)
         st.session_state.pop("active_etf_2025_compare_payload", None)
         st.rerun()
@@ -5931,7 +6813,7 @@ def _render_active_etf_2026_ytd_view():
             market_issues.append(f"market_2025: {exc}")
 
         etf_df["2025績效(%)"] = etf_df["代碼"].astype(str).str.strip().str.upper().map(y2025_map)
-        etf_df["2025績效(%)"] = pd.to_numeric(etf_df["2025績效(%)"], errors="coerce").round(2)
+        etf_df["2025績效(%)"] = _truncate_series(etf_df["2025績效(%)"], digits=2)
         etf_df["贏輸台股大盤(%)"] = np.nan
         if market_return_pct is not None and math.isfinite(float(market_return_pct)):
             etf_df["贏輸台股大盤(%)"] = (
@@ -5943,21 +6825,39 @@ def _render_active_etf_2026_ytd_view():
             "排名": "—",
             "代碼": benchmark_code,
             "ETF": "台股大盤",
-            "期初收盤": np.nan,
-            "復權期初": np.nan,
-            "期末收盤": np.nan,
+            "開盤": np.nan,
+            "收盤": np.nan,
             "績效起算日": "—",
             "績效終點日": end_used,
-            "復權事件": "—",
-            "2025績效(%)": round(float(market_2025_return_pct), 2)
-            if market_2025_return_pct is not None
-            else np.nan,
+            "2025績效(%)": (
+                _truncate_value(market_2025_return_pct, digits=2)
+                if market_2025_return_pct is not None
+                else np.nan
+            ),
             "YTD報酬(%)": round(float(market_return_pct), 2)
             if market_return_pct is not None
             else np.nan,
             "贏輸台股大盤(%)": 0.0 if market_return_pct is not None else np.nan,
         }
         table_df = pd.concat([pd.DataFrame([benchmark_row]), etf_df], ignore_index=True)
+        daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
+        _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or end_used)
+        market_daily_return, market_daily_symbol, _, _, market_daily_issues = _load_tw_market_daily_return(
+            end_used, force_sync=False
+        )
+        market_issues.extend(market_daily_issues)
+        table_df = _with_tw_today_fields(
+            table_df,
+            daily_change_map=daily_change_map,
+            daily_open_map=daily_open_map,
+            market_daily_return_pct=market_daily_return,
+        )
+        etf_today_df = _with_tw_today_fields(
+            etf_df,
+            daily_change_map=daily_change_map,
+            daily_open_map=daily_open_map,
+            market_daily_return_pct=market_daily_return,
+        )
         table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
         if "排名" in table_df.columns:
             table_df["排名"] = table_df["排名"].map(lambda v: str(v) if pd.notna(v) else "")
@@ -5965,14 +6865,14 @@ def _render_active_etf_2026_ytd_view():
             "排名",
             "代碼",
             "ETF",
-            "管理費",
+            "管理費(%)",
             "ETF規模(億)",
-            "期初收盤",
-            "復權期初",
-            "期末收盤",
+            "開盤",
+            "收盤",
             "績效起算日",
             "績效終點日",
-            "復權事件",
+            "今日漲幅",
+            "今日贏大盤%",
             "2025績效(%)",
             "YTD報酬(%)",
             "贏輸台股大盤(%)",
@@ -5983,7 +6883,7 @@ def _render_active_etf_2026_ytd_view():
         m1.metric("樣本數", str(len(etf_df)))
         m2.metric("正報酬檔數", str(int((etf_df["YTD報酬(%)"] > 0).sum())))
         m3.metric("負報酬檔數", str(int((etf_df["YTD報酬(%)"] < 0).sum())))
-        m4.metric("有復權事件", str(int((etf_df["復權事件"] != "—").sum())))
+        m4.metric("今日上漲檔數", str(int((etf_today_df["今日漲幅"] > 0).sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
             end_used=end_used,
@@ -5998,6 +6898,17 @@ def _render_active_etf_2026_ytd_view():
             )
         else:
             st.caption("大盤對照：目前無法取得，`贏輸台股大盤(%)` 先顯示為空白。")
+        if (
+            market_daily_return is not None
+            and market_daily_symbol
+            and daily_prev_used
+            and daily_end_used
+        ):
+            st.caption(
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{daily_prev_used} -> {daily_end_used}）"
+            )
+        else:
+            st.caption("今日大盤漲幅：目前無法取得，`今日贏大盤%` 先顯示空白。")
         if market_issues:
             _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption(
@@ -6929,11 +7840,6 @@ def _render_tutorial_view():
                 "什麼時候用": "看 00735 內部強弱分布",
             },
             {
-                "分頁": "00993A 熱力圖",
-                "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介",
-                "什麼時候用": "看 00993A 內部強弱分布",
-            },
-            {
                 "分頁": "0050 熱力圖",
                 "你會看到什麼": "成分股相對大盤熱力圖 + 公司簡介（依權重排序）",
                 "什麼時候用": "看台灣 50 內部強弱",
@@ -6964,7 +7870,7 @@ def _render_tutorial_view():
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
                 "3. 再到 `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
-                "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00735 / 00993A / 0050 / 0052 熱力圖`。",
+                "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00735 / 0050 / 0052 熱力圖`。",
                 "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
             ]
         )
@@ -8194,6 +9100,7 @@ def _render_tw_etf_heatmap_view(
             name_map=name_map,
             min_required=min_required,
             progress_callback=lambda ratio: progress.progress(float(ratio)),
+            max_workers=6 if bool(parallel_sync) else 1,
         )
         for item in rows:
             if not isinstance(item, dict):
@@ -8409,12 +9316,19 @@ def _render_tw_etf_heatmap_view(
     )
 
     if snapshot and snapshot.symbols:
-        _render_heatmap_constituent_intro_sections(
-            etf_code=etf_text,
-            snapshot_symbols=list(snapshot.symbols),
-            service=service,
-            full_rows_00910=full_rows_for_name_lookup,
-        )
+        if etf_text == "00735" and has_overseas_constituents:
+            _render_00735_heatmap_intro_tabs(
+                snapshot_symbols=list(snapshot.symbols),
+                service=service,
+                full_rows=full_rows_for_name_lookup,
+            )
+        else:
+            _render_heatmap_constituent_intro_sections(
+                etf_code=etf_text,
+                snapshot_symbols=list(snapshot.symbols),
+                service=service,
+                full_rows_00910=full_rows_for_name_lookup,
+            )
 
     perf_timer.mark("heatmap_render_complete")
     if perf_timer.enabled:
@@ -8568,6 +9482,7 @@ def _render_tw_etf_rotation_view():
                 normalize_ohlcv_frame=normalize_ohlcv_frame,
                 min_required=ROTATION_MIN_BARS,
                 progress_callback=lambda ratio: progress.progress(float(ratio)),
+                max_workers=6 if bool(parallel_sync) else 1,
             )
         progress.empty()
         bars_by_symbol = dict(prepared.bars_by_symbol)
@@ -8950,11 +9865,6 @@ def _render_0050_heatmap_view():
 def _render_0052_heatmap_view():
     _render_tw_etf_heatmap_view("0052", page_desc="科技ETF")
 
-
-def _render_00993a_heatmap_view():
-    _render_tw_etf_heatmap_view("00993A", page_desc="台股ETF")
-
-
 def _render_db_browser_view():
     store = _history_store()
     backend_name = str(getattr(store, "backend_name", "duckdb") or "duckdb").strip().lower()
@@ -9245,7 +10155,6 @@ def main():
         "00910 熱力圖": _render_00910_heatmap_view,
         "00935 熱力圖": _render_00935_heatmap_view,
         "00735 熱力圖": _render_00735_heatmap_view,
-        "00993A 熱力圖": _render_00993a_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
         "0052 熱力圖": _render_0052_heatmap_view,
         "資料庫檢視": _render_db_browser_view,

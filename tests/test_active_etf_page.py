@@ -23,15 +23,18 @@ from app import (
     _build_symbol_line_styles,
     _build_tw_active_etf_ytd_between,
     _build_tw_etf_all_types_performance_table,
+    _build_tw_etf_aum_history_wide,
     _build_tw_etf_top10_between,
     _build_two_etf_aggressive_picks,
     _classify_issue_level,
     _classify_tw_etf,
     _compute_jaccard_pct,
     _compute_tw_equal_weight_compare_payload,
+    _compute_tw_etf_aum_alert_mask,
     _consensus_threshold_candidates,
     _consume_heatmap_drilldown_query,
     _decorate_dataframe_backtest_links,
+    _decorate_tw_etf_aum_history_links,
     _decorate_tw_etf_name_heatmap_links,
     _decorate_tw_etf_top10_ytd_table,
     _dynamic_heatmap_page_renderers,
@@ -41,6 +44,7 @@ from app import (
     _is_tw_active_etf,
     _load_cached_backtest_payload,
     _load_tw_benchmark_bars,
+    _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
     _resolve_tw_symbol_names,
     _snapshot_fallback_depth,
@@ -271,7 +275,7 @@ class ActiveEtfPageTests(unittest.TestCase):
             ):
                 _consume_heatmap_drilldown_query()
 
-            self.assertEqual(str(app.st.session_state.get("active_page", "")), "ETF熱力圖:00735")
+            self.assertEqual(str(app.st.session_state.get("active_page", "")), "00735 熱力圖")
             active_payload = app.st.session_state.get("heatmap_hub_active_etf")
             self.assertIsInstance(active_payload, dict)
             assert isinstance(active_payload, dict)
@@ -285,17 +289,9 @@ class ActiveEtfPageTests(unittest.TestCase):
             )
             clear_mock.assert_called_once()
 
-            with (
-                patch("app._load_heatmap_hub_entries", return_value=[]),
-                patch("app._render_tw_etf_heatmap_view") as render_mock,
-            ):
+            with patch("app._load_heatmap_hub_entries", return_value=[]):
                 renderers = _dynamic_heatmap_page_renderers()
-                self.assertIn("ETF熱力圖:00735", renderers)
-                renderers["ETF熱力圖:00735"]()
-
-            render_mock.assert_called_once_with(
-                "00735", page_desc="國泰臺韓科技", auto_run_if_missing=True
-            )
+                self.assertNotIn("ETF熱力圖:00735", renderers)
         finally:
             if has_old_active_page:
                 app.st.session_state["active_page"] = old_active_page
@@ -306,6 +302,26 @@ class ActiveEtfPageTests(unittest.TestCase):
             else:
                 app.st.session_state.pop("heatmap_hub_active_etf", None)
 
+    def test_heatmap_drilldown_query_blocks_00993a(self):
+        url = build_heatmap_drill_url("00993A", "安聯台灣主動", src="all_types_table")
+        query = parse_qs(url.lstrip("?"))
+
+        def _query_value(name: str) -> str:
+            values = query.get(name, [])
+            return str(values[0]) if values else ""
+
+        with (
+            patch("app._query_param_first", side_effect=_query_value),
+            patch("app._upsert_heatmap_hub_entry") as upsert_mock,
+            patch("app._clear_query_params") as clear_mock,
+            patch("app.st.warning") as warning_mock,
+        ):
+            _consume_heatmap_drilldown_query()
+
+        upsert_mock.assert_not_called()
+        clear_mock.assert_called_once()
+        warning_mock.assert_called_once()
+
     def test_attach_management_fee_column(self):
         source = pd.DataFrame(
             [
@@ -313,11 +329,15 @@ class ActiveEtfPageTests(unittest.TestCase):
                 {"代碼": "^TWII", "ETF": "台股大盤"},
             ]
         )
-        out = _attach_tw_etf_management_fee_column(source)
-        self.assertIn("管理費", out.columns)
+        with patch(
+            "app._get_tw_etf_management_fee_whitelist",
+            return_value={"0050": "0.4567%"},
+        ):
+            out = _attach_tw_etf_management_fee_column(source)
+        self.assertIn("管理費(%)", out.columns)
         self.assertIn("ETF規模(億)", out.columns)
-        self.assertEqual(str(out.loc[out["代碼"] == "0050", "管理費"].iloc[0]), "0.15%起")
-        self.assertEqual(str(out.loc[out["代碼"] == "^TWII", "管理費"].iloc[0]), "—")
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "管理費(%)"].iloc[0]), 0.45)
+        self.assertTrue(pd.isna(out.loc[out["代碼"] == "^TWII", "管理費(%)"].iloc[0]))
 
     def test_attach_aum_column(self):
         source = pd.DataFrame(
@@ -329,8 +349,82 @@ class ActiveEtfPageTests(unittest.TestCase):
         with patch("app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64}):
             out = _attach_tw_etf_aum_column(source)
         self.assertIn("ETF規模(億)", out.columns)
-        self.assertEqual(str(out.loc[out["代碼"] == "0050", "ETF規模(億)"].iloc[0]), "12,491.64")
-        self.assertEqual(str(out.loc[out["代碼"] == "^TWII", "ETF規模(億)"].iloc[0]), "—")
+        self.assertEqual(int(out.loc[out["代碼"] == "0050", "ETF規模(億)"].iloc[0]), 12491)
+        self.assertTrue(pd.isna(out.loc[out["代碼"] == "^TWII", "ETF規模(億)"].iloc[0]))
+
+    def test_build_tw_etf_aum_history_wide(self):
+        history = pd.DataFrame(
+            [
+                {
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_date": "2026-01-03",
+                    "aum_billion": 1200.0,
+                },
+                {
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_date": "2026-01-02",
+                    "aum_billion": 1100.0,
+                },
+                {
+                    "etf_code": "0056",
+                    "etf_name": "高股息",
+                    "trade_date": "2026-01-03",
+                    "aum_billion": 900.0,
+                },
+            ]
+        )
+        out = _build_tw_etf_aum_history_wide(history)
+        self.assertEqual(
+            list(out.columns), ["編號", "台股代號", "ETF名稱", "2026-01-02(億)", "2026-01-03(億)"]
+        )
+        self.assertEqual(int(out.iloc[0]["編號"]), 1)
+        self.assertEqual(str(out.loc[out["台股代號"] == "0050", "ETF名稱"].iloc[0]), "元大台灣50")
+
+    def test_compute_tw_etf_aum_alert_mask(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "編號": 1,
+                    "台股代號": "0050",
+                    "ETF名稱": "元大台灣50",
+                    "2026-01-02(億)": 100.0,
+                    "2026-01-03(億)": 111.0,
+                    "2026-01-04(億)": 95.0,
+                }
+            ]
+        )
+        out = _compute_tw_etf_aum_alert_mask(frame, up_threshold=0.10)
+        self.assertEqual(out.get((0, "2026-01-03(億)")), "#ffd1dc")
+        self.assertNotIn((0, "2026-01-04(億)"), out)
+
+    def test_decorate_tw_etf_aum_history_links(self):
+        source = pd.DataFrame(
+            [
+                {"編號": 1, "台股代號": "0050", "ETF名稱": "元大台灣50", "2026-01-03(億)": 1200},
+                {"編號": 2, "台股代號": "00935", "ETF名稱": "野村臺灣新科技50", "2026-01-03(億)": 800},
+            ]
+        )
+        out, cfg = _decorate_tw_etf_aum_history_links(source)
+        self.assertIn("台股代號", cfg)
+        self.assertIn("ETF名稱", cfg)
+        self.assertTrue(str(out.iloc[0]["台股代號"]).startswith("?bt_symbol=0050"))
+        self.assertIn("hm_etf=00935", str(out.iloc[1]["ETF名稱"]))
+
+    def test_recent_twse_trading_days(self):
+        is_trading = {
+            "20260112": False,
+            "20260111": False,
+            "20260110": False,
+            "20260109": True,
+            "20260108": True,
+            "20260107": True,
+            "20260106": True,
+        }
+        with patch("app._is_twse_trading_day", side_effect=lambda token: bool(is_trading.get(token))):
+            out = _recent_twse_trading_days(anchor_yyyymmdd="20260112", count=3, max_scan_days=7)
+        self.assertEqual(out, ["20260107", "20260108", "20260109"])
 
     def test_format_weight_pct_label(self):
         self.assertEqual(_format_weight_pct_label(3.456), "3.46%")
@@ -626,12 +720,19 @@ class ActiveEtfPageTests(unittest.TestCase):
                 {"code": "00632R", "name": "元大台灣50反1", "close": 4.0},
             ]
         )
+        class _EmptyStore:
+            def load_daily_bars(self, symbol, market, start=None, end=None):
+                return pd.DataFrame()
+
+            def sync_symbol_history(self, symbol, market, start=None, end=None):
+                return SimpleNamespace(error=None)
 
         with (
             patch(
                 "app._fetch_twse_snapshot_with_fallback",
                 side_effect=[("20251231", start_df), ("20260214", end_df)],
             ),
+            patch("app._history_store", return_value=_EmptyStore()),
             patch("app.known_split_events", return_value=[]),
         ):
             out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
@@ -644,17 +745,85 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertEqual(list(out["代碼"]), ["0050", "0056", "00935"])
 
-    def test_build_tw_etf_top10_between_empty_intersection(self):
+    def test_build_tw_etf_top10_between_includes_newly_listed_etf(self):
         _build_tw_etf_top10_between.clear()
 
-        start_df = pd.DataFrame([{"code": "0050", "name": "元大台灣50", "close": 100.0}])
-        end_df = pd.DataFrame([{"code": "0056", "name": "元大高股息", "close": 30.0}])
+        start_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 100.0},
+                {"code": "0056", "name": "元大高股息", "close": 30.0},
+            ]
+        )
+        end_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "元大台灣50", "close": 110.0},
+                {"code": "0056", "name": "元大高股息", "close": 33.0},
+                {"code": "00993A", "name": "主動安聯台灣", "close": 120.0},
+            ]
+        )
+
+        def _bars(rows: list[tuple[str, float]]) -> pd.DataFrame:
+            idx = pd.to_datetime([d for d, _ in rows], utc=True)
+            closes = [float(v) for _, v in rows]
+            return pd.DataFrame(
+                {
+                    "open": closes,
+                    "high": closes,
+                    "low": closes,
+                    "close": closes,
+                    "volume": [0.0] * len(closes),
+                },
+                index=idx,
+            )
+
+        class _FakeStore:
+            def __init__(self):
+                self._bars_map = {
+                    "00993A": _bars([("2026-02-03", 100.0), ("2026-02-14", 120.0)]),
+                }
+
+            def load_daily_bars(self, symbol, market, start=None, end=None):
+                return self._bars_map.get(str(symbol), pd.DataFrame())
+
+            def sync_symbol_history(self, symbol, market, start=None, end=None):
+                return SimpleNamespace(error=None)
 
         with (
             patch(
                 "app._fetch_twse_snapshot_with_fallback",
                 side_effect=[("20251231", start_df), ("20260214", end_df)],
             ),
+            patch("app._history_store", return_value=_FakeStore()),
+            patch("app.known_split_events", return_value=[]),
+        ):
+            out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
+                "20260101", "20260216", include_all_etf=True
+            )
+
+        self.assertEqual(start_used, "20251231")
+        self.assertEqual(end_used, "20260214")
+        self.assertEqual(universe_count, 3)
+        self.assertEqual(list(out["代碼"]), ["00993A", "0050", "0056"])
+        self.assertEqual(float(out.loc[out["代碼"] == "00993A", "區間報酬(%)"].iloc[0]), 20.0)
+
+    def test_build_tw_etf_top10_between_empty_intersection(self):
+        _build_tw_etf_top10_between.clear()
+
+        start_df = pd.DataFrame([{"code": "0050", "name": "元大台灣50", "close": 100.0}])
+        end_df = pd.DataFrame([{"code": "0056", "name": "元大高股息", "close": 30.0}])
+        class _EmptyStore:
+            def load_daily_bars(self, symbol, market, start=None, end=None):
+                return pd.DataFrame()
+
+            def sync_symbol_history(self, symbol, market, start=None, end=None):
+                return SimpleNamespace(error=None)
+
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20251231", start_df), ("20260214", end_df)],
+            ),
+            patch("app._history_store", return_value=_EmptyStore()),
             patch("app.known_split_events", return_value=[]),
         ):
             out, start_used, end_used, universe_count = _build_tw_etf_top10_between(
@@ -1241,7 +1410,7 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "復權期初": 100.0,
                     "期末收盤": 112.0,
                     "復權事件": "—",
-                    "區間報酬(%)": 12.0,
+                    "區間報酬(%)": 12.349,
                 },
                 {
                     "排名": 2,
@@ -1252,14 +1421,14 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "復權期初": 50.0,
                     "期末收盤": 57.5,
                     "復權事件": "—",
-                    "區間報酬(%)": 15.0,
+                    "區間報酬(%)": 15.678,
                 },
             ]
         )
         y2025_df = pd.DataFrame(
             [
-                {"代碼": "0050", "區間報酬(%)": 30.0},
-                {"代碼": "00935", "區間報酬(%)": 20.0},
+                {"代碼": "0050", "區間報酬(%)": 30.456},
+                {"代碼": "00935", "區間報酬(%)": 20.987},
             ]
         )
         with (
@@ -1269,13 +1438,25 @@ class ActiveEtfPageTests(unittest.TestCase):
                     (ytd_df, "20251231", "20260214", 2),
                     (y2025_df, "20241231", "20251231", 2),
                 ],
-            ),
+            ) as top10_build_mock,
             patch(
                 "app._load_tw_market_return_between",
                 side_effect=[
-                    (10.0, "0050", []),
-                    (18.0, "0050", []),
+                    (10.555, "0050", []),
+                    (18.111, "0050", []),
                 ],
+            ),
+            patch(
+                "app._load_tw_etf_daily_change_map",
+                return_value=({"0050": 1.5, "00935": 4.2}, "20260214", "20260213"),
+            ),
+            patch(
+                "app._load_tw_snapshot_open_map",
+                return_value=("20260214", {"0050": 113.0, "00935": 58.0}),
+            ),
+            patch(
+                "app._load_tw_market_daily_return",
+                return_value=(0.8, "0050", "20260213", "20260214", []),
             ),
         ):
             out, meta = _build_tw_etf_all_types_performance_table(
@@ -1286,16 +1467,33 @@ class ActiveEtfPageTests(unittest.TestCase):
             )
 
         self.assertEqual(len(out), 2)
+        self.assertIn("編號", out.columns)
+        self.assertNotIn("排名", out.columns)
         self.assertIn("2025績效(%)", out.columns)
         self.assertIn("2026YTD績效(%)", out.columns)
-        self.assertIn("贏輸台股大盤2025(%)", out.columns)
-        self.assertIn("贏輸台股大盤2026YTD(%)", out.columns)
-        self.assertEqual(float(out.loc[out["代碼"] == "0050", "贏輸台股大盤2025(%)"].iloc[0]), 12.0)
+        self.assertIn("輸贏大盤2025(%)", out.columns)
+        self.assertIn("輸贏大盤2026YTD(%)", out.columns)
+        self.assertIn("管理費(%)", out.columns)
+        self.assertIn("開盤", out.columns)
+        self.assertIn("收盤", out.columns)
+        self.assertIn("今日漲幅", out.columns)
+        self.assertIn("今日贏大盤%", out.columns)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "2025績效(%)"].iloc[0]), 30.45)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "2026YTD績效(%)"].iloc[0]), 15.67)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "開盤"].iloc[0]), 113.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 58.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "輸贏大盤2025(%)"].iloc[0]), 12.33)
         self.assertEqual(
-            float(out.loc[out["代碼"] == "00935", "贏輸台股大盤2026YTD(%)"].iloc[0]), 5.0
+            float(out.loc[out["代碼"] == "00935", "輸贏大盤2026YTD(%)"].iloc[0]), 5.11
         )
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "今日漲幅"].iloc[0]), 4.2)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "今日贏大盤%"].iloc[0]), 0.7)
         self.assertEqual(str(meta.get("market_2025_symbol", "")), "0050")
         self.assertEqual(str(meta.get("market_ytd_symbol", "")), "0050")
+        self.assertEqual(str(meta.get("market_daily_symbol", "")), "0050")
+        self.assertEqual(int(top10_build_mock.call_count), 2)
+        for call in top10_build_mock.call_args_list:
+            self.assertTrue(bool(call.kwargs.get("include_all_etf", False)))
 
 
 if __name__ == "__main__":

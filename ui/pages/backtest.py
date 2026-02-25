@@ -728,6 +728,20 @@ def _render_backtest_view(*, ctx: object):
         params_base=run_params_base,
         schema_version=BACKTEST_REPLAY_SCHEMA_VERSION,
     )
+    run_cache_order_key = "bt_result_session_order"
+    max_session_payloads = 3
+
+    def _cache_run_payload(cache_key: str, cache_payload: dict[str, object]) -> None:
+        st.session_state[cache_key] = cache_payload
+        raw_order = st.session_state.get(run_cache_order_key, [])
+        order = raw_order if isinstance(raw_order, list) else []
+        order = [str(item) for item in order if str(item)]
+        order = [item for item in order if item != cache_key]
+        order.append(cache_key)
+        while len(order) > max_session_payloads:
+            evicted = order.pop(0)
+            st.session_state.pop(evicted, None)
+        st.session_state[run_cache_order_key] = order
 
     payload = st.session_state.get(run_key)
     if payload is None:
@@ -741,7 +755,7 @@ def _render_backtest_view(*, ctx: object):
             st.caption(cache_message)
         if isinstance(cached_payload, dict):
             payload = cached_payload
-            st.session_state[run_key] = cached_payload
+            _cache_run_payload(run_key, cached_payload)
 
     if payload is None:
         cost_model = CostModel(fee_rate=fee_rate, sell_tax_rate=sell_tax, slippage_rate=slippage)
@@ -767,7 +781,7 @@ def _render_backtest_view(*, ctx: object):
             st.error(f"回測失敗：{exc}")
             return
 
-        st.session_state[run_key] = run_payload
+        _cache_run_payload(run_key, run_payload)
         payload = run_payload
         primary = ",".join(symbols)
         summary_metrics = run_payload["result"].metrics.__dict__
@@ -1170,6 +1184,582 @@ def _render_backtest_view(*, ctx: object):
             )
 
     speed_steps = {"0.5x": 1, "1x": 2, "2x": 4, "5x": 8, "10x": 16}
+    rsi_oversold = 30.0
+    rsi_weak = 45.0
+    rsi_neutral_strong = 60.0
+    rsi_strong = 70.0
+    kd_oversold = 20.0
+    kd_weak = 40.0
+    kd_sweet = 60.0
+    kd_overheat_level = 80.0
+    mfi_oversold = 20.0
+    mfi_weak = 50.0
+    mfi_strong = 80.0
+    bias_overheat_pct = 0.06
+    bias_weak_pct = -0.03
+    stop_loss_atr_mult = 1.5
+    stop_loss_atr_conservative_mult = 2.0
+    vwap_hot_gap_pct = 0.03
+    vwap_near_gap_pct = 0.01
+    atr_high_vol_ratio = 0.035
+    indicator_snapshot_cols = [
+        "close",
+        "sma_5",
+        "sma_20",
+        "sma_60",
+        "rsi_14",
+        "stoch_k",
+        "stoch_d",
+        "mfi_14",
+        "macd",
+        "macd_signal",
+        "macd_hist",
+        "bb_mid",
+        "bb_upper",
+        "bb_lower",
+        "vwap",
+        "atr_14",
+    ]
+
+    def _to_float(value: object) -> float | None:
+        fv = pd.to_numeric(value, errors="coerce")
+        if pd.isna(fv):
+            return None
+        return float(fv)
+
+    def _fmt_num(value: float | None, digits: int = 2) -> str:
+        if value is None:
+            return "—"
+        return f"{float(value):.{int(digits)}f}"
+
+    def _fmt_pct(value: float | None, digits: int = 2) -> str:
+        if value is None:
+            return "—"
+        return f"{float(value) * 100:.{int(digits)}f}%"
+
+    def _tf(flag: bool | None) -> str:
+        if flag is None:
+            return "N/A"
+        return "True" if bool(flag) else "False"
+
+    def _clamp_score(value: float) -> int:
+        return int(max(0, min(100, round(float(value)))))
+
+    def _render_replay_indicator_snapshot_table(ind_now: pd.DataFrame, idx_now: int) -> None:
+        if not isinstance(ind_now, pd.DataFrame) or ind_now.empty:
+            st.caption("技術快照完整指標：資料不足。")
+            return
+        row_pos = min(max(int(idx_now), 0), len(ind_now.index) - 1)
+        row = ind_now.iloc[row_pos]
+        row_dt = pd.Timestamp(ind_now.index[row_pos]).strftime("%Y-%m-%d")
+        snapshot_data: dict[str, object] = {}
+        for col in indicator_snapshot_cols:
+            value = pd.to_numeric(row.get(col), errors="coerce")
+            snapshot_data[col] = float(value) if pd.notna(value) else np.nan
+        snapshot_df = pd.DataFrame([snapshot_data])
+
+        close = _to_float(snapshot_data.get("close"))
+        sma_5 = _to_float(snapshot_data.get("sma_5"))
+        sma_20 = _to_float(snapshot_data.get("sma_20"))
+        sma_60 = _to_float(snapshot_data.get("sma_60"))
+        rsi_14 = _to_float(snapshot_data.get("rsi_14"))
+        stoch_k = _to_float(snapshot_data.get("stoch_k"))
+        stoch_d = _to_float(snapshot_data.get("stoch_d"))
+        mfi_14 = _to_float(snapshot_data.get("mfi_14"))
+        macd = _to_float(snapshot_data.get("macd"))
+        macd_signal = _to_float(snapshot_data.get("macd_signal"))
+        macd_hist = _to_float(snapshot_data.get("macd_hist"))
+        bb_mid = _to_float(snapshot_data.get("bb_mid"))
+        bb_upper = _to_float(snapshot_data.get("bb_upper"))
+        bb_lower = _to_float(snapshot_data.get("bb_lower"))
+        vwap = _to_float(snapshot_data.get("vwap"))
+        atr_14 = _to_float(snapshot_data.get("atr_14"))
+
+        bias_pct = (
+            (float(close) - float(sma_20)) / float(sma_20)
+            if close is not None and sma_20 not in {None, 0}
+            else None
+        )
+        vwap_gap_pct = (
+            (float(close) - float(vwap)) / float(vwap)
+            if close is not None and vwap not in {None, 0}
+            else None
+        )
+        atr_ratio = (
+            float(atr_14) / float(close)
+            if atr_14 is not None and close not in {None, 0}
+            else None
+        )
+
+        bull_align = bool(
+            sma_5 is not None
+            and sma_20 is not None
+            and sma_60 is not None
+            and close is not None
+            and sma_5 > sma_20 > sma_60
+            and close > sma_20
+        )
+        trend_weaken = bool(
+            (close is not None and sma_20 is not None and close < sma_20)
+            or (sma_20 is not None and sma_60 is not None and sma_20 < sma_60)
+        )
+        if bull_align:
+            trend_state = "多"
+        elif trend_weaken and close is not None and sma_20 is not None and close < sma_20:
+            trend_state = "空"
+        else:
+            trend_state = "盤整"
+
+        if rsi_14 is None:
+            rsi_text = "資料不足"
+        elif rsi_14 < rsi_oversold:
+            rsi_text = "超賣（<30）"
+        elif rsi_14 < rsi_weak:
+            rsi_text = "偏弱（30-45）"
+        elif rsi_14 < rsi_neutral_strong:
+            rsi_text = "中性偏強（45-60）"
+        elif rsi_14 <= rsi_strong:
+            rsi_text = "強勢（60-70）"
+        else:
+            rsi_text = "過熱（>70）"
+
+        prev_k = None
+        prev_d = None
+        if row_pos >= 1:
+            prev_row = ind_now.iloc[row_pos - 1]
+            prev_k = _to_float(prev_row.get("stoch_k"))
+            prev_d = _to_float(prev_row.get("stoch_d"))
+        kd_golden_cross = bool(
+            prev_k is not None
+            and prev_d is not None
+            and stoch_k is not None
+            and stoch_d is not None
+            and prev_k <= prev_d
+            and stoch_k > stoch_d
+        )
+        kd_death_cross = bool(
+            prev_k is not None
+            and prev_d is not None
+            and stoch_k is not None
+            and stoch_d is not None
+            and prev_k >= prev_d
+            and stoch_k < stoch_d
+        )
+        kd_sweet_cross = bool(
+            kd_golden_cross
+            and stoch_k is not None
+            and stoch_d is not None
+            and kd_weak <= stoch_k <= kd_sweet
+            and kd_weak <= stoch_d <= kd_sweet
+        )
+        kd_overheat = bool(
+            stoch_k is not None
+            and stoch_d is not None
+            and stoch_k > kd_overheat_level
+            and stoch_d > kd_overheat_level
+        )
+        if stoch_k is None or stoch_d is None:
+            kd_zone_text = "資料不足"
+        elif kd_overheat:
+            kd_zone_text = "高檔鈍化/過熱（K、D > 80）"
+        elif stoch_k < kd_oversold and stoch_d < kd_oversold:
+            kd_zone_text = "低檔超賣（K、D < 20）"
+        elif kd_sweet_cross:
+            kd_zone_text = "40-60 黃金交叉甜蜜區"
+        elif kd_golden_cross:
+            kd_zone_text = "黃金交叉"
+        elif kd_death_cross:
+            kd_zone_text = "死亡交叉"
+        else:
+            kd_zone_text = "中性區間震盪"
+
+        if mfi_14 is None:
+            mfi_text = "資料不足"
+        elif mfi_14 < mfi_oversold:
+            mfi_text = "超賣（<20）"
+        elif mfi_14 < mfi_weak:
+            mfi_text = "中性偏弱（20-50）"
+        elif mfi_14 <= mfi_strong:
+            mfi_text = "中性偏強（50-80）"
+        else:
+            mfi_text = "過熱（>80）"
+
+        if macd_hist is None:
+            macd_hist_text = "資料不足"
+        elif macd_hist > 0:
+            macd_hist_text = "動能偏多（hist > 0）"
+        elif macd_hist < 0:
+            macd_hist_text = "動能轉弱（hist < 0）"
+        else:
+            macd_hist_text = "動能中性（hist = 0）"
+        macd_bias_bull = bool(
+            macd is not None and macd_signal is not None and macd > macd_signal
+        )
+        macd_bias_text = "多方較強（macd > signal）" if macd_bias_bull else "多方較弱（macd <= signal）"
+
+        if close is None or bb_upper is None or bb_mid is None or bb_lower is None:
+            bb_zone_text = "資料不足"
+        elif close > bb_upper:
+            bb_zone_text = "close > bb_upper（強勢突破/短線過熱）"
+        elif bb_upper >= close >= bb_mid:
+            bb_zone_text = "upper >= close >= mid（偏強區）"
+        elif bb_mid > close >= bb_lower:
+            bb_zone_text = "mid > close >= lower（回檔整理區）"
+        else:
+            bb_zone_text = "close < bb_lower（恐慌/超賣風險）"
+
+        if vwap_gap_pct is None:
+            vwap_text = "資料不足"
+        elif abs(vwap_gap_pct) <= vwap_near_gap_pct:
+            vwap_text = "close 回到 VWAP 附近（相對安全成本區）"
+        elif vwap_gap_pct > vwap_hot_gap_pct:
+            vwap_text = "close 明顯高於 VWAP（偏熱）"
+        elif vwap_gap_pct > 0:
+            vwap_text = "close 高於 VWAP（短線偏強）"
+        elif vwap_gap_pct < -vwap_hot_gap_pct:
+            vwap_text = "close 明顯低於 VWAP（偏弱）"
+        else:
+            vwap_text = "close 低於 VWAP（短線偏弱）"
+
+        if atr_ratio is None:
+            atr_text = "資料不足"
+        elif atr_ratio > atr_high_vol_ratio:
+            atr_text = "波動過大（ATR/Close 偏高）"
+        elif atr_ratio > 0.02:
+            atr_text = "波動偏高"
+        else:
+            atr_text = "波動可控"
+
+        overheated = bool(
+            (bias_pct is not None and bias_pct > bias_overheat_pct)
+            or (rsi_14 is not None and rsi_14 > rsi_strong)
+            or (mfi_14 is not None and mfi_14 > mfi_strong)
+            or (close is not None and bb_upper is not None and close > bb_upper)
+            or (vwap_gap_pct is not None and vwap_gap_pct > vwap_hot_gap_pct)
+        )
+        false_breakout_risk = bool(
+            close is not None
+            and bb_upper is not None
+            and close > bb_upper
+            and (
+                (macd_hist is not None and macd_hist <= 0)
+                or (kd_overheat and kd_death_cross)
+            )
+        )
+
+        trend_score = 50.0
+        if bull_align:
+            trend_score += 30.0
+        if close is not None and sma_20 is not None and close > sma_20:
+            trend_score += 10.0
+        else:
+            trend_score -= 15.0
+        if sma_20 is not None and sma_60 is not None and sma_20 > sma_60:
+            trend_score += 10.0
+        else:
+            trend_score -= 10.0
+        if bias_pct is not None and bias_pct > bias_overheat_pct:
+            trend_score -= 15.0
+        if bias_pct is not None and bias_pct < bias_weak_pct:
+            trend_score -= 10.0
+        if trend_state == "空":
+            trend_score -= 20.0
+        trend_score_int = _clamp_score(trend_score)
+
+        momentum_score = 50.0
+        if rsi_14 is not None:
+            if rsi_weak <= rsi_14 < rsi_neutral_strong:
+                momentum_score += 12.0
+            elif rsi_neutral_strong <= rsi_14 <= rsi_strong:
+                momentum_score += 17.0
+            elif rsi_14 > rsi_strong:
+                momentum_score -= 8.0
+            elif rsi_14 < rsi_oversold:
+                momentum_score -= 12.0
+        if kd_sweet_cross:
+            momentum_score += 18.0
+        elif kd_golden_cross:
+            momentum_score += 10.0
+        elif kd_death_cross:
+            momentum_score -= 10.0
+        if macd_hist is not None:
+            momentum_score += 12.0 if macd_hist > 0 else -10.0
+        if macd is not None and macd_signal is not None:
+            momentum_score += 8.0 if macd > macd_signal else -6.0
+        if mfi_14 is not None:
+            if mfi_14 > mfi_strong or mfi_14 < mfi_oversold:
+                momentum_score -= 8.0
+            elif mfi_weak <= mfi_14 <= mfi_strong:
+                momentum_score += 6.0
+        momentum_score_int = _clamp_score(momentum_score)
+
+        risk_score = 20.0
+        if trend_state == "空":
+            risk_score += 20.0
+        if bias_pct is not None and bias_pct > bias_overheat_pct:
+            risk_score += 15.0
+        if bias_pct is not None and bias_pct < bias_weak_pct:
+            risk_score += 10.0
+        if rsi_14 is not None and rsi_14 > rsi_strong:
+            risk_score += 12.0
+        if close is not None and bb_upper is not None and close > bb_upper:
+            risk_score += 10.0
+        if close is not None and bb_lower is not None and close < bb_lower:
+            risk_score += 12.0
+        if vwap_gap_pct is not None and abs(vwap_gap_pct) > vwap_hot_gap_pct:
+            risk_score += 10.0
+        if atr_ratio is not None and atr_ratio > atr_high_vol_ratio:
+            risk_score += 20.0
+        if false_breakout_risk:
+            risk_score += 12.0
+        if macd_hist is not None and macd_hist < 0 and close is not None and sma_20 is not None and close < sma_20:
+            risk_score += 10.0
+        risk_score_int = _clamp_score(risk_score)
+
+        if trend_state == "多" and (not overheated) and risk_score_int <= 45:
+            status_label = "可佈局"
+        elif trend_state == "多" and overheated:
+            status_label = "避免追高"
+        elif trend_state == "空" or risk_score_int >= 70:
+            status_label = "風險偏高"
+        else:
+            status_label = "觀望"
+
+        if trend_state == "多" and (not overheated) and momentum_score_int >= 55:
+            action_label = "拉回佈局"
+        elif (
+            trend_state == "多"
+            and close is not None
+            and bb_upper is not None
+            and close > bb_upper
+            and momentum_score_int >= 60
+            and risk_score_int < 65
+        ):
+            action_label = "突破追價（少量）"
+        else:
+            action_label = "觀望"
+
+        entry_anchor_name = ""
+        entry_anchor = None
+        for col_name, col_val in (
+            ("sma_20", sma_20),
+            ("bb_mid", bb_mid),
+            ("vwap", vwap),
+        ):
+            if col_val is not None:
+                entry_anchor_name = col_name
+                entry_anchor = col_val
+                break
+        if entry_anchor is not None and atr_14 is not None:
+            entry_low = float(entry_anchor) - 0.5 * float(atr_14)
+            entry_high = float(entry_anchor) + 0.5 * float(atr_14)
+            entry_zone_text = (
+                f"{_fmt_num(entry_low)} ~ {_fmt_num(entry_high)}（以 {entry_anchor_name} 為中心）"
+            )
+            stop_main = float(entry_anchor) - stop_loss_atr_mult * float(atr_14)
+            stop_conservative = float(entry_anchor) - stop_loss_atr_conservative_mult * float(atr_14)
+            stop_text = (
+                f"{_fmt_num(stop_main)}（1.5*ATR） / {_fmt_num(stop_conservative)}（2*ATR，保守）"
+            )
+        elif entry_anchor is not None:
+            entry_zone_text = (
+                f"{_fmt_num(float(entry_anchor) * 0.995)} ~ {_fmt_num(float(entry_anchor) * 1.005)}"
+            )
+            stop_text = f"{_fmt_num(float(entry_anchor) * 0.97)}（暫用 -3%）"
+        else:
+            entry_zone_text = "—"
+            stop_text = "—"
+
+        hold_exit_parts: list[str] = []
+        if sma_20 is not None:
+            hold_exit_parts.append("close >= sma_20 可續抱")
+            hold_exit_parts.append("跌破 sma_20 視為減碼/出場訊號")
+        if macd_hist is not None:
+            hold_exit_parts.append("macd_hist >= 0 視為動能維持")
+            macd_hist_series = pd.to_numeric(ind_now.get("macd_hist"), errors="coerce").dropna()
+            if len(macd_hist_series) >= 2:
+                latest_two_neg = bool(macd_hist_series.iloc[-1] < 0 and macd_hist_series.iloc[-2] < 0)
+                if latest_two_neg:
+                    hold_exit_parts.append("macd_hist 已連2根負值，偏向防守")
+                else:
+                    hold_exit_parts.append("若 macd_hist 連2根轉負，偏向減碼")
+            else:
+                hold_exit_parts.append("若 macd_hist 連2根轉負，偏向減碼")
+        hold_exit_text = "；".join(hold_exit_parts) if hold_exit_parts else "—"
+
+        risk_warnings: list[str] = []
+        if bias_pct is not None and bias_pct > bias_overheat_pct:
+            risk_warnings.append("乖離過大（close 相對 sma_20 > +6%）")
+        if rsi_14 is not None and rsi_14 > rsi_strong:
+            risk_warnings.append("RSI > 70，動能過熱")
+        if close is not None and bb_upper is not None and close > bb_upper:
+            risk_warnings.append("close 位於 bb_upper 之外，短線追價風險")
+        if false_breakout_risk:
+            risk_warnings.append("疑似假突破（站上上軌但動能未同步）")
+        if atr_ratio is not None and atr_ratio > atr_high_vol_ratio:
+            risk_warnings.append("ATR/Close 偏高，波動過大")
+        if not risk_warnings:
+            risk_warnings.append("目前未觸發主要過熱警示，仍需控倉")
+
+        decision_rows: list[tuple[str, str, str, str]] = [
+            (
+                "sma_5 > sma_20 > sma_60 ?",
+                _tf(
+                    sma_5 is not None and sma_20 is not None and sma_60 is not None and sma_5 > sma_20 > sma_60
+                ),
+                "均線多頭排列判斷",
+                "加分（趨勢）" if bull_align else "提醒（未形成多頭排列）",
+            ),
+            (
+                "close > sma_20 ?",
+                _tf(close is not None and sma_20 is not None and close > sma_20),
+                f"close={_fmt_num(close)}, sma_20={_fmt_num(sma_20)}",
+                "加分（守住中期趨勢）" if close is not None and sma_20 is not None and close > sma_20 else "扣分（跌破中期均線）",
+            ),
+            (
+                "乖離 > +6% ?",
+                _tf(bias_pct is not None and bias_pct > bias_overheat_pct),
+                f"bias={_fmt_pct(bias_pct)}",
+                "提醒（過熱）" if bias_pct is not None and bias_pct > bias_overheat_pct else "中性",
+            ),
+            (
+                "乖離 < -3% ?",
+                _tf(bias_pct is not None and bias_pct < bias_weak_pct),
+                f"bias={_fmt_pct(bias_pct)}",
+                "扣分（偏弱/回測）" if bias_pct is not None and bias_pct < bias_weak_pct else "中性",
+            ),
+            (
+                "RSI > 70 ?",
+                _tf(rsi_14 is not None and rsi_14 > rsi_strong),
+                f"RSI={_fmt_num(rsi_14)}",
+                "提醒（過熱）" if rsi_14 is not None and rsi_14 > rsi_strong else "中性",
+            ),
+            (
+                "KD 黃金交叉且位於 40-60 ?",
+                _tf(kd_sweet_cross),
+                f"K={_fmt_num(stoch_k)}, D={_fmt_num(stoch_d)}",
+                "加分（波段甜蜜區）" if kd_sweet_cross else "中性",
+            ),
+            (
+                "macd_hist > 0 ?",
+                _tf(macd_hist is not None and macd_hist > 0),
+                f"macd_hist={_fmt_num(macd_hist, 4)}",
+                "加分（動能偏多）" if macd_hist is not None and macd_hist > 0 else "扣分（動能偏弱）",
+            ),
+            (
+                "macd > macd_signal ?",
+                _tf(macd is not None and macd_signal is not None and macd > macd_signal),
+                f"macd={_fmt_num(macd, 4)}, signal={_fmt_num(macd_signal, 4)}",
+                "加分（多方較強）" if macd_bias_bull else "提醒（多方較弱）",
+            ),
+            (
+                "close > bb_upper ?",
+                _tf(close is not None and bb_upper is not None and close > bb_upper),
+                f"close={_fmt_num(close)}, upper={_fmt_num(bb_upper)}",
+                "提醒（突破或過熱）" if close is not None and bb_upper is not None and close > bb_upper else "中性",
+            ),
+            (
+                "close < bb_lower ?",
+                _tf(close is not None and bb_lower is not None and close < bb_lower),
+                f"close={_fmt_num(close)}, lower={_fmt_num(bb_lower)}",
+                "提醒（恐慌/超賣）" if close is not None and bb_lower is not None and close < bb_lower else "中性",
+            ),
+            (
+                "|close-vwap|/vwap > 3% ?",
+                _tf(vwap_gap_pct is not None and abs(vwap_gap_pct) > vwap_hot_gap_pct),
+                f"gap={_fmt_pct(vwap_gap_pct)}",
+                "提醒（溢價/折價偏大）"
+                if vwap_gap_pct is not None and abs(vwap_gap_pct) > vwap_hot_gap_pct
+                else "中性",
+            ),
+            (
+                "ATR/close > 3.5% ?",
+                _tf(atr_ratio is not None and atr_ratio > atr_high_vol_ratio),
+                f"ATR/close={_fmt_pct(atr_ratio)}",
+                "扣分（波動過大）" if atr_ratio is not None and atr_ratio > atr_high_vol_ratio else "中性",
+            ),
+        ]
+        decision_md_lines = [
+            "| 條件 | 目前結果 | 解釋 | 對波段意義 |",
+            "|---|---|---|---|",
+        ]
+        decision_md_lines.extend(
+            [f"| {c} | {r} | {e} | {m} |" for c, r, e, m in decision_rows]
+        )
+
+        symbol_title = str(focus_symbol or "").strip().upper() or "UNKNOWN"
+        trend_line = (
+            f"close={_fmt_num(close)} / sma_5={_fmt_num(sma_5)} / sma_20={_fmt_num(sma_20)} / "
+            f"sma_60={_fmt_num(sma_60)}，乖離={_fmt_pct(bias_pct)}"
+        )
+        kd_relation = "K>D（偏強）" if stoch_k is not None and stoch_d is not None and stoch_k > stoch_d else "K<=D（偏弱）"
+        macd_line = (
+            f"macd={_fmt_num(macd, 4)}, signal={_fmt_num(macd_signal, 4)}, hist={_fmt_num(macd_hist, 4)}；"
+            f"{macd_hist_text}，{macd_bias_text}"
+        )
+        if trend_state == "多":
+            trend_advice = "多"
+        elif trend_state == "空":
+            trend_advice = "空"
+        else:
+            trend_advice = "盤整"
+
+        gail_style = (
+            f"盤面現在是 `{trend_advice}` 結構，動能分數 {momentum_score_int}/100，風險分數 {risk_score_int}/100。"
+            f"策略上偏向 `{action_label}`，不是叫你看到紅K就梭哈。"
+            f" 先看 `{entry_zone_text}` 這段能不能站穩，再用 `{stop_text}` 做風險上限，"
+            "守紀律比猜高點低點重要。"
+        )
+
+        st.markdown("#### 技術快照完整指標表格")
+        st.caption(
+            f"資料日期：{row_dt} | 焦點標的：{_tw_label(focus_symbol) or str(focus_symbol)}（隨回放位置同步）"
+        )
+        st.dataframe(snapshot_df.round(4), width="stretch", hide_index=True)
+        st.markdown(f"# {symbol_title} {row_dt}")
+        st.markdown("## 指標判讀")
+        st.markdown(
+            "\n".join(
+                [
+                    f"- 趨勢/均線：{trend_line}。目前判定 `{trend_state}`。",
+                    f"- RSI(14)：{_fmt_num(rsi_14)}（{rsi_text}）。",
+                    f"- KD：K={_fmt_num(stoch_k)} / D={_fmt_num(stoch_d)}，{kd_relation}，{kd_zone_text}。",
+                    f"- MFI(14)：{_fmt_num(mfi_14)}（{mfi_text}）。",
+                    f"- MACD：{macd_line}",
+                    f"- 布林：{bb_zone_text}（mid={_fmt_num(bb_mid)}, upper={_fmt_num(bb_upper)}, lower={_fmt_num(bb_lower)}）。",
+                    f"- VWAP：{vwap_text}（vwap={_fmt_num(vwap)}, gap={_fmt_pct(vwap_gap_pct)}）。",
+                    f"- ATR：atr_14={_fmt_num(atr_14)}，{atr_text}（ATR/close={_fmt_pct(atr_ratio)}）。",
+                ]
+            )
+        )
+        st.markdown("## 波段結論（只給可執行建議，不空泛）")
+        st.markdown(
+            "\n".join(
+                [
+                    f"- 趨勢狀態：{trend_state}",
+                    f"- 建議動作：{action_label}",
+                    f"- 進場參考區：{entry_zone_text}",
+                    f"- 停損參考：{stop_text}",
+                    f"- 續抱/出場條件：{hold_exit_text}",
+                    f"- 風險提醒：{'；'.join(risk_warnings)}",
+                ]
+            )
+        )
+        st.markdown("## 判斷表（Decision Table）")
+        st.markdown("\n".join(decision_md_lines))
+        st.markdown("## 打分數（0-100）")
+        st.markdown(
+            "\n".join(
+                [
+                    f"- Trend：{trend_score_int}/100",
+                    f"- Momentum：{momentum_score_int}/100",
+                    f"- Risk：{risk_score_int}/100（分數越高代表風險越高）",
+                    f"- 總結狀態：**{status_label}**",
+                ]
+            )
+        )
+        st.markdown("## 股癌風格敘述")
+        st.markdown(gail_style)
 
     @st.fragment(run_every="0.5s")
     def playback():
@@ -1256,6 +1846,7 @@ def _render_backtest_view(*, ctx: object):
                     x_range=panel_x_range,
                     watermark_text=playback_symbol_label,
                 )
+                _render_replay_indicator_snapshot_table(ind_now, idx)
                 st.caption(
                     "lightweight 模式目前專注 K線+Equity+Benchmark；"
                     "訊號點/成交點僅在 Plotly 模式顯示。"
@@ -1553,6 +2144,7 @@ def _render_backtest_view(*, ctx: object):
             x_range=panel_x_range,
             watermark_text=playback_symbol_label,
         )
+        _render_replay_indicator_snapshot_table(ind_now, idx)
         st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
 
     if not multi_symbol_compare:
