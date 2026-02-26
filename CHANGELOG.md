@@ -102,6 +102,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated ui/pages/backtest.py [id:e33bc58738]
 - Auto: updated app.py, cli.py, di.py, ui/core/charts.py, ui/pages/backtest.py, ui/pages/live.py [id:6bec13c581]
 - Auto: updated .gitignore, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, cli.py, ... (+13) [id:1692175dad]
 - `ui/pages/live.py`、`ui/pages/backtest.py`、`ui/core/charts.py` 移除 `_bind_ctx/_CTX_BOUND` 與 `ctx=globals()`，改為顯式 runtime 註冊。
@@ -251,6 +252,9 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正回測回放「視窗K數」在資料長度剛好 20 根時的 `StreamlitAPIException`：
+  - 當 `window_min == window_max == 20` 時，不再建立無效 slider（`min_value` 等於 `max_value`）
+  - 改為固定 `session_state` 值並顯示唯讀提示，避免頁面中斷
 - 修正熱力圖平行同步偶發 DuckDB 交易衝突（例如 `TransactionContext Error: Conflict on tuple deletion!`）：
   - `services/sync_orchestrator.py` 的可重試錯誤判斷新增 `tuple deletion/update conflict`
   - 平行同步遇到此類衝突時，會對失敗 symbol 自動做一次序列重試，降低 00735/00910 海外成分同步噪音

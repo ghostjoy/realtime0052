@@ -1227,12 +1227,15 @@ def _render_backtest_view():
         st.session_state[idx_key] = min(int(st.session_state[idx_key]), max_play_idx)
     window_min = 20
     window_max = max(window_min, max_play_idx + 1)
+    window_has_range = window_max > window_min
     if viewport_window_key not in st.session_state:
         st.session_state[viewport_window_key] = min(180, window_max)
     else:
         st.session_state[viewport_window_key] = int(
             min(max(int(st.session_state[viewport_window_key]), window_min), window_max)
         )
+    if not window_has_range:
+        st.session_state[viewport_window_key] = window_min
     date_options = [pd.Timestamp(ts).strftime("%Y-%m-%d") for ts in focus_bars.index]
     date_to_idx = {d: i for i, d in enumerate(date_options)}
 
@@ -1261,14 +1264,17 @@ def _render_backtest_view():
             )
             q1, q2, q3 = st.columns([2, 2, 2])
             q1.selectbox("回放視窗", options=["固定視窗", "完整區間"], key=viewport_mode_key)
-            q2.slider(
-                "視窗K數",
-                min_value=window_min,
-                max_value=window_max,
-                step=5,
-                key=viewport_window_key,
-                disabled=st.session_state[viewport_mode_key] != "固定視窗",
-            )
+            if window_has_range:
+                q2.slider(
+                    "視窗K數",
+                    min_value=window_min,
+                    max_value=window_max,
+                    step=5,
+                    key=viewport_window_key,
+                    disabled=st.session_state[viewport_mode_key] != "固定視窗",
+                )
+            else:
+                q2.caption(f"視窗K數：{window_min}（固定）")
             q3.slider(
                 "生長位置（靠右%）",
                 min_value=50,
