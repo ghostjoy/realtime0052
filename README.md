@@ -77,6 +77,7 @@ git config --get core.hooksPath
   - 若偵測到 iCloud Drive：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.duckdb`
   - 否則回退本地：`market_history.duckdb`
 - `daily_bars` / `intraday_ticks` 以 Parquet（market/symbol 分區）儲存
+- `market_history.duckdb` 與 `parquet/` 為本地執行產物，repo 不追蹤；請用預載腳本或 CLI 建立
 - 表（DuckDB）：
   - `instruments`
   - `sync_state`
@@ -103,6 +104,14 @@ export REALTIME0052_PARQUET_ROOT="/your/path/parquet"
 
 ```bash
 uv run python scripts/bootstrap_market_data.py --scope both --years 5 --max-workers 6
+```
+
+```bash
+# 新增 CLI 入口（同步/回測/預載）
+uv run realtime0052 info
+uv run realtime0052 sync --market TW --symbols 0050,0052 --days 60
+uv run realtime0052 backtest --symbol 0050 --market TW --strategy buy_hold
+uv run realtime0052 bootstrap --scope both --years 5
 ```
 
 - 預載流程會先建立 `symbol_metadata`，再批次同步 `daily_bars`，最後把任務摘要寫入 `bootstrap_runs`。

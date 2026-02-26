@@ -8,10 +8,12 @@ __pycache__/
 .venv/
 
 # Local DB / runtime artifacts
+market_history.duckdb
 market_history.sqlite3
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+parquet/
 
 # OS
 .DS_Store

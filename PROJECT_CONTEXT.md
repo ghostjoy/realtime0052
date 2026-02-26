@@ -28,7 +28,12 @@
 
 - `app.py`
   - Streamlit 啟動入口、全域樣式、查詢參數處理與頁面路由
-  - 第一波瘦身後，`即時看盤/回測工作台` 主渲染已搬到 `ui/pages/*`
+  - `即時看盤/回測工作台` 主渲染在 `ui/pages/*`
+  - 以顯式 runtime symbol 註冊取代舊 `ctx=globals()` 橋接
+- `di.py`
+  - Service/Store 工廠與容器註冊（DuckDB/SQLite 配置切換）
+- `cli.py`
+  - `sync / backtest / bootstrap / info / serve` 指令入口
 - `ui/pages/live.py`
   - `即時看盤` 分頁主流程（sidebar 控制、live fragment、即時圖卡與指標）
 - `ui/pages/backtest.py`
@@ -86,6 +91,7 @@
 
 - 預設 DB 路徑：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/market_history.duckdb`（若無 iCloud 則回退 `market_history.duckdb`；可由 `REALTIME0052_DUCKDB_PATH` 覆蓋）
 - 預設 Parquet 路徑：`~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/parquet`（可由 `REALTIME0052_PARQUET_ROOT` 覆蓋）
+- `market_history.duckdb` 與 `parquet/` 屬本地執行產物，repo 不追蹤
 - `instruments`
 - `sync_state`
 - `symbol_metadata`（代碼名稱/交易所/產業 metadata）

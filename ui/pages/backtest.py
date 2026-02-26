@@ -1,31 +1,137 @@
 from __future__ import annotations
 
-_CTX_BOUND = False
+import math
+from collections.abc import Mapping
+from datetime import date, datetime, timezone
+from typing import Any, Optional
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from plotly.subplots import make_subplots
+
+from backtest import (
+    CostModel,
+    apply_split_adjustment,
+    apply_start_to_bars_map,
+    build_buy_hold_equity,
+    build_dca_benchmark_equity,
+    build_dca_contribution_plan,
+    build_dca_equity,
+    dca_summary_metrics,
+    get_strategy_min_bars,
+    interval_return,
+    required_walkforward_bars,
+)
+from indicators import add_indicators
+from services.backtest_cache import (
+    build_backtest_run_key,
+    build_backtest_run_params_base,
+    build_replay_params_with_signature,
+)
+from services.backtest_runner import (
+    BacktestExecutionInput,
+    execute_backtest_run,
+    load_and_prepare_symbol_bars,
+)
+from services.backtest_runner import (
+    default_cost_params as runner_default_cost_params,
+)
+from services.backtest_runner import (
+    load_benchmark_from_store as runner_load_benchmark_from_store,
+)
+from services.backtest_runner import (
+    parse_symbols as runner_parse_symbols,
+)
+from services.backtest_runner import (
+    queue_benchmark_writeback as runner_queue_benchmark_writeback,
+)
+from services.backtest_runner import (
+    series_metrics as runner_series_metrics,
+)
+from services.sync_orchestrator import sync_symbols_if_needed
+from state_keys import BT_KEYS
+from ui.charts import render_lightweight_kline_equity_chart
+from ui.core.charts import _render_benchmark_lines_chart, _render_indicator_panels
+from ui.shared.perf import PerfTimer, perf_debug_enabled
+from ui.shared.runtime import configure_module_runtime
+from ui.shared.session_utils import ensure_defaults
+
+REQUIRED_RUNTIME_NAMES = (
+    "BACKTEST_AUTORUN_PENDING_KEY",
+    "BACKTEST_REPLAY_SCHEMA_VERSION",
+    "BACKTEST_RUN_REQUEST_KEY",
+    "DAILY_STRATEGY_OPTIONS",
+    "STRATEGY_DESC",
+    "_apply_plotly_watermark",
+    "_apply_total_return_adjustment",
+    "_apply_unified_benchmark_hover",
+    "_benchmark_line_style",
+    "_build_data_health",
+    "_build_sync_rows",
+    "_collect_tw_symbol_codes",
+    "_decorate_tw_symbol_columns",
+    "_enable_plotly_draw_tools",
+    "_format_price",
+    "_format_tw_symbol_with_name",
+    "_history_store",
+    "_infer_market_target_from_symbols",
+    "_load_cached_backtest_payload",
+    "_market_service",
+    "_metrics_to_rows",
+    "_render_card_section_header",
+    "_render_crisp_table",
+    "_render_data_health_caption",
+    "_render_plotly_chart",
+    "_replay_kline_renderer",
+    "_safe_float",
+    "_serialize_backtest_run_payload",
+    "_strategy_label",
+    "_to_rgba",
+    "_ui_palette",
+)
+
+BACKTEST_AUTORUN_PENDING_KEY: Any = None
+BACKTEST_REPLAY_SCHEMA_VERSION: Any = None
+BACKTEST_RUN_REQUEST_KEY: Any = None
+DAILY_STRATEGY_OPTIONS: Any = None
+STRATEGY_DESC: Any = None
+_apply_plotly_watermark: Any = None
+_apply_total_return_adjustment: Any = None
+_apply_unified_benchmark_hover: Any = None
+_benchmark_line_style: Any = None
+_build_data_health: Any = None
+_build_sync_rows: Any = None
+_collect_tw_symbol_codes: Any = None
+_decorate_tw_symbol_columns: Any = None
+_enable_plotly_draw_tools: Any = None
+_format_price: Any = None
+_format_tw_symbol_with_name: Any = None
+_history_store: Any = None
+_infer_market_target_from_symbols: Any = None
+_load_cached_backtest_payload: Any = None
+_market_service: Any = None
+_metrics_to_rows: Any = None
+_render_card_section_header: Any = None
+_render_crisp_table: Any = None
+_render_data_health_caption: Any = None
+_render_plotly_chart: Any = None
+_replay_kline_renderer: Any = None
+_safe_float: Any = None
+_serialize_backtest_run_payload: Any = None
+_strategy_label: Any = None
+_to_rgba: Any = None
+_ui_palette: Any = None
 
 
-def _bind_ctx(ctx: object):
-    """Compatibility bridge: bind app globals into this module."""
-    global _CTX_BOUND
-    if _CTX_BOUND:
-        return
-    items = []
-    if isinstance(ctx, dict):
-        items = list(ctx.items())
-    else:
-        attrs = getattr(ctx, "__dict__", None)
-        if isinstance(attrs, dict):
-            items = list(attrs.items())
-    module_globals = globals()
-    for key, value in items:
-        name = str(key or "")
-        if not name or name.startswith("__") or (name in module_globals):
-            continue
-        module_globals[name] = value
-    _CTX_BOUND = True
+def configure_runtime(values: Mapping[str, Any]) -> None:
+    configure_module_runtime(
+        globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__
+    )
 
 
-def _render_backtest_view(*, ctx: object):
-    _bind_ctx(ctx)
+def _render_backtest_view():
     perf_timer = PerfTimer(enabled=perf_debug_enabled())
     _parse_symbols = runner_parse_symbols
     _default_cost_params = runner_default_cost_params
@@ -896,9 +1002,9 @@ def _render_backtest_view(*, ctx: object):
             benchmark_equity = benchmark_equity.reindex(strategy_equity.index).ffill()
 
     benchmark_rel = pd.DataFrame()
-    strategy_ret: Optional[float] = None
-    benchmark_ret: Optional[float] = None
-    diff_pct: Optional[float] = None
+    strategy_ret: float | None = None
+    benchmark_ret: float | None = None
+    diff_pct: float | None = None
     verdict = ""
     if benchmark_choice != "off" and not benchmark_equity.empty:
         benchmark_rel = pd.concat(
@@ -1829,7 +1935,7 @@ def _render_backtest_view(*, ctx: object):
             if not benchmark_equity.empty
             else pd.Series(dtype=float)
         )
-        panel_x_range: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
+        panel_x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None
         if _replay_kline_renderer() == "lightweight":
             strategy_series = (
                 equity_now["equity"] if "equity" in equity_now.columns else pd.Series(dtype=float)
@@ -2777,12 +2883,12 @@ def _render_backtest_view(*, ctx: object):
             else None
         )
 
-        def _fmt_money(v: Optional[float]) -> str:
+        def _fmt_money(v: float | None) -> str:
             if v is None or not math.isfinite(float(v)):
                 return "—"
             return f"{float(v):,.0f}"
 
-        def _fmt_pct(v: Optional[float], *, scale: float = 100.0) -> str:
+        def _fmt_pct(v: float | None, *, scale: float = 100.0) -> str:
             if v is None or not math.isfinite(float(v)):
                 return "—"
             return f"{float(v) * scale:+.2f}%"

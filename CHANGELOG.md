@@ -11,6 +11,8 @@
 ## [Unreleased]
 
 ### Added
+- 新增 `ui/shared/runtime.py`：提供模組級 runtime symbol 顯式註冊器，取代 `ctx=globals()` 注入模式。
+- 新增 CLI 測試 `tests/test_cli.py` 與 DI 測試 `tests/test_di.py`。
 - 新增 `conf/` + `config_loader.py`，提供 `Hydra(YAML) / legacy env` 雙軌配置載入（預設仍維持 legacy env）。
 - 新增 `storage/duck_store.py`（`DuckDB + Parquet` hybrid）：
   - DuckDB 儲存 metadata / 回測快取 / 任務紀錄
@@ -100,6 +102,13 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated .gitignore, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, cli.py, ... (+13) [id:1692175dad]
+- `ui/pages/live.py`、`ui/pages/backtest.py`、`ui/core/charts.py` 移除 `_bind_ctx/_CTX_BOUND` 與 `ctx=globals()`，改為顯式 runtime 註冊。
+- `app.py` 新增 `_ensure_ui_runtime_configured()`，統一在呼叫頁面/圖表模組前注入必要 runtime symbols。
+- `app.py` 的 `_market_service/_history_store` 改由 `di.py` 容器工廠提供，避免重複初始化路徑。
+- `cli.py` 由 placeholder 改為可執行 `sync/backtest/bootstrap/info/serve`，並新增 `pyproject.toml` script entry：`realtime0052=cli:main`。
+- `.gitignore` 新增 `market_history.duckdb`、`parquet/`，並將既有追蹤中的本地資料產物移出版本控管。
+- `pyproject.toml` 移除 `F821` 豁免，並修正 `mypy` 掃描路徑為 `ui/loaders.py`。
 - Auto: updated .gitignore, conf/tw_etf_management_fees_missing.csv, docs/plan-architecture-tooling-docs.md, docs/plan-performance-special.md, market_history.duckdb, parquet/daily_bars/market=TW/symbol=1560/bars.parquet, ... (+46) [id:ee902adf1e]
 - Auto: updated app.py, tests/test_active_etf_page.py, ui/pages/backtest.py [id:9de9c361b8]
 - Auto: updated storage/duck_store.py [id:fe2ef6efc2]

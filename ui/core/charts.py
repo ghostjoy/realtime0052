@@ -1,41 +1,56 @@
 from __future__ import annotations
 
-_CTX_BOUND = False
+from collections.abc import Mapping
+from typing import Any, Optional
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from plotly.subplots import make_subplots
+
+from ui.charts import render_lightweight_live_chart, render_lightweight_multi_line_chart
+from ui.shared.runtime import configure_module_runtime
+
+REQUIRED_RUNTIME_NAMES = (
+    "_apply_plotly_watermark",
+    "_apply_unified_benchmark_hover",
+    "_benchmark_renderer",
+    "_enable_plotly_draw_tools",
+    "_hovertemplate_with_code",
+    "_live_kline_renderer",
+    "_render_plotly_chart",
+    "_to_rgba",
+    "_ui_palette",
+)
+
+_apply_plotly_watermark: Any = None
+_apply_unified_benchmark_hover: Any = None
+_benchmark_renderer: Any = None
+_enable_plotly_draw_tools: Any = None
+_hovertemplate_with_code: Any = None
+_live_kline_renderer: Any = None
+_render_plotly_chart: Any = None
+_to_rgba: Any = None
+_ui_palette: Any = None
 
 
-def _bind_ctx(ctx: object):
-    """Compatibility bridge: bind app globals into this module."""
-    global _CTX_BOUND
-    if _CTX_BOUND:
-        return
-    items = []
-    if isinstance(ctx, dict):
-        items = list(ctx.items())
-    else:
-        attrs = getattr(ctx, "__dict__", None)
-        if isinstance(attrs, dict):
-            items = list(attrs.items())
-    module_globals = globals()
-    for key, value in items:
-        name = str(key or "")
-        if not name or name.startswith("__") or (name in module_globals):
-            continue
-        module_globals[name] = value
-    _CTX_BOUND = True
+def configure_runtime(values: Mapping[str, Any]) -> None:
+    configure_module_runtime(
+        globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__
+    )
 
 
 def _render_benchmark_lines_chart(
     *,
-    ctx: object,
     lines: list[dict[str, Any]],
     height: int,
     chart_key: str,
     enable_lightweight: bool = True,
     annotate_extrema: bool = False,
-    extrema_series_name: Optional[str] = None,
+    extrema_series_name: str | None = None,
     watermark_text: str = "",
 ):
-    _bind_ctx(ctx)
     palette = _ui_palette()
     renderer = _benchmark_renderer()
     if enable_lightweight and renderer == "lightweight":
@@ -176,8 +191,7 @@ def _render_benchmark_lines_chart(
     )
 
 
-def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = ""):
-    _bind_ctx(ctx)
+def _render_live_chart(ind: pd.DataFrame, *, watermark_text: str = ""):
     palette = _ui_palette()
     if _live_kline_renderer() == "lightweight":
         overlays: list[dict[str, object]] = []
@@ -294,13 +308,11 @@ def _render_live_chart(ind: pd.DataFrame, *, ctx: object, watermark_text: str = 
 def _render_indicator_panels(
     ind: pd.DataFrame,
     *,
-    ctx: object,
     chart_key: str,
     height: int = 460,
-    x_range: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None,
+    x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     watermark_text: str = "",
 ):
-    _bind_ctx(ctx)
     if not isinstance(ind, pd.DataFrame) or ind.empty or "close" not in ind.columns:
         st.caption("指標副圖：資料不足。")
         return

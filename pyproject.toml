@@ -5,6 +5,7 @@ description = "0052 即時走勢＋指標整合（Streamlit）"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "click>=8.1.7",
   "streamlit>=1.50",
   "streamlit-lightweight-charts>=0.7.20",
   "plotly>=5.24.1",
@@ -21,6 +22,9 @@ dependencies = [
   "watchdog>=6.0.0",
 ]
 
+[project.scripts]
+realtime0052 = "cli:main"
+
 [dependency-groups]
 dev = [
   "pytest>=7.0",
@@ -36,7 +40,6 @@ line-length = 100
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
 ignore = [
     "E501",  # line too long
-    "F821",  # undefined-name (caused by ctx=globals() injection pattern)
     "F811",  # redefinition of unused (quote param conflicts with urllib.parse.quote)
     "C408",  # unnecessary dict() call
     "C414",  # unnecessary list() call
@@ -54,18 +57,13 @@ ignore = [
     "F401",  # unused imports (conditional imports for optional features)
 ]
 
-[tool.ruff.lint.per-file-ignores]
-"app.py" = ["F821"]
-"ui/pages/*.py" = ["F821"]
-"ui/core/charts.py" = ["F821"]
-
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
-files = ["utils", "ui/helpers"]
+files = ["utils", "ui/helpers", "ui/shared", "ui/loaders.py"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

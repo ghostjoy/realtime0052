@@ -43,6 +43,8 @@ from backtest import (
 )
 from backtest.adjustments import known_split_events
 from config_loader import cfg_or_env, cfg_or_env_bool, cfg_or_env_str, get_config_source
+from di import get_history_store as di_get_history_store
+from di import get_market_service as di_get_market_service
 from indicators import add_indicators
 from market_data_types import DataHealth
 from providers import TwMisProvider
@@ -136,51 +138,12 @@ except ImportError:
 
 @st.cache_resource
 def _market_service() -> MarketDataService:
-    return MarketDataService()
+    return di_get_market_service()
 
 
 @st.cache_resource
 def _history_store() -> HistoryStore:
-    backend = (
-        cfg_or_env_str("features.storage_backend", "REALTIME0052_STORAGE_BACKEND", "duckdb")
-        .strip()
-        .lower()
-    )
-    if backend not in {"duckdb", "sqlite"}:
-        backend = "duckdb"
-    if backend == "duckdb":
-        from storage.duck_store import DuckHistoryStore
-
-        duck_db_path = cfg_or_env(
-            "storage.duckdb.db_path", "REALTIME0052_DUCKDB_PATH", default=None
-        )
-        parquet_root = cfg_or_env(
-            "storage.duckdb.parquet_root", "REALTIME0052_PARQUET_ROOT", default=None
-        )
-        retain_days = cfg_or_env(
-            "storage.duckdb.intraday_retain_days",
-            "REALTIME0052_INTRADAY_RETAIN_DAYS",
-            default=1095,
-            cast=int,
-        )
-        legacy_sqlite_path = cfg_or_env(
-            "storage.duckdb.legacy_sqlite_path", "REALTIME0052_DB_PATH", default=None
-        )
-        auto_migrate = cfg_or_env_bool(
-            "storage.duckdb.auto_migrate_legacy_sqlite",
-            "REALTIME0052_AUTO_MIGRATE_LEGACY_SQLITE",
-            default=True,
-        )
-        return DuckHistoryStore(
-            service=_market_service(),
-            db_path=duck_db_path,
-            parquet_root=parquet_root,
-            intraday_retain_days=retain_days,
-            legacy_sqlite_path=legacy_sqlite_path,
-            auto_migrate_legacy_sqlite=auto_migrate,
-        )
-    sqlite_db_path = cfg_or_env("storage.sqlite.db_path", "REALTIME0052_DB_PATH", default=None)
-    return HistoryStore(db_path=sqlite_db_path, service=_market_service())
+    return di_get_history_store()
 
 
 def _auto_run_daily_incremental_refresh(store: HistoryStore):
@@ -543,6 +506,7 @@ def _consume_backtest_drilldown_query() -> None:
     _clear_query_params(BACKTEST_DRILL_QUERY_KEYS)
 
 
+#JS|@st.cache_data(ttl=21600, show_spinner=False)
 def _load_heatmap_hub_entries(*, pinned_only: bool = False) -> list[Any]:
     store = _history_store()
     loader = getattr(store, "list_heatmap_hub_entries", None)
@@ -7296,28 +7260,59 @@ def _render_quality_bar(ctx, refresh_sec: int):
     st.caption(f"最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}（fragment 局部刷新）")
 
 
+_UI_RUNTIME_CONFIGURED = False
+
+
+def _collect_runtime_values(required_names: tuple[str, ...]) -> dict[str, object]:
+    module_globals = globals()
+    missing = [name for name in required_names if name not in module_globals]
+    if missing:
+        preview = ", ".join(missing[:8])
+        suffix = " ..." if len(missing) > 8 else ""
+        raise RuntimeError(f"missing app runtime symbols: {preview}{suffix}")
+    return {name: module_globals[name] for name in required_names}
+
+
+def _ensure_ui_runtime_configured() -> None:
+    global _UI_RUNTIME_CONFIGURED
+    if _UI_RUNTIME_CONFIGURED:
+        return
+    from ui.core import charts as charts_module
+    from ui.pages import backtest as backtest_page
+    from ui.pages import live as live_page
+
+    charts_module.configure_runtime(_collect_runtime_values(charts_module.REQUIRED_RUNTIME_NAMES))
+    live_page.configure_runtime(_collect_runtime_values(live_page.REQUIRED_RUNTIME_NAMES))
+    backtest_page.configure_runtime(_collect_runtime_values(backtest_page.REQUIRED_RUNTIME_NAMES))
+    _UI_RUNTIME_CONFIGURED = True
+
+
 def _render_benchmark_lines_chart(*args, **kwargs):
+    _ensure_ui_runtime_configured()
     from ui.core.charts import _render_benchmark_lines_chart as impl
 
-    return impl(ctx=globals(), *args, **kwargs)
+    return impl(*args, **kwargs)
 
 
 def _render_live_chart(*args, **kwargs):
+    _ensure_ui_runtime_configured()
     from ui.core.charts import _render_live_chart as impl
 
-    return impl(ctx=globals(), *args, **kwargs)
+    return impl(*args, **kwargs)
 
 
 def _render_indicator_panels(*args, **kwargs):
+    _ensure_ui_runtime_configured()
     from ui.core.charts import _render_indicator_panels as impl
 
-    return impl(ctx=globals(), *args, **kwargs)
+    return impl(*args, **kwargs)
 
 
 def _render_live_view():
+    _ensure_ui_runtime_configured()
     from ui.pages.live import _render_live_view as impl
 
-    return impl(ctx=globals())
+    return impl()
 
 
 def _metrics_to_rows(metrics) -> list[tuple[str, str]]:
@@ -7799,9 +7794,10 @@ def _load_cached_backtest_payload(
 
 
 def _render_backtest_view():
+    _ensure_ui_runtime_configured()
     from ui.pages.backtest import _render_backtest_view as impl
 
-    return impl(ctx=globals())
+    return impl()
 
 
 def _render_tutorial_view():

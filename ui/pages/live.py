@@ -1,31 +1,60 @@
 from __future__ import annotations
 
-_CTX_BOUND = False
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from advice import Profile, render_advice, render_advice_scai_style
+from backtest import apply_split_adjustment
+from indicators import add_indicators
+from services import LiveOptions
+from ui.constants import COMPACT_CHART_HEIGHT, INDICATOR_CHART_HEIGHT
+from ui.shared import get_or_set
+from ui.shared.runtime import configure_module_runtime
+
+REQUIRED_RUNTIME_NAMES = (
+    "_current_theme_name",
+    "_format_int",
+    "_format_price",
+    "_history_store",
+    "_load_intraday_bars_from_sqlite",
+    "_market_service",
+    "_normalize_ohlcv_frame",
+    "_persist_live_tick_buffer",
+    "_render_card_section_header",
+    "_render_indicator_panels",
+    "_render_live_chart",
+    "_render_quality_bar",
+    "_resolve_live_change_metrics",
+    "_symbol_watermark_text",
+)
+
+_current_theme_name: Any = None
+_format_int: Any = None
+_format_price: Any = None
+_history_store: Any = None
+_load_intraday_bars_from_sqlite: Any = None
+_market_service: Any = None
+_normalize_ohlcv_frame: Any = None
+_persist_live_tick_buffer: Any = None
+_render_card_section_header: Any = None
+_render_indicator_panels: Any = None
+_render_live_chart: Any = None
+_render_quality_bar: Any = None
+_resolve_live_change_metrics: Any = None
+_symbol_watermark_text: Any = None
 
 
-def _bind_ctx(ctx: object):
-    """Compatibility bridge: bind app globals into this module."""
-    global _CTX_BOUND
-    if _CTX_BOUND:
-        return
-    items = []
-    if isinstance(ctx, dict):
-        items = list(ctx.items())
-    else:
-        attrs = getattr(ctx, "__dict__", None)
-        if isinstance(attrs, dict):
-            items = list(attrs.items())
-    module_globals = globals()
-    for key, value in items:
-        name = str(key or "")
-        if not name or name.startswith("__") or (name in module_globals):
-            continue
-        module_globals[name] = value
-    _CTX_BOUND = True
+def configure_runtime(values: Mapping[str, Any]) -> None:
+    configure_module_runtime(
+        globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__
+    )
 
 
-def _render_live_view(*, ctx: object):
-    _bind_ctx(ctx)
+def _render_live_view():
     service = _market_service()
     store = _history_store()
 
@@ -247,15 +276,13 @@ def _render_live_view(*, ctx: object):
                     .upper()
                 )
                 live_indicator_toggle_key = f"live_indicator_panel:{market}:{live_symbol_key}"
-                if live_indicator_toggle_key not in st.session_state:
-                    st.session_state[live_indicator_toggle_key] = True
+                get_or_set(live_indicator_toggle_key, lambda: True)
                 st.checkbox(
                     "顯示技術指標副圖（RSI / MACD / 布林 / KD）",
                     key=live_indicator_toggle_key,
                 )
                 live_indicator_compact_key = f"live_indicator_compact:{market}:{live_symbol_key}"
-                if live_indicator_compact_key not in st.session_state:
-                    st.session_state[live_indicator_compact_key] = True
+                get_or_set(live_indicator_compact_key, lambda: True)
                 st.checkbox(
                     "緊湊指標副圖（筆電建議）",
                     key=live_indicator_compact_key,
@@ -264,7 +291,11 @@ def _render_live_view(*, ctx: object):
                     _render_indicator_panels(
                         ind,
                         chart_key=f"live_indicator_chart:{market}:{live_symbol_key}",
-                        height=340 if st.session_state.get(live_indicator_compact_key) else 430,
+                        height=(
+                            COMPACT_CHART_HEIGHT
+                            if st.session_state.get(live_indicator_compact_key)
+                            else INDICATOR_CHART_HEIGHT
+                        ),
                         watermark_text=live_watermark_text,
                     )
                 if not daily_long.empty:
