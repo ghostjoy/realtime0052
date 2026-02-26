@@ -51,7 +51,9 @@ def _parse_iso_datetime(value: str | None, *, default: datetime) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _apply_total_return_adjustment_cli(bars: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+def _apply_total_return_adjustment_cli(
+    bars: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, object]]:
     if not isinstance(bars, pd.DataFrame) or bars.empty:
         return bars, {"applied": False, "reason": "empty"}
     if "adj_close" not in bars.columns or "close" not in bars.columns:
@@ -170,7 +172,11 @@ def backtest(
         raise click.ClickException("No valid symbol provided")
 
     market_token = str(market or "auto").strip().upper()
-    market_code = _infer_market_from_symbol(symbols[0]) if market_token == "AUTO" else _normalize_market(market_token)
+    market_code = (
+        _infer_market_from_symbol(symbols[0])
+        if market_token == "AUTO"
+        else _normalize_market(market_token)
+    )
 
     end_dt = _parse_iso_datetime(end, default=datetime.now(tz=timezone.utc))
     start_dt = _parse_iso_datetime(start, default=end_dt - timedelta(days=365 * 5))

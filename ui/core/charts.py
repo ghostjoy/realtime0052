@@ -36,9 +36,7 @@ _ui_palette: Any = None
 
 
 def configure_runtime(values: Mapping[str, Any]) -> None:
-    configure_module_runtime(
-        globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__
-    )
+    configure_module_runtime(globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__)
 
 
 def _render_benchmark_lines_chart(

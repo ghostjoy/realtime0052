@@ -506,7 +506,7 @@ def _consume_backtest_drilldown_query() -> None:
     _clear_query_params(BACKTEST_DRILL_QUERY_KEYS)
 
 
-#JS|@st.cache_data(ttl=21600, show_spinner=False)
+# JS|@st.cache_data(ttl=21600, show_spinner=False)
 def _load_heatmap_hub_entries(*, pinned_only: bool = False) -> list[Any]:
     store = _history_store()
     loader = getattr(store, "list_heatmap_hub_entries", None)

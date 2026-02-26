@@ -49,9 +49,7 @@ _symbol_watermark_text: Any = None
 
 
 def configure_runtime(values: Mapping[str, Any]) -> None:
-    configure_module_runtime(
-        globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__
-    )
+    configure_module_runtime(globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__)
 
 
 def _render_live_view():

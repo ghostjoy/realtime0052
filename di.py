@@ -72,7 +72,9 @@ def create_history_store(*, service: MarketDataService | None = None) -> History
     if backend == "duckdb":
         from storage.duck_store import DuckHistoryStore
 
-        duck_db_path = cfg_or_env("storage.duckdb.db_path", "REALTIME0052_DUCKDB_PATH", default=None)
+        duck_db_path = cfg_or_env(
+            "storage.duckdb.db_path", "REALTIME0052_DUCKDB_PATH", default=None
+        )
         parquet_root = cfg_or_env(
             "storage.duckdb.parquet_root", "REALTIME0052_PARQUET_ROOT", default=None
         )

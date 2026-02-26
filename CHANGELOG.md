@@ -102,6 +102,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated app.py, cli.py, di.py, ui/core/charts.py, ui/pages/backtest.py, ui/pages/live.py [id:6bec13c581]
 - Auto: updated .gitignore, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, cli.py, ... (+13) [id:1692175dad]
 - `ui/pages/live.py`、`ui/pages/backtest.py`、`ui/core/charts.py` 移除 `_bind_ctx/_CTX_BOUND` 與 `ctx=globals()`，改為顯式 runtime 註冊。
 - `app.py` 新增 `_ensure_ui_runtime_configured()`，統一在呼叫頁面/圖表模組前注入必要 runtime symbols。
