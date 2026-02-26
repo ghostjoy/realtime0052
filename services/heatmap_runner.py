@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol
@@ -113,17 +114,14 @@ def compute_heatmap_rows(
     name_map: dict[str, str],
     min_required: int,
     progress_callback: Callable[[float], None] | None = None,
+    max_workers: int = 1,
 ) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    total = max(len(run_symbols), 1)
-    for idx, symbol in enumerate(run_symbols):
+    def _compute_one(symbol: str) -> dict[str, object] | None:
         bars = bars_cache.get(
             symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         )
         if len(bars) < int(min_required):
-            if progress_callback:
-                progress_callback((idx + 1) / total)
-            continue
+            return None
 
         bars, _ = apply_split_adjustment(
             bars=bars,
@@ -133,9 +131,7 @@ def compute_heatmap_rows(
             use_auto_detect=True,
         )
         if len(bars) < int(min_required):
-            if progress_callback:
-                progress_callback((idx + 1) / total)
-            continue
+            return None
 
         try:
             bt = run_backtest(
@@ -146,15 +142,11 @@ def compute_heatmap_rows(
                 initial_capital=1_000_000.0,
             )
         except Exception:
-            if progress_callback:
-                progress_callback((idx + 1) / total)
-            continue
+            return None
 
         strategy_curve = pd.to_numeric(bt.equity_curve["equity"], errors="coerce").dropna()
         if len(strategy_curve) < 2:
-            if progress_callback:
-                progress_callback((idx + 1) / total)
-            continue
+            return None
 
         comp = pd.concat(
             [
@@ -164,27 +156,50 @@ def compute_heatmap_rows(
             axis=1,
         ).dropna()
         if len(comp) < 2:
-            if progress_callback:
-                progress_callback((idx + 1) / total)
-            continue
+            return None
 
         strategy_ret = float(comp["strategy"].iloc[-1] / comp["strategy"].iloc[0] - 1.0)
         benchmark_ret = float(comp["benchmark"].iloc[-1] / comp["benchmark"].iloc[0] - 1.0)
         excess_pct = (strategy_ret - benchmark_ret) * 100.0
-        rows.append(
-            {
-                "symbol": symbol,
-                "name": name_map.get(symbol, symbol),
-                "strategy_return_pct": strategy_ret * 100.0,
-                "benchmark_return_pct": benchmark_ret * 100.0,
-                "excess_pct": excess_pct,
-                "status": "WIN" if excess_pct > 0 else ("LOSE" if excess_pct < 0 else "TIE"),
-                "bars": int(len(comp)),
-            }
-        )
-        if progress_callback:
-            progress_callback((idx + 1) / total)
-    return rows
+        return {
+            "symbol": symbol,
+            "name": name_map.get(symbol, symbol),
+            "strategy_return_pct": strategy_ret * 100.0,
+            "benchmark_return_pct": benchmark_ret * 100.0,
+            "excess_pct": excess_pct,
+            "status": "WIN" if excess_pct > 0 else ("LOSE" if excess_pct < 0 else "TIE"),
+            "bars": int(len(comp)),
+        }
+
+    total = max(len(run_symbols), 1)
+    workers = max(1, min(int(max_workers), len(run_symbols))) if run_symbols else 1
+    if workers <= 1 or len(run_symbols) <= 1:
+        rows: list[dict[str, object]] = []
+        for idx, symbol in enumerate(run_symbols):
+            row = _compute_one(symbol)
+            if row is not None:
+                rows.append(row)
+            if progress_callback:
+                progress_callback((idx + 1) / total)
+        return rows
+
+    rows_by_symbol: dict[str, dict[str, object]] = {}
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="heatmap-row") as executor:
+        futures = {executor.submit(_compute_one, symbol): symbol for symbol in run_symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                row = future.result()
+            except Exception:
+                row = None
+            if isinstance(row, dict):
+                rows_by_symbol[symbol] = row
+            completed += 1
+            if progress_callback:
+                progress_callback(completed / total)
+
+    return [rows_by_symbol[symbol] for symbol in run_symbols if symbol in rows_by_symbol]
 
 
 __all__ = [

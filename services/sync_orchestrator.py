@@ -45,6 +45,73 @@ def bars_need_backfill(bars: pd.DataFrame, *, start: datetime, end: datetime) ->
     return first_ts > start or last_ts < end
 
 
+def _coerce_utc_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _load_sync_last_success_date(
+    store: HistoryStore, *, symbol: str, market: str
+) -> datetime | None:
+    loader = getattr(store, "load_sync_state", None)
+    if not callable(loader):
+        return None
+    try:
+        state = loader(symbol=symbol, market=market)
+    except TypeError:
+        try:
+            state = loader(symbol, market)
+        except Exception:
+            return None
+    except Exception:
+        return None
+    if isinstance(state, dict):
+        return _coerce_utc_datetime(state.get("last_success_date"))
+    return None
+
+
+def _load_daily_coverage(
+    store: HistoryStore,
+    *,
+    symbol: str,
+    market: str,
+    start: datetime,
+    end: datetime,
+) -> tuple[int, datetime | None, datetime | None] | None:
+    loader = getattr(store, "load_daily_coverage", None)
+    if not callable(loader):
+        return None
+    try:
+        payload = loader(symbol=symbol, market=market, start=start, end=end)
+    except TypeError:
+        try:
+            payload = loader(symbol, market, start, end)
+        except Exception:
+            return None
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    row_count = max(0, int(payload.get("row_count") or 0))
+    first_date = _coerce_utc_datetime(payload.get("first_date"))
+    last_date = _coerce_utc_datetime(payload.get("last_date"))
+    return row_count, first_date, last_date
+
+
 def sync_symbols_history(
     *,
     store: HistoryStore,
@@ -140,6 +207,31 @@ def sync_symbols_if_needed(
     elif mode_token == "backfill":
         need_sync = []
         for symbol in ordered:
+            last_success = _load_sync_last_success_date(store, symbol=symbol, market=market)
+            # Fast-path: metadata already tells us the requested end is not covered.
+            if last_success is not None and last_success < end:
+                need_sync.append(symbol)
+                continue
+
+            coverage = _load_daily_coverage(
+                store,
+                symbol=symbol,
+                market=market,
+                start=start,
+                end=end,
+            )
+            if coverage is not None:
+                row_count, first_date, last_date = coverage
+                if (
+                    row_count <= 0
+                    or first_date is None
+                    or last_date is None
+                    or first_date > start
+                    or last_date < end
+                ):
+                    need_sync.append(symbol)
+                continue
+
             bars = store.load_daily_bars(symbol=symbol, market=market, start=start, end=end)
             if bars_need_backfill(bars, start=start, end=end):
                 need_sync.append(symbol)
@@ -147,6 +239,18 @@ def sync_symbols_if_needed(
         required_rows = max(1, int(min_rows))
         need_sync = []
         for symbol in ordered:
+            coverage = _load_daily_coverage(
+                store,
+                symbol=symbol,
+                market=market,
+                start=start,
+                end=end,
+            )
+            if coverage is not None:
+                row_count, _, _ = coverage
+                if row_count < required_rows:
+                    need_sync.append(symbol)
+                continue
             bars = store.load_daily_bars(symbol=symbol, market=market, start=start, end=end)
             if not isinstance(bars, pd.DataFrame) or len(bars) < required_rows:
                 need_sync.append(symbol)

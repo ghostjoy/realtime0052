@@ -77,6 +77,31 @@ class RotationRunnerTests(unittest.TestCase):
         self.assertIn("0050", prepared.skipped_symbols)
         self.assertEqual(store.sync_calls, ["0050", "0052"])
 
+    def test_prepare_rotation_bars_parallel(self):
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2025, 6, 1, tzinfo=timezone.utc)
+        store = _FakeStore(
+            bars_map={
+                "0050": _bars(150, seed=13),
+                "0052": _bars(150, seed=14),
+                "00935": _bars(40, seed=15),
+            },
+            sync_map={},
+        )
+        prepared = prepare_rotation_bars(
+            store=store,
+            symbols=["0050", "0052", "00935"],
+            start_dt=start,
+            end_dt=end,
+            sync_before_run=False,
+            parallel_sync=False,
+            normalize_ohlcv_frame=_normalize,
+            min_required=120,
+            max_workers=3,
+        )
+        self.assertEqual(set(prepared.bars_by_symbol.keys()), {"0050", "0052"})
+        self.assertEqual(prepared.skipped_symbols, ["00935"])
+
     def test_build_rotation_holding_rank(self):
         idx = pd.date_range("2025-01-01", periods=5, freq="B", tz="UTC")
         weights = pd.DataFrame(

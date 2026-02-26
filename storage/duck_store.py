@@ -30,6 +30,10 @@ from storage.history_store import (
 DEFAULT_DB_FILENAME = "market_history.duckdb"
 DEFAULT_LEGACY_SQLITE_FILENAME = "market_history.sqlite3"
 DEFAULT_INTRADAY_RETAIN_DAYS = 365 * 3
+DEFAULT_WRITEBACK_WORKERS = 2
+MAX_WRITEBACK_WORKERS = 8
+DEFAULT_DAILY_DELTA_COMPACT_THRESHOLD = 24
+DEFAULT_INTRADAY_DELTA_COMPACT_THRESHOLD = 48
 ICLOUD_DOCS_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
 DEFAULT_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_DB_FILENAME
 DEFAULT_LEGACY_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_LEGACY_SQLITE_FILENAME
@@ -55,7 +59,11 @@ class DuckHistoryStore:
         self.service = service or MarketDataService()
         self._writeback_lock = threading.Lock()
         self._writeback_inflight: set[tuple[str, str]] = set()
+        self._writeback_pending: dict[tuple[str, str], tuple[pd.DataFrame, str]] = {}
         self._writeback_executor: ThreadPoolExecutor | None = None
+        self._writeback_workers = self.resolve_writeback_workers()
+        self._daily_delta_compact_threshold = self.resolve_daily_delta_compact_threshold()
+        self._intraday_delta_compact_threshold = self.resolve_intraday_delta_compact_threshold()
         self._init_db()
 
         set_metadata_store = getattr(self.service, "set_metadata_store", None)
@@ -98,6 +106,54 @@ class DuckHistoryStore:
             return max(1, int(days))
         except Exception:
             return DEFAULT_INTRADAY_RETAIN_DAYS
+
+    @staticmethod
+    def resolve_writeback_workers(workers: int | None = None) -> int:
+        if workers is None:
+            raw = str(os.getenv("REALTIME0052_DUCK_WRITEBACK_WORKERS", "")).strip()
+            if raw:
+                try:
+                    workers = int(raw)
+                except Exception:
+                    workers = DEFAULT_WRITEBACK_WORKERS
+            else:
+                workers = DEFAULT_WRITEBACK_WORKERS
+        try:
+            return max(1, min(int(workers), MAX_WRITEBACK_WORKERS))
+        except Exception:
+            return DEFAULT_WRITEBACK_WORKERS
+
+    @staticmethod
+    def resolve_daily_delta_compact_threshold(value: int | None = None) -> int:
+        if value is None:
+            raw = str(os.getenv("REALTIME0052_DAILY_DELTA_COMPACT_THRESHOLD", "")).strip()
+            if raw:
+                try:
+                    value = int(raw)
+                except Exception:
+                    value = DEFAULT_DAILY_DELTA_COMPACT_THRESHOLD
+            else:
+                value = DEFAULT_DAILY_DELTA_COMPACT_THRESHOLD
+        try:
+            return max(4, int(value))
+        except Exception:
+            return DEFAULT_DAILY_DELTA_COMPACT_THRESHOLD
+
+    @staticmethod
+    def resolve_intraday_delta_compact_threshold(value: int | None = None) -> int:
+        if value is None:
+            raw = str(os.getenv("REALTIME0052_INTRADAY_DELTA_COMPACT_THRESHOLD", "")).strip()
+            if raw:
+                try:
+                    value = int(raw)
+                except Exception:
+                    value = DEFAULT_INTRADAY_DELTA_COMPACT_THRESHOLD
+            else:
+                value = DEFAULT_INTRADAY_DELTA_COMPACT_THRESHOLD
+        try:
+            return max(8, int(value))
+        except Exception:
+            return DEFAULT_INTRADAY_DELTA_COMPACT_THRESHOLD
 
     @staticmethod
     def _normalize_symbol_token(value: object) -> str:
@@ -297,6 +353,18 @@ class DuckHistoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS tw_etf_aum_history (
+                    etf_code VARCHAR,
+                    etf_name VARCHAR,
+                    trade_date VARCHAR,
+                    aum_billion DOUBLE,
+                    updated_at VARCHAR,
+                    UNIQUE(etf_code, trade_date)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS migration_meta (
                     key VARCHAR,
                     value VARCHAR,
@@ -304,6 +372,39 @@ class DuckHistoryStore:
                     UNIQUE(key)
                 )
                 """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_instruments_market_symbol ON instruments(market, symbol)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_state_instrument_id ON sync_state(instrument_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_state_updated_at ON sync_state(updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_symbol_metadata_market_symbol ON symbol_metadata(market, symbol)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bootstrap_runs_started_at ON bootstrap_runs(started_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_backtest_replay_runs_key_created_at ON backtest_replay_runs(run_key, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_heatmap_runs_universe_created_at ON heatmap_runs(universe_id, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_heatmap_hub_entries_pin_updated ON heatmap_hub_entries(pin_as_card, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rotation_runs_universe_created_at ON rotation_runs(universe_id, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tw_etf_aum_history_trade_date ON tw_etf_aum_history(trade_date)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tw_etf_aum_history_code_date ON tw_etf_aum_history(etf_code, trade_date)"
             )
 
     def _default_legacy_sqlite_path(self) -> Path:
@@ -334,6 +435,7 @@ class DuckHistoryStore:
                 "SELECT COUNT(*) FROM heatmap_runs",
                 "SELECT COUNT(*) FROM heatmap_hub_entries",
                 "SELECT COUNT(*) FROM rotation_runs",
+                "SELECT COUNT(*) FROM tw_etf_aum_history",
                 "SELECT COUNT(*) FROM instruments",
             ]
             for sql in checks:
@@ -435,6 +537,7 @@ class DuckHistoryStore:
                 "heatmap_runs",
                 "heatmap_hub_entries",
                 "rotation_runs",
+                "tw_etf_aum_history",
             ]:
                 if not _table_exists(table):
                     continue
@@ -463,22 +566,65 @@ class DuckHistoryStore:
             src.close()
 
     def _daily_symbol_path(self, symbol: str, market: str) -> Path:
+        return self._daily_symbol_dir(symbol, market) / "bars.parquet"
+
+    def _intraday_symbol_path(self, symbol: str, market: str) -> Path:
+        return self._intraday_symbol_dir(symbol, market) / "ticks.parquet"
+
+    def _daily_symbol_dir(self, symbol: str, market: str) -> Path:
         return (
             self.parquet_root
             / "daily_bars"
             / f"market={self._normalize_market_token(market)}"
             / f"symbol={self._normalize_symbol_token(symbol)}"
-            / "bars.parquet"
         )
 
-    def _intraday_symbol_path(self, symbol: str, market: str) -> Path:
+    def _intraday_symbol_dir(self, symbol: str, market: str) -> Path:
         return (
             self.parquet_root
             / "intraday_ticks"
             / f"market={self._normalize_market_token(market)}"
             / f"symbol={self._normalize_symbol_token(symbol)}"
-            / "ticks.parquet"
         )
+
+    def _daily_delta_dir(self, symbol: str, market: str) -> Path:
+        return self._daily_symbol_dir(symbol, market) / "_delta"
+
+    def _intraday_delta_dir(self, symbol: str, market: str) -> Path:
+        return self._intraday_symbol_dir(symbol, market) / "_delta"
+
+    @staticmethod
+    def _next_delta_parquet_path(delta_dir: Path, *, prefix: str) -> Path:
+        stamp = time.time_ns()
+        return delta_dir / f"{prefix}_{stamp}.parquet"
+
+    @staticmethod
+    def _duck_read_parquet_expr(paths: list[Path]) -> str:
+        quoted = [str(path.resolve()).replace("'", "''") for path in paths]
+        if len(quoted) == 1:
+            return f"read_parquet('{quoted[0]}')"
+        items = ", ".join(f"'{item}'" for item in quoted)
+        return f"read_parquet([{items}])"
+
+    def _daily_parquet_sources(self, symbol: str, market: str) -> list[Path]:
+        base = self._daily_symbol_path(symbol, market)
+        delta_dir = self._daily_delta_dir(symbol, market)
+        out: list[Path] = []
+        if base.exists():
+            out.append(base)
+        if delta_dir.exists():
+            out.extend(sorted([p for p in delta_dir.glob("*.parquet") if p.is_file()]))
+        return out
+
+    def _intraday_parquet_sources(self, symbol: str, market: str) -> list[Path]:
+        base = self._intraday_symbol_path(symbol, market)
+        delta_dir = self._intraday_delta_dir(symbol, market)
+        out: list[Path] = []
+        if base.exists():
+            out.append(base)
+        if delta_dir.exists():
+            out.extend(sorted([p for p in delta_dir.glob("*.parquet") if p.is_file()]))
+        return out
 
     @staticmethod
     def _normalize_daily_bars_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -553,36 +699,15 @@ class DuckHistoryStore:
         return norm
 
     def _load_daily_frame_raw(self, symbol: str, market: str) -> pd.DataFrame:
-        path = self._daily_symbol_path(symbol, market)
-        if not path.exists():
-            return pd.DataFrame(
-                columns=[
-                    "date",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "adj_close",
-                    "source",
-                    "fetched_at",
-                ]
-            )
-        df = pd.read_parquet(path)
-        if df.empty:
-            return pd.DataFrame(
-                columns=[
-                    "date",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "adj_close",
-                    "source",
-                    "fetched_at",
-                ]
-            )
+        return self._load_daily_frame_window(symbol=symbol, market=market, start=None, end=None)
+
+    def _load_daily_frame_window(
+        self,
+        symbol: str,
+        market: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> pd.DataFrame:
         expected = [
             "date",
             "open",
@@ -594,10 +719,69 @@ class DuckHistoryStore:
             "source",
             "fetched_at",
         ]
+        sources = self._daily_parquet_sources(symbol, market)
+        if not sources:
+            return pd.DataFrame(columns=expected)
+
+        read_expr = self._duck_read_parquet_expr(sources)
+        where: list[str] = ["rn=1"]
+        params: list[object] = []
+        if start is not None:
+            where.append("d >= CAST(? AS DATE)")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("d <= CAST(? AS DATE)")
+            params.append(pd.Timestamp(end).date().isoformat())
+
+        sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(date AS DATE) AS d,
+                    TRY_CAST(open AS DOUBLE) AS open,
+                    TRY_CAST(high AS DOUBLE) AS high,
+                    TRY_CAST(low AS DOUBLE) AS low,
+                    TRY_CAST(close AS DOUBLE) AS close,
+                    TRY_CAST(volume AS DOUBLE) AS volume,
+                    TRY_CAST(adj_close AS DOUBLE) AS adj_close,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    d, open, high, low, close, volume, adj_close,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE d IS NOT NULL
+            )
+            SELECT
+                STRFTIME(d, '%Y-%m-%d') AS date,
+                open, high, low, close, volume, adj_close, source,
+                COALESCE(fetched_at_text, '') AS fetched_at
+            FROM ranked
+            WHERE {" AND ".join(where)}
+            ORDER BY d ASC
+        """
+        conn = self._connect()
+        try:
+            out = conn.execute(sql, params).df()
+        except Exception:
+            return pd.DataFrame(columns=expected)
+        finally:
+            conn.close()
+
+        if out.empty:
+            return pd.DataFrame(columns=expected)
         for col in expected:
-            if col not in df.columns:
-                df[col] = None
-        return df[expected]
+            if col not in out.columns:
+                out[col] = None
+        return out[expected]
 
     def _upsert_daily_bars(self, symbol: str, market: str, bars: pd.DataFrame):
         if bars is None or bars.empty:
@@ -632,28 +816,121 @@ class DuckHistoryStore:
         payload = payload.reset_index(drop=True)
         if payload.empty:
             return 0
+        payload["date"] = pd.to_datetime(payload["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        payload = payload.dropna(subset=["date"])  # type: ignore[arg-type]
+        payload = payload.drop_duplicates(subset=["date"], keep="last").sort_values("date")
+        if payload.empty:
+            return 0
 
-        existing = self._load_daily_frame_raw(symbol, market)
-        if existing.empty:
-            merged = payload.copy()
-        else:
-            merged = pd.concat([existing, payload], axis=0, ignore_index=True)
-        merged = merged.reset_index(drop=True)
-        merged["date"] = pd.to_datetime(merged["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        merged = merged.dropna(subset=["date"])  # type: ignore[arg-type]
-        merged = merged.drop_duplicates(subset=["date"], keep="last").sort_values("date")
+        delta_dir = self._daily_delta_dir(symbol, market)
+        delta_dir.mkdir(parents=True, exist_ok=True)
+        delta_path = self._next_delta_parquet_path(delta_dir, prefix="bars_delta")
+        payload.to_parquet(delta_path, index=False)
+        self._compact_daily_bars_if_needed(symbol=symbol, market=market)
+        return int(len(payload))
+
+    def _compact_daily_bars_if_needed(self, *, symbol: str, market: str) -> None:
+        delta_dir = self._daily_delta_dir(symbol, market)
+        if not delta_dir.exists():
+            return
+        delta_files = sorted([p for p in delta_dir.glob("*.parquet") if p.is_file()])
+        if len(delta_files) < int(self._daily_delta_compact_threshold):
+            return
+
+        sources = self._daily_parquet_sources(symbol, market)
+        if not sources:
+            return
+        read_expr = self._duck_read_parquet_expr(sources)
+        sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(date AS DATE) AS d,
+                    TRY_CAST(open AS DOUBLE) AS open,
+                    TRY_CAST(high AS DOUBLE) AS high,
+                    TRY_CAST(low AS DOUBLE) AS low,
+                    TRY_CAST(close AS DOUBLE) AS close,
+                    TRY_CAST(volume AS DOUBLE) AS volume,
+                    TRY_CAST(adj_close AS DOUBLE) AS adj_close,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    d, open, high, low, close, volume, adj_close,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE d IS NOT NULL
+            )
+            SELECT
+                STRFTIME(d, '%Y-%m-%d') AS date,
+                open, high, low, close, volume, adj_close, source,
+                COALESCE(fetched_at_text, '') AS fetched_at
+            FROM ranked
+            WHERE rn=1
+            ORDER BY d ASC
+        """
+        conn = self._connect()
+        try:
+            compacted = conn.execute(sql).df()
+        except Exception:
+            return
+        finally:
+            conn.close()
+
         out_path = self._daily_symbol_path(symbol, market)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_parquet(out_path, index=False)
-        return int(len(payload))
+        tmp_path = out_path.with_suffix(".compact.parquet")
+        if compacted.empty:
+            try:
+                out_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            compacted.to_parquet(tmp_path, index=False)
+            tmp_path.replace(out_path)
+        for delta in delta_files:
+            try:
+                delta.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _get_writeback_executor(self) -> ThreadPoolExecutor:
         with self._writeback_lock:
             if self._writeback_executor is None:
                 self._writeback_executor = ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="duck-writeback"
+                    max_workers=self._writeback_workers, thread_name_prefix="duck-writeback"
                 )
             return self._writeback_executor
+
+    @staticmethod
+    def _merge_writeback_payload_frames(
+        base: pd.DataFrame | None,
+        incoming: pd.DataFrame | None,
+    ) -> pd.DataFrame:
+        if incoming is None or not isinstance(incoming, pd.DataFrame) or incoming.empty:
+            if base is None or not isinstance(base, pd.DataFrame):
+                return pd.DataFrame()
+            return base.copy()
+        if base is None or not isinstance(base, pd.DataFrame) or base.empty:
+            return incoming.copy()
+
+        merged = pd.concat([base, incoming], axis=0, sort=False)
+        if merged.empty:
+            return merged
+        idx = pd.to_datetime(merged.index, utc=True, errors="coerce")
+        if idx.notna().any():
+            mask = ~idx.isna()
+            merged = merged.loc[mask].copy()
+            merged.index = idx[mask]
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        return merged
 
     def _persist_daily_bars_writeback(
         self,
@@ -710,23 +987,39 @@ class DuckHistoryStore:
         source_text = self._normalize_text(source)
         key = (market_token, symbol_token)
         with self._writeback_lock:
-            if key in self._writeback_inflight:
-                return False
-            self._writeback_inflight.add(key)
+            pending = self._writeback_pending.get(key)
+            if pending is None:
+                merged_payload = payload
+                merged_source = source_text
+            else:
+                prev_bars, prev_source = pending
+                merged_payload = self._merge_writeback_payload_frames(prev_bars, payload)
+                merged_source = source_text or prev_source
+            self._writeback_pending[key] = (merged_payload, merged_source)
+            should_submit = key not in self._writeback_inflight
+            if should_submit:
+                self._writeback_inflight.add(key)
 
-        def _worker():
-            try:
-                self._persist_daily_bars_writeback(
-                    symbol=symbol_token,
-                    market=market_token,
-                    bars=payload,
-                    source=source_text,
-                )
-            except Exception:
-                pass
-            finally:
+        if not should_submit:
+            return True
+
+        def _worker() -> None:
+            while True:
                 with self._writeback_lock:
-                    self._writeback_inflight.discard(key)
+                    pending_payload = self._writeback_pending.pop(key, None)
+                    if pending_payload is None:
+                        self._writeback_inflight.discard(key)
+                        return
+                bars_payload, source_payload = pending_payload
+                try:
+                    self._persist_daily_bars_writeback(
+                        symbol=symbol_token,
+                        market=market_token,
+                        bars=bars_payload,
+                        source=source_payload,
+                    )
+                except Exception:
+                    continue
 
         try:
             executor = self._get_writeback_executor()
@@ -734,6 +1027,7 @@ class DuckHistoryStore:
             return True
         except Exception:
             with self._writeback_lock:
+                self._writeback_pending.pop(key, None)
                 self._writeback_inflight.discard(key)
             return False
 
@@ -741,7 +1035,7 @@ class DuckHistoryStore:
         deadline = time.monotonic() + max(0.0, float(timeout_sec))
         while True:
             with self._writeback_lock:
-                pending = bool(self._writeback_inflight)
+                pending = bool(self._writeback_inflight) or bool(self._writeback_pending)
             if not pending:
                 return True
             if time.monotonic() >= deadline:
@@ -749,17 +1043,54 @@ class DuckHistoryStore:
             time.sleep(0.01)
 
     def _load_intraday_frame_raw(self, symbol: str, market: str) -> pd.DataFrame:
-        path = self._intraday_symbol_path(symbol, market)
-        if not path.exists():
-            return pd.DataFrame(columns=["ts_utc", "price", "cum_volume", "source", "fetched_at"])
-        df = pd.read_parquet(path)
-        if df.empty:
-            return pd.DataFrame(columns=["ts_utc", "price", "cum_volume", "source", "fetched_at"])
         expected = ["ts_utc", "price", "cum_volume", "source", "fetched_at"]
+        sources = self._intraday_parquet_sources(symbol, market)
+        if not sources:
+            return pd.DataFrame(columns=expected)
+        read_expr = self._duck_read_parquet_expr(sources)
+        sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(ts_utc AS TIMESTAMP) AS ts_utc,
+                    TRY_CAST(price AS DOUBLE) AS price,
+                    TRY_CAST(cum_volume AS DOUBLE) AS cum_volume,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    ts_utc, price, cum_volume,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ts_utc
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE ts_utc IS NOT NULL
+            )
+            SELECT
+                CAST(ts_utc AS VARCHAR) AS ts_utc,
+                price, cum_volume, source, COALESCE(fetched_at_text, '') AS fetched_at
+            FROM ranked
+            WHERE rn=1
+            ORDER BY ts_utc ASC
+        """
+        conn = self._connect()
+        try:
+            out = conn.execute(sql).df()
+        except Exception:
+            return pd.DataFrame(columns=expected)
+        finally:
+            conn.close()
+        if out.empty:
+            return pd.DataFrame(columns=expected)
         for col in expected:
-            if col not in df.columns:
-                df[col] = None
-        return df[expected]
+            if col not in out.columns:
+                out[col] = None
+        return out[expected]
 
     def _upsert_intraday_ticks(self, symbol: str, market: str, ticks: pd.DataFrame) -> int:
         if ticks is None or ticks.empty:
@@ -789,23 +1120,92 @@ class DuckHistoryStore:
         payload = payload.dropna(subset=["price"])  # type: ignore[arg-type]
         if payload.empty:
             return 0
-
-        existing = self._load_intraday_frame_raw(symbol, market)
-        if existing.empty:
-            merged = payload.copy()
-        else:
-            merged = pd.concat([existing, payload], axis=0, ignore_index=True)
-        merged["ts_utc"] = pd.to_datetime(merged["ts_utc"], utc=True, errors="coerce")
-        merged = merged.dropna(subset=["ts_utc"])  # type: ignore[arg-type]
-        merged = merged.reset_index(drop=True)
-        merged = merged.drop_duplicates(subset=["ts_utc"], keep="last").sort_values("ts_utc")
+        payload["ts_utc"] = pd.to_datetime(payload["ts_utc"], utc=True, errors="coerce")
+        payload = payload.dropna(subset=["ts_utc"])  # type: ignore[arg-type]
+        payload = payload.reset_index(drop=True)
         cutoff = datetime.now(tz=timezone.utc) - pd.Timedelta(days=self.intraday_retain_days)
-        merged = merged[merged["ts_utc"] >= pd.Timestamp(cutoff)]
-        merged["ts_utc"] = merged["ts_utc"].astype(str)
+        payload = payload[payload["ts_utc"] >= pd.Timestamp(cutoff)]
+        payload = payload.drop_duplicates(subset=["ts_utc"], keep="last").sort_values("ts_utc")
+        if payload.empty:
+            return 0
+        payload["ts_utc"] = payload["ts_utc"].astype(str)
+
+        delta_dir = self._intraday_delta_dir(symbol, market)
+        delta_dir.mkdir(parents=True, exist_ok=True)
+        delta_path = self._next_delta_parquet_path(delta_dir, prefix="ticks_delta")
+        payload.to_parquet(delta_path, index=False)
+        self._compact_intraday_ticks_if_needed(symbol=symbol, market=market)
+        return int(len(payload))
+
+    def _compact_intraday_ticks_if_needed(self, *, symbol: str, market: str) -> None:
+        delta_dir = self._intraday_delta_dir(symbol, market)
+        if not delta_dir.exists():
+            return
+        delta_files = sorted([p for p in delta_dir.glob("*.parquet") if p.is_file()])
+        if len(delta_files) < int(self._intraday_delta_compact_threshold):
+            return
+
+        sources = self._intraday_parquet_sources(symbol, market)
+        if not sources:
+            return
+        read_expr = self._duck_read_parquet_expr(sources)
+        cutoff_iso = (
+            datetime.now(tz=timezone.utc) - pd.Timedelta(days=self.intraday_retain_days)
+        ).isoformat()
+        sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(ts_utc AS TIMESTAMP) AS ts_utc,
+                    TRY_CAST(price AS DOUBLE) AS price,
+                    TRY_CAST(cum_volume AS DOUBLE) AS cum_volume,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    ts_utc, price, cum_volume,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ts_utc
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE ts_utc IS NOT NULL
+            )
+            SELECT
+                CAST(ts_utc AS VARCHAR) AS ts_utc,
+                price, cum_volume, source, COALESCE(fetched_at_text, '') AS fetched_at
+            FROM ranked
+            WHERE rn=1 AND ts_utc >= CAST(? AS TIMESTAMP)
+            ORDER BY ts_utc ASC
+        """
+        conn = self._connect()
+        try:
+            compacted = conn.execute(sql, [cutoff_iso]).df()
+        except Exception:
+            return
+        finally:
+            conn.close()
+
         out_path = self._intraday_symbol_path(symbol, market)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_parquet(out_path, index=False)
-        return int(len(payload))
+        tmp_path = out_path.with_suffix(".compact.parquet")
+        if compacted.empty:
+            try:
+                out_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            compacted.to_parquet(tmp_path, index=False)
+            tmp_path.replace(out_path)
+        for delta in delta_files:
+            try:
+                delta.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _get_or_create_instrument(self, symbol: str, market: str, name: str | None = None) -> int:
         symbol = self._normalize_symbol_token(symbol)
@@ -848,6 +1248,101 @@ class DuckHistoryStore:
             return None
         finally:
             conn.close()
+
+    def load_sync_state(self, symbol: str, market: str) -> dict[str, object] | None:
+        symbol_token = self._normalize_symbol_token(symbol)
+        market_token = self._normalize_market_token(market)
+        if not symbol_token or not market_token:
+            return None
+
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT s.last_success_date, s.last_source, s.last_error, s.updated_at
+                FROM sync_state s
+                JOIN instruments i ON i.id = s.instrument_id
+                WHERE i.symbol=? AND i.market=?
+                ORDER BY s.updated_at DESC
+                LIMIT 1
+                """,
+                (symbol_token, market_token),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if row is None:
+            return None
+        return {
+            "last_success_date": self._parse_iso_datetime(row[0]),
+            "last_source": self._normalize_text(row[1]),
+            "last_error": self._normalize_text(row[2]),
+            "updated_at": self._parse_iso_datetime(row[3]),
+        }
+
+    def load_daily_coverage(
+        self,
+        symbol: str,
+        market: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> dict[str, object]:
+        symbol_token = self._normalize_symbol_token(symbol)
+        market_token = self._normalize_market_token(market)
+        sources = self._daily_parquet_sources(symbol_token, market_token)
+        empty = {"row_count": 0, "first_date": None, "last_date": None}
+        if not sources:
+            return empty
+
+        read_expr = self._duck_read_parquet_expr(sources)
+        where: list[str] = ["rn=1"]
+        params: list[object] = []
+        if start is not None:
+            where.append("d >= CAST(? AS DATE)")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("d <= CAST(? AS DATE)")
+            params.append(pd.Timestamp(end).date().isoformat())
+
+        sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(date AS DATE) AS d,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    d,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE d IS NOT NULL
+            )
+            SELECT COUNT(*) AS row_count, MIN(d) AS first_date, MAX(d) AS last_date
+            FROM ranked
+            WHERE {" AND ".join(where)}
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(sql, params).fetchone()
+        except Exception:
+            return empty
+        finally:
+            conn.close()
+
+        if row is None:
+            return empty
+        first = pd.Timestamp(row[1], tz="UTC").to_pydatetime() if row[1] is not None else None
+        last = pd.Timestamp(row[2], tz="UTC").to_pydatetime() if row[2] is not None else None
+        return {
+            "row_count": max(0, int(row[0] or 0)),
+            "first_date": first,
+            "last_date": last,
+        }
 
     def _save_sync_state(
         self,
@@ -1012,17 +1507,13 @@ class DuckHistoryStore:
     ) -> pd.DataFrame:
         symbol = self._normalize_symbol_token(symbol)
         market = self._normalize_market_token(market)
-        df = self._load_daily_frame_raw(symbol, market)
+        df = self._load_daily_frame_window(symbol, market, start=start, end=end)
         if df.empty:
             return pd.DataFrame(
                 columns=["open", "high", "low", "close", "volume", "adj_close", "source"]
             )
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         df = df.dropna(subset=["date"]).set_index("date").sort_index()
-        if start is not None:
-            df = df[df.index >= pd.Timestamp(start)]
-        if end is not None:
-            df = df[df.index <= pd.Timestamp(end)]
         for col in ["open", "high", "low", "close", "volume", "adj_close"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -1456,6 +1947,136 @@ class DuckHistoryStore:
                 "INSERT INTO universe_snapshots(universe_id, symbols_json, source, fetched_at, updated_at) VALUES(?, ?, ?, ?, ?)",
                 (key, payload, source, now, now),
             )
+
+    def save_tw_etf_aum_snapshot(
+        self,
+        *,
+        rows: list[dict[str, object]],
+        trade_date: str,
+        keep_days: int = 22,
+    ) -> int:
+        try:
+            keep = int(keep_days)
+        except Exception:
+            keep = 22
+        try:
+            trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
+        except Exception:
+            return 0
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+
+        dedup: dict[str, tuple[str, float]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = self._normalize_symbol_token(
+                row.get("etf_code") or row.get("code") or row.get("symbol")
+            )
+            if not code:
+                continue
+            raw_value = pd.to_numeric(row.get("aum_billion"), errors="coerce")
+            try:
+                value = float(raw_value)
+            except Exception:
+                continue
+            if (not pd.notna(raw_value)) or value < 0:
+                continue
+            name = self._normalize_text(row.get("etf_name") or row.get("name")) or code
+            dedup[code] = (name, value)
+
+        if not dedup:
+            return 0
+
+        with self._connect_ctx() as conn:
+            for code, (name, aum_billion) in dedup.items():
+                conn.execute(
+                    "DELETE FROM tw_etf_aum_history WHERE etf_code=? AND trade_date=?",
+                    (code, trade_date_iso),
+                )
+                conn.execute(
+                    "INSERT INTO tw_etf_aum_history(etf_code, etf_name, trade_date, aum_billion, updated_at) VALUES(?, ?, ?, ?, ?)",
+                    (code, name, trade_date_iso, aum_billion, now_iso),
+                )
+                if keep > 0:
+                    conn.execute(
+                        """
+                        DELETE FROM tw_etf_aum_history
+                        WHERE etf_code=?
+                          AND trade_date NOT IN (
+                            SELECT trade_date
+                            FROM tw_etf_aum_history
+                            WHERE etf_code=?
+                            ORDER BY trade_date DESC
+                            LIMIT ?
+                        )
+                        """,
+                        (code, code, keep),
+                    )
+        return len(dedup)
+
+    def clear_tw_etf_aum_history(self) -> int:
+        with self._connect_ctx() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM tw_etf_aum_history").fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+            conn.execute("DELETE FROM tw_etf_aum_history")
+            return count
+
+    def load_tw_etf_aum_history(
+        self,
+        *,
+        etf_codes: list[str],
+        keep_days: int = 22,
+    ) -> pd.DataFrame:
+        try:
+            keep = int(keep_days)
+        except Exception:
+            keep = 22
+        keep_limit = keep if keep > 0 else None
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if not normalized_codes:
+            return pd.DataFrame(
+                columns=["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]
+            )
+
+        placeholders = ", ".join(["?"] * len(normalized_codes))
+        conn = self._connect()
+        try:
+            df = conn.execute(
+                f"""
+                SELECT etf_code, etf_name, trade_date, aum_billion, updated_at
+                FROM tw_etf_aum_history
+                WHERE etf_code IN ({placeholders})
+                ORDER BY etf_code ASC, trade_date DESC
+                """,
+                normalized_codes,
+            ).df()
+        finally:
+            conn.close()
+        if df.empty:
+            return df
+
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.astype(str)
+        df["aum_billion"] = pd.to_numeric(df["aum_billion"], errors="coerce")
+        df = df.dropna(subset=["trade_date", "aum_billion"])
+        if df.empty:
+            return pd.DataFrame(
+                columns=["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]
+            )
+
+        df = df.sort_values(["etf_code", "trade_date"], ascending=[True, False])
+        if keep_limit is not None:
+            df = df.groupby("etf_code", as_index=False).head(keep_limit)
+        df = df.sort_values(["etf_code", "trade_date"], ascending=[True, True]).reset_index(
+            drop=True
+        )
+        return df[["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]]
 
     def load_universe_snapshot(self, universe_id: str) -> UniverseSnapshot | None:
         key = str(universe_id or "").strip().upper()

@@ -178,6 +178,62 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(snap.symbols, ["2330", "2454", "2317"])
             self.assertEqual(snap.source, "unit_test")
 
+    def test_save_and_load_tw_etf_aum_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            dates = ["2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]
+            for idx, trade_date in enumerate(dates):
+                saved = store.save_tw_etf_aum_snapshot(
+                    rows=[
+                        {"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1000 + idx},
+                        {"etf_code": "0056", "etf_name": "高股息", "aum_billion": 800 + idx},
+                    ],
+                    trade_date=trade_date,
+                    keep_days=3,
+                )
+                self.assertEqual(saved, 2)
+
+            hist = store.load_tw_etf_aum_history(etf_codes=["0050", "0056"], keep_days=3)
+            self.assertFalse(hist.empty)
+            self.assertEqual(set(hist["etf_code"].unique()), {"0050", "0056"})
+            self.assertEqual(int((hist["etf_code"] == "0050").sum()), 3)
+            self.assertEqual(int((hist["etf_code"] == "0056").sum()), 3)
+            self.assertNotIn("2026-01-02", set(hist["trade_date"].astype(str)))
+
+    def test_save_tw_etf_aum_history_keep_days_zero_keeps_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            dates = ["2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]
+            for idx, trade_date in enumerate(dates):
+                saved = store.save_tw_etf_aum_snapshot(
+                    rows=[
+                        {"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1000 + idx},
+                    ],
+                    trade_date=trade_date,
+                    keep_days=0,
+                )
+                self.assertEqual(saved, 1)
+
+            hist_all = store.load_tw_etf_aum_history(etf_codes=["0050"], keep_days=0)
+            self.assertEqual(int((hist_all["etf_code"] == "0050").sum()), 4)
+            self.assertIn("2026-01-02", set(hist_all["trade_date"].astype(str)))
+
+    def test_clear_tw_etf_aum_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            store.save_tw_etf_aum_snapshot(
+                rows=[{"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1000.0}],
+                trade_date="2026-01-05",
+                keep_days=0,
+            )
+            removed = store.clear_tw_etf_aum_history()
+            self.assertGreaterEqual(int(removed), 1)
+            hist = store.load_tw_etf_aum_history(etf_codes=["0050"], keep_days=0)
+            self.assertTrue(hist.empty)
+
     def test_save_and_load_latest_heatmap_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"

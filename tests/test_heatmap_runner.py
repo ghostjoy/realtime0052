@@ -116,6 +116,24 @@ class HeatmapRunnerTests(unittest.TestCase):
         self.assertEqual({row["symbol"] for row in rows}, {"0050", "2330"})
         self.assertIn("excess_pct", rows[0])
 
+    def test_compute_heatmap_rows_parallel_keeps_symbol_coverage(self):
+        bars_0050 = _bars(100, seed=21)
+        bars_2330 = _bars(100, seed=22)
+        bars_2317 = _bars(100, seed=23)
+        benchmark_close = pd.to_numeric(bars_0050["close"], errors="coerce")
+        rows = compute_heatmap_rows(
+            run_symbols=["0050", "2330", "2317"],
+            bars_cache={"0050": bars_0050, "2330": bars_2330, "2317": bars_2317},
+            benchmark_close=benchmark_close,
+            strategy="buy_hold",
+            strategy_params={},
+            cost_model=CostModel(fee_rate=0.0, sell_tax_rate=0.0, slippage_rate=0.0),
+            name_map={"0050": "台灣50", "2330": "台積電", "2317": "鴻海"},
+            min_required=2,
+            max_workers=3,
+        )
+        self.assertEqual({row["symbol"] for row in rows}, {"0050", "2330", "2317"})
+
 
 if __name__ == "__main__":
     unittest.main()

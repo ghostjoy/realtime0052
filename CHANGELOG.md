@@ -100,6 +100,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated .gitignore, conf/tw_etf_management_fees_missing.csv, docs/plan-architecture-tooling-docs.md, docs/plan-performance-special.md, market_history.duckdb, parquet/daily_bars/market=TW/symbol=1560/bars.parquet, ... (+46) [id:ee902adf1e]
 - Auto: updated app.py, tests/test_active_etf_page.py, ui/pages/backtest.py [id:9de9c361b8]
 - Auto: updated storage/duck_store.py [id:fe2ef6efc2]
 - Auto: updated .githooks/pre-commit, .github/workflows/ci.yml, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, ... (+4) [id:f09ec6a4f6]

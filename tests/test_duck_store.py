@@ -220,6 +220,211 @@ class DuckStoreTests(unittest.TestCase):
             self.assertTrue((bars["source"] == "yfinance").all())
             self.assertAlmostEqual(float(bars["close"].iloc[-1]), 102.5, places=6)
 
+    def test_queue_daily_bars_writeback_coalesces_same_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+
+            idx_a = pd.date_range("2025-01-01", periods=2, freq="B", tz="UTC")
+            idx_b = pd.date_range("2025-01-02", periods=2, freq="B", tz="UTC")
+            frame_a = pd.DataFrame({"close": [100.0, 101.0]}, index=idx_a)
+            frame_b = pd.DataFrame({"close": [102.0, 103.0]}, index=idx_b)
+
+            queued_a = store.queue_daily_bars_writeback(
+                symbol="^GSPC", market="US", bars=frame_a, source="first"
+            )
+            queued_b = store.queue_daily_bars_writeback(
+                symbol="^GSPC", market="US", bars=frame_b, source="second"
+            )
+            self.assertTrue(queued_a)
+            self.assertTrue(queued_b)
+            self.assertTrue(store.flush_writeback_queue(timeout_sec=3.0))
+
+            bars = store.load_daily_bars(symbol="^GSPC", market="US")
+            self.assertEqual(len(bars), 3)
+            self.assertEqual(bars.index[-1].date().isoformat(), "2025-01-03")
+            self.assertAlmostEqual(float(bars["close"].iloc[-1]), 103.0, places=6)
+            self.assertEqual(str(bars["source"].iloc[0]), "first")
+            self.assertEqual(str(bars["source"].iloc[-1]), "second")
+
+    def test_daily_delta_compaction_rolls_up_base_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            store._daily_delta_compact_threshold = 2
+
+            idx_a = pd.date_range("2025-01-01", periods=2, freq="B", tz="UTC")
+            idx_b = pd.date_range("2025-01-03", periods=2, freq="B", tz="UTC")
+            frame_a = pd.DataFrame({"close": [100.0, 101.0]}, index=idx_a)
+            frame_b = pd.DataFrame({"close": [102.0, 103.0]}, index=idx_b)
+            self.assertTrue(
+                store.queue_daily_bars_writeback(
+                    symbol="0050", market="TW", bars=frame_a, source="unit"
+                )
+            )
+            self.assertTrue(store.flush_writeback_queue(timeout_sec=3.0))
+            self.assertTrue(
+                store.queue_daily_bars_writeback(
+                    symbol="0050", market="TW", bars=frame_b, source="unit"
+                )
+            )
+            self.assertTrue(store.flush_writeback_queue(timeout_sec=3.0))
+
+            base_path = store._daily_symbol_path("0050", "TW")
+            delta_dir = store._daily_delta_dir("0050", "TW")
+            self.assertTrue(base_path.exists())
+            self.assertEqual(len(list(delta_dir.glob("*.parquet"))), 0)
+            bars = store.load_daily_bars("0050", "TW")
+            self.assertEqual(len(bars), 4)
+
+    def test_intraday_delta_compaction_rolls_up_base_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            store._intraday_delta_compact_threshold = 2
+
+            count_a = store.save_intraday_ticks(
+                symbol="2330",
+                market="TW",
+                ticks=[{"ts": "2025-01-02T01:00:00+00:00", "price": 100.0, "cum_volume": 10}],
+            )
+            count_b = store.save_intraday_ticks(
+                symbol="2330",
+                market="TW",
+                ticks=[{"ts": "2025-01-02T01:01:00+00:00", "price": 101.0, "cum_volume": 15}],
+            )
+            self.assertEqual(count_a, 1)
+            self.assertEqual(count_b, 1)
+
+            base_path = store._intraday_symbol_path("2330", "TW")
+            delta_dir = store._intraday_delta_dir("2330", "TW")
+            self.assertTrue(base_path.exists())
+            self.assertEqual(len(list(delta_dir.glob("*.parquet"))), 0)
+            ticks = store.load_intraday_ticks("2330", "TW")
+            self.assertEqual(len(ticks), 2)
+
+    def test_load_daily_coverage_and_sync_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+
+            idx = pd.date_range("2025-01-01", periods=3, freq="B", tz="UTC")
+            frame = pd.DataFrame({"close": [100.0, 101.0, 102.5]}, index=idx)
+            queued = store.queue_daily_bars_writeback(
+                symbol="^GSPC", market="US", bars=frame, source="yfinance"
+            )
+            self.assertTrue(queued)
+            self.assertTrue(store.flush_writeback_queue(timeout_sec=3.0))
+
+            coverage = store.load_daily_coverage(
+                symbol="^GSPC",
+                market="US",
+                start=idx[1].to_pydatetime(),
+                end=idx[2].to_pydatetime(),
+            )
+            self.assertEqual(int(coverage["row_count"]), 2)
+            self.assertEqual(coverage["first_date"].date().isoformat(), idx[1].date().isoformat())
+            self.assertEqual(coverage["last_date"].date().isoformat(), idx[2].date().isoformat())
+
+            sync_state = store.load_sync_state(symbol="^GSPC", market="US")
+            self.assertIsNotNone(sync_state)
+            assert sync_state is not None
+            self.assertEqual(sync_state["last_source"], "yfinance")
+            self.assertEqual(
+                sync_state["last_success_date"].date().isoformat(), idx[2].date().isoformat()
+            )
+
+    def test_save_and_load_tw_etf_aum_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            dates = ["2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]
+            for idx, trade_date in enumerate(dates):
+                saved = store.save_tw_etf_aum_snapshot(
+                    rows=[
+                        {"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1000 + idx},
+                        {"etf_code": "0056", "etf_name": "高股息", "aum_billion": 800 + idx},
+                    ],
+                    trade_date=trade_date,
+                    keep_days=3,
+                )
+                self.assertEqual(saved, 2)
+
+            hist = store.load_tw_etf_aum_history(etf_codes=["0050", "0056"], keep_days=3)
+            self.assertFalse(hist.empty)
+            self.assertEqual(set(hist["etf_code"].unique()), {"0050", "0056"})
+            self.assertEqual(int((hist["etf_code"] == "0050").sum()), 3)
+            self.assertEqual(int((hist["etf_code"] == "0056").sum()), 3)
+            self.assertNotIn("2026-01-02", set(hist["trade_date"].astype(str)))
+
+    def test_save_tw_etf_aum_history_keep_days_zero_keeps_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            dates = ["2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]
+            for idx, trade_date in enumerate(dates):
+                saved = store.save_tw_etf_aum_snapshot(
+                    rows=[
+                        {"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1000 + idx},
+                    ],
+                    trade_date=trade_date,
+                    keep_days=0,
+                )
+                self.assertEqual(saved, 1)
+
+            hist_all = store.load_tw_etf_aum_history(etf_codes=["0050"], keep_days=0)
+            self.assertEqual(int((hist_all["etf_code"] == "0050").sum()), 4)
+            self.assertIn("2026-01-02", set(hist_all["trade_date"].astype(str)))
+
+    def test_clear_tw_etf_aum_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            store.save_tw_etf_aum_snapshot(
+                rows=[{"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1000.0}],
+                trade_date="2026-01-05",
+                keep_days=0,
+            )
+            removed = store.clear_tw_etf_aum_history()
+            self.assertGreaterEqual(int(removed), 1)
+            hist = store.load_tw_etf_aum_history(etf_codes=["0050"], keep_days=0)
+            self.assertTrue(hist.empty)
+
     def test_upsert_and_list_heatmap_hub_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

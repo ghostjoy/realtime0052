@@ -28,13 +28,40 @@ def _bars(start: str, periods: int) -> pd.DataFrame:
 
 
 class _FakeStore:
-    def __init__(self, bars_map: dict[str, pd.DataFrame], errors: dict[str, str] | None = None):
+    def __init__(
+        self,
+        bars_map: dict[str, pd.DataFrame],
+        errors: dict[str, str] | None = None,
+        sync_state_map: dict[str, datetime] | None = None,
+        coverage_map: dict[str, dict[str, object]] | None = None,
+    ):
         self._bars_map = bars_map
         self._errors = errors or {}
+        self._sync_state_map = sync_state_map or {}
+        self._coverage_map = coverage_map or {}
         self.sync_calls: list[str] = []
+        self.load_calls: list[str] = []
+        self.coverage_calls: list[str] = []
 
     def load_daily_bars(self, symbol, market, start=None, end=None):
-        return self._bars_map.get(str(symbol).upper(), pd.DataFrame())
+        code = str(symbol).upper()
+        self.load_calls.append(code)
+        return self._bars_map.get(code, pd.DataFrame())
+
+    def load_sync_state(self, symbol, market):
+        code = str(symbol).upper()
+        last_success = self._sync_state_map.get(code)
+        if last_success is None:
+            return None
+        return {"last_success_date": last_success}
+
+    def load_daily_coverage(self, symbol, market, start=None, end=None):
+        code = str(symbol).upper()
+        self.coverage_calls.append(code)
+        payload = self._coverage_map.get(code)
+        if payload is None:
+            return None
+        return payload
 
     def sync_symbol_history(self, symbol, market, start=None, end=None):
         code = str(symbol).upper()
@@ -115,6 +142,8 @@ class SyncOrchestratorTests(unittest.TestCase):
         self.assertIn("BBB: timeout", plan.issues)
         self.assertIn("BBB", reports)
         self.assertEqual(store.sync_calls, ["BBB"])
+        self.assertEqual(store.coverage_calls, ["AAA", "BBB"])
+        self.assertEqual(store.load_calls, ["AAA", "BBB"])
 
     def test_sync_symbols_if_needed_min_rows(self):
         start = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -138,6 +167,64 @@ class SyncOrchestratorTests(unittest.TestCase):
         self.assertEqual(plan.synced_symbols, ["AAA"])
         self.assertEqual(plan.skipped_symbols, ["BBB"])
         self.assertIn("AAA", reports)
+        self.assertEqual(store.coverage_calls, ["AAA", "BBB"])
+        self.assertEqual(store.load_calls, ["AAA", "BBB"])
+
+    def test_sync_symbols_if_needed_backfill_uses_sync_state_fast_path(self):
+        start = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        end = datetime(2026, 1, 8, tzinfo=timezone.utc)
+        store = _FakeStore(
+            bars_map={"AAA": _bars("2026-01-01", 10)},
+            sync_state_map={
+                "AAA": datetime(2026, 1, 8, tzinfo=timezone.utc),
+                "BBB": datetime(2026, 1, 5, tzinfo=timezone.utc),
+            },
+            coverage_map={
+                "AAA": {
+                    "row_count": 5,
+                    "first_date": datetime(2026, 1, 2, tzinfo=timezone.utc),
+                    "last_date": datetime(2026, 1, 8, tzinfo=timezone.utc),
+                }
+            },
+        )
+        _, plan = sync_symbols_if_needed(
+            store=store,
+            market="TW",
+            symbols=["AAA", "BBB"],
+            start=start,
+            end=end,
+            parallel=False,
+            mode="backfill",
+        )
+        self.assertEqual(plan.synced_symbols, ["BBB"])
+        self.assertEqual(plan.skipped_symbols, ["AAA"])
+        self.assertEqual(store.coverage_calls, ["AAA"])
+        self.assertEqual(store.load_calls, [])
+
+    def test_sync_symbols_if_needed_min_rows_prefers_daily_coverage(self):
+        start = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        end = datetime(2026, 1, 8, tzinfo=timezone.utc)
+        store = _FakeStore(
+            bars_map={},
+            coverage_map={
+                "AAA": {"row_count": 1, "first_date": None, "last_date": None},
+                "BBB": {"row_count": 4, "first_date": None, "last_date": None},
+            },
+        )
+        _, plan = sync_symbols_if_needed(
+            store=store,
+            market="TW",
+            symbols=["AAA", "BBB"],
+            start=start,
+            end=end,
+            parallel=False,
+            mode="min_rows",
+            min_rows=2,
+        )
+        self.assertEqual(plan.synced_symbols, ["AAA"])
+        self.assertEqual(plan.skipped_symbols, ["BBB"])
+        self.assertEqual(store.coverage_calls, ["AAA", "BBB"])
+        self.assertEqual(store.load_calls, [])
 
     def test_sync_symbols_history_retries_duckdb_attach_conflict(self):
         start = datetime(2026, 1, 2, tzinfo=timezone.utc)

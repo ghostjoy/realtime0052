@@ -321,6 +321,15 @@ class HistoryStore:
                     error TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS tw_etf_aum_history (
+                    etf_code TEXT NOT NULL,
+                    etf_name TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    aum_billion REAL NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(etf_code, trade_date)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
@@ -347,6 +356,12 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_bootstrap_runs_started_at
                     ON bootstrap_runs(started_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_aum_history_trade_date
+                    ON tw_etf_aum_history(trade_date DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_aum_history_code_date
+                    ON tw_etf_aum_history(etf_code, trade_date DESC);
                 """
             )
 
@@ -732,6 +747,32 @@ class HistoryStore:
             return None
         return datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
 
+    def load_sync_state(self, symbol: str, market: str) -> dict[str, object] | None:
+        symbol_token = self._normalize_symbol_token(symbol)
+        market_token = self._normalize_market_token(market)
+        if not symbol_token or not market_token:
+            return None
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT s.last_success_date, s.last_source, s.last_error, s.updated_at
+                FROM sync_state s
+                JOIN instruments i ON i.id = s.instrument_id
+                WHERE i.symbol=? AND i.market=?
+                ORDER BY s.updated_at DESC
+                LIMIT 1
+                """,
+                (symbol_token, market_token),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "last_success_date": self._parse_iso_datetime(row[0]),
+            "last_source": self._normalize_text(row[1]),
+            "last_error": self._normalize_text(row[2]),
+            "updated_at": self._parse_iso_datetime(row[3]),
+        }
+
     def _save_sync_state(
         self,
         instrument_id: int,
@@ -958,6 +999,46 @@ class HistoryStore:
         df["date"] = pd.to_datetime(df["date"], utc=True)
         df = df.set_index("date")
         return df
+
+    def load_daily_coverage(
+        self,
+        symbol: str,
+        market: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> dict[str, object]:
+        symbol_token = self._normalize_symbol_token(symbol)
+        market_token = self._normalize_market_token(market)
+        empty = {"row_count": 0, "first_date": None, "last_date": None}
+        if not symbol_token or not market_token:
+            return empty
+
+        where = ["i.symbol=?", "i.market=?"]
+        params: list[object] = [symbol_token, market_token]
+        if start is not None:
+            where.append("d.date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("d.date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+
+        sql = f"""
+            SELECT COUNT(d.date), MIN(d.date), MAX(d.date)
+            FROM instruments i
+            LEFT JOIN daily_bars d ON d.instrument_id = i.id
+            WHERE {" AND ".join(where)}
+        """
+        with self._connect_ctx() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            return empty
+        first = self._parse_iso_datetime(row[1])
+        last = self._parse_iso_datetime(row[2])
+        return {
+            "row_count": max(0, int(row[0] or 0)),
+            "first_date": first,
+            "last_date": last,
+        }
 
     def save_intraday_ticks(
         self,
@@ -1191,6 +1272,137 @@ class HistoryStore:
                 """,
                 (universe_id, payload, source, now, now),
             )
+
+    def save_tw_etf_aum_snapshot(
+        self,
+        *,
+        rows: list[dict[str, object]],
+        trade_date: str,
+        keep_days: int = 22,
+    ) -> int:
+        try:
+            keep = int(keep_days)
+        except Exception:
+            keep = 22
+        try:
+            trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
+        except Exception:
+            return 0
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+
+        dedup: dict[str, tuple[str, float]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = self._normalize_symbol_token(
+                row.get("etf_code") or row.get("code") or row.get("symbol")
+            )
+            if not code:
+                continue
+            raw_value = pd.to_numeric(row.get("aum_billion"), errors="coerce")
+            try:
+                value = float(raw_value)
+            except Exception:
+                continue
+            if (not pd.notna(raw_value)) or value < 0:
+                continue
+            name = self._normalize_text(row.get("etf_name") or row.get("name")) or code
+            dedup[code] = (name, value)
+
+        if not dedup:
+            return 0
+
+        with self._connect_ctx() as conn:
+            for code, (name, aum_billion) in dedup.items():
+                conn.execute(
+                    """
+                    INSERT INTO tw_etf_aum_history(etf_code, etf_name, trade_date, aum_billion, updated_at)
+                    VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(etf_code, trade_date) DO UPDATE SET
+                        etf_name=excluded.etf_name,
+                        aum_billion=excluded.aum_billion,
+                        updated_at=excluded.updated_at
+                    """,
+                    (code, name, trade_date_iso, aum_billion, now_iso),
+                )
+                if keep > 0:
+                    conn.execute(
+                        """
+                        DELETE FROM tw_etf_aum_history
+                        WHERE etf_code=?
+                          AND trade_date NOT IN (
+                            SELECT trade_date
+                            FROM tw_etf_aum_history
+                            WHERE etf_code=?
+                            ORDER BY trade_date DESC
+                            LIMIT ?
+                        )
+                        """,
+                        (code, code, keep),
+                    )
+        return len(dedup)
+
+    def clear_tw_etf_aum_history(self) -> int:
+        with self._connect_ctx() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM tw_etf_aum_history").fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+            conn.execute("DELETE FROM tw_etf_aum_history")
+            return count
+
+    def load_tw_etf_aum_history(
+        self,
+        *,
+        etf_codes: list[str],
+        keep_days: int = 22,
+    ) -> pd.DataFrame:
+        try:
+            keep = int(keep_days)
+        except Exception:
+            keep = 22
+        keep_limit = keep if keep > 0 else None
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if not normalized_codes:
+            return pd.DataFrame(
+                columns=["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]
+            )
+
+        placeholders = ", ".join(["?"] * len(normalized_codes))
+        with self._connect_ctx() as conn:
+            df = pd.read_sql_query(
+                f"""
+                SELECT etf_code, etf_name, trade_date, aum_billion, updated_at
+                FROM tw_etf_aum_history
+                WHERE etf_code IN ({placeholders})
+                ORDER BY etf_code ASC, trade_date DESC
+                """,
+                conn,
+                params=normalized_codes,
+            )
+        if df.empty:
+            return df
+
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.astype(str)
+        df["aum_billion"] = pd.to_numeric(df["aum_billion"], errors="coerce")
+        df = df.dropna(subset=["trade_date", "aum_billion"])
+        if df.empty:
+            return pd.DataFrame(
+                columns=["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]
+            )
+
+        df = df.sort_values(["etf_code", "trade_date"], ascending=[True, False])
+        if keep_limit is not None:
+            df = df.groupby("etf_code", as_index=False).head(keep_limit)
+        df = df.sort_values(["etf_code", "trade_date"], ascending=[True, True]).reset_index(
+            drop=True
+        )
+        return df[["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]]
 
     def load_universe_snapshot(self, universe_id: str) -> UniverseSnapshot | None:
         with self._connect_ctx() as conn:

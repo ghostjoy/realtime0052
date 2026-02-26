@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Protocol
@@ -37,6 +38,7 @@ def prepare_rotation_bars(
     normalize_ohlcv_frame: Callable[[pd.DataFrame], pd.DataFrame],
     min_required: int = ROTATION_MIN_BARS,
     progress_callback: Callable[[float], None] | None = None,
+    max_workers: int = 1,
 ) -> RotationBarsPreparationResult:
     symbol_sync_issues: list[str] = []
     if sync_before_run and symbols:
@@ -74,18 +76,15 @@ def prepare_rotation_bars(
             )
             bars_cache[symbol] = normalize_ohlcv_frame(bars_local)
 
-    bars_by_symbol: dict[str, pd.DataFrame] = {}
-    skipped_symbols: list[str] = []
     total = max(len(symbols), 1)
-    for idx, symbol in enumerate(symbols):
+    workers = max(1, min(int(max_workers), len(symbols))) if symbols else 1
+
+    def _prepare_one(symbol: str) -> tuple[str, pd.DataFrame | None, bool]:
         bars = bars_cache.get(
             symbol, pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         )
         if bars.empty:
-            skipped_symbols.append(symbol)
-            if progress_callback:
-                progress_callback((idx + 1) / total)
-            continue
+            return symbol, None, True
         bars, _ = apply_split_adjustment(
             bars=bars,
             symbol=symbol,
@@ -94,11 +93,44 @@ def prepare_rotation_bars(
             use_auto_detect=True,
         )
         if len(bars) < int(min_required):
-            skipped_symbols.append(symbol)
-        else:
-            bars_by_symbol[symbol] = bars
-        if progress_callback:
-            progress_callback((idx + 1) / total)
+            return symbol, None, True
+        return symbol, bars, False
+
+    bars_by_symbol: dict[str, pd.DataFrame] = {}
+    skipped_symbols: list[str] = []
+    if workers <= 1 or len(symbols) <= 1:
+        for idx, symbol in enumerate(symbols):
+            _, bars, skipped = _prepare_one(symbol)
+            if skipped:
+                skipped_symbols.append(symbol)
+            elif isinstance(bars, pd.DataFrame):
+                bars_by_symbol[symbol] = bars
+            if progress_callback:
+                progress_callback((idx + 1) / total)
+    else:
+        prepared_map: dict[str, tuple[pd.DataFrame | None, bool]] = {}
+        completed = 0
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="rotation-bars"
+        ) as executor:
+            futures = {executor.submit(_prepare_one, symbol): symbol for symbol in symbols}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    _, bars, skipped = future.result()
+                except Exception:
+                    bars, skipped = None, True
+                prepared_map[symbol] = (bars, skipped)
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed / total)
+
+        for symbol in symbols:
+            bars, skipped = prepared_map.get(symbol, (None, True))
+            if skipped:
+                skipped_symbols.append(symbol)
+            elif isinstance(bars, pd.DataFrame):
+                bars_by_symbol[symbol] = bars
 
     return RotationBarsPreparationResult(
         bars_by_symbol=bars_by_symbol,
