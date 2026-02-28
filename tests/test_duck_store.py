@@ -458,6 +458,40 @@ class DuckStoreTests(unittest.TestCase):
             pinned_rows = store.list_heatmap_hub_entries(pinned_only=True)
             self.assertEqual({row.etf_code for row in pinned_rows}, {"0050", "00935"})
 
+    def test_connect_ctx_does_not_mask_original_error_on_no_active_transaction_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+
+            calls: list[str] = []
+
+            class _FakeConn:
+                def commit(self):
+                    calls.append("commit")
+
+                def rollback(self):
+                    calls.append("rollback")
+                    raise RuntimeError(
+                        "TransactionContext Error: cannot rollback - no transaction is active"
+                    )
+
+                def close(self):
+                    calls.append("close")
+
+            store._connect = lambda: _FakeConn()  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(ValueError, "boom"):
+                with store._connect_ctx():
+                    raise ValueError("boom")
+
+            self.assertIn("rollback", calls)
+            self.assertIn("close", calls)
+
     def test_sync_tw_index_uses_yahoo_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

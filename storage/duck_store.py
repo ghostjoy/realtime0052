@@ -199,7 +199,15 @@ class DuckHistoryStore:
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception as rollback_exc:
+                # DuckDB may report "no transaction is active" on rollback when
+                # the failing statement already ended the transaction context.
+                # Do not mask the original failure with this secondary error.
+                rollback_msg = str(rollback_exc or "").strip().lower()
+                if "no transaction is active" not in rollback_msg:
+                    pass
             raise
         finally:
             if not is_memory:
