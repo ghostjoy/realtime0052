@@ -88,6 +88,34 @@ def _adj_enrich_note(reason: str) -> str:
     return "yahoo unavailable"
 
 
+def _queue_adj_enriched_bars_writeback(
+    *,
+    store: HistoryStoreLike,
+    symbol: str,
+    market_code: str,
+    bars: pd.DataFrame,
+) -> bool:
+    if not isinstance(bars, pd.DataFrame) or bars.empty:
+        return False
+    queue_fn = getattr(store, "queue_daily_bars_writeback", None)
+    if not callable(queue_fn):
+        return False
+    payload = bars.copy()
+    if "source" not in payload.columns:
+        payload["source"] = "adj_enriched:yahoo"
+    try:
+        return bool(
+            queue_fn(
+                symbol=str(symbol).strip().upper(),
+                market=str(market_code).strip().upper(),
+                bars=payload,
+                source="adj_enriched:yahoo",
+            )
+        )
+    except Exception:
+        return False
+
+
 def _enrich_adj_close_from_yahoo(
     *,
     store: HistoryStoreLike,
@@ -159,6 +187,12 @@ def _enrich_adj_close_from_yahoo(
     if not filled:
         return bars, False, last_error
     out["adj_close"] = merged_adj
+    _queue_adj_enriched_bars_writeback(
+        store=store,
+        symbol=symbol,
+        market_code=market_code,
+        bars=out,
+    )
     return out, True, ""
 
 

@@ -96,6 +96,7 @@ class BacktestRunnerTests(unittest.TestCase):
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         end = datetime(2024, 4, 1, tzinfo=timezone.utc)
         raw = _bars(80, seed=29).drop(columns=["source"]).copy()
+        writeback_calls: list[dict[str, object]] = []
 
         class _YahooProvider:
             def ohlcv(self, request):
@@ -117,6 +118,7 @@ class BacktestRunnerTests(unittest.TestCase):
 
         service = SimpleNamespace(yahoo=_YahooProvider())
         store = _FakeStore({"0056": raw}, service=service)
+        store.queue_daily_bars_writeback = lambda **kwargs: writeback_calls.append(kwargs) or True
 
         def _apply_adj(bars: pd.DataFrame):
             if "adj_close" not in bars.columns:
@@ -141,6 +143,9 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertIn("adj_close", out.columns)
         self.assertTrue(pd.to_numeric(out["adj_close"], errors="coerce").notna().any())
         self.assertTrue(str(prepared.availability_rows[0]["adj_mode"]).startswith("ON"))
+        self.assertEqual(len(writeback_calls), 1)
+        self.assertEqual(writeback_calls[0]["symbol"], "0056")
+        self.assertEqual(writeback_calls[0]["market"], "TW")
 
     def test_queue_benchmark_writeback(self):
         class _WritebackStore:

@@ -102,6 +102,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated services/backtest_runner.py, tests/test_backtest_runner.py [id:ff1017f60b]
 - Auto: updated data_sources.py, services/backtest_runner.py, tests/test_backtest_runner.py, tests/test_data_sources.py [id:7690360b15]
 - Auto: updated storage/duck_store.py, tests/test_duck_store.py [id:728a922232]
 - Auto: updated ui/pages/backtest.py [id:e33bc58738]
@@ -260,6 +261,7 @@
 - 改善 `adj_mode` 可觀測性：
   - 當本地 `adj_close` 覆蓋不足且 Yahoo 補值失敗時，`adj_mode` 會附帶原因（例如 `yahoo rate-limit` / `yahoo empty`）
   - 台股 Yahoo 補值新增 `.TW/.TWO/原碼` 變體嘗試，並在 rate-limit 時提前停止重試
+  - Yahoo 補值成功後會透過 writeback 佇列回寫本地 DuckDB（含 `adj_close`），降低後續重複請求與限流風險
 - 修正回測工作台 `還原權息（Adj Close）` 在台股資料源缺 `adj_close` 時長期無效：
   - 當勾選 `還原權息` 且本地 bars 的 `adj_close` 覆蓋不足時，回測 runner 會嘗試以 Yahoo 日K補值 `adj_close`
   - 補值僅在當次回測流程套用（不影響一般未勾選 Adj Close 的路徑）
