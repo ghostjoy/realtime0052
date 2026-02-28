@@ -249,7 +249,7 @@ def fetch_yf_ohlcv(symbol: str, period: str, interval: str):
         }
     )
 
-    keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+    keep = [c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in df.columns]
     df = df[keep].copy()
 
     if df.index.tz is None:

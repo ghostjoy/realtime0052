@@ -18,6 +18,7 @@ class DataSourcesTests(unittest.TestCase):
                 "High": [11.0, 12.0, 13.0],
                 "Low": [9.0, 10.0, 11.0],
                 "Close": [10.5, 11.5, 12.5],
+                "Adj Close": [10.3, 11.2, 12.1],
                 "Volume": [100, 200, 300],
             },
             index=idx,
@@ -28,7 +29,7 @@ class DataSourcesTests(unittest.TestCase):
 
         out = fetch_yf_ohlcv("2330.TW", period="10y", interval="1d")
 
-        self.assertEqual(list(out.columns), ["open", "high", "low", "close", "volume"])
+        self.assertEqual(list(out.columns), ["open", "high", "low", "close", "volume", "adj_close"])
         self.assertEqual(len(out), 3)
         self.assertIsNotNone(out.index.tz)
         ticker.history.assert_called_once_with(period="10y", interval="1d", auto_adjust=False)

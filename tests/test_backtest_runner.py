@@ -38,9 +38,10 @@ def _bars(n: int = 220, *, seed: int = 7) -> pd.DataFrame:
 
 
 class _FakeStore:
-    def __init__(self, bars_map: dict[str, pd.DataFrame]):
+    def __init__(self, bars_map: dict[str, pd.DataFrame], *, service=None):
         self._bars_map = {k.upper(): v for k, v in bars_map.items()}
         self.sync_calls: list[str] = []
+        self.service = service
 
     def load_daily_bars(self, symbol, market, start=None, end=None):
         return self._bars_map.get(str(symbol).upper(), pd.DataFrame())
@@ -90,6 +91,56 @@ class BacktestRunnerTests(unittest.TestCase):
         self.assertEqual(set(prepared.bars_by_symbol.keys()), {"0050", "2330"})
         self.assertEqual(len(prepared.availability_rows), 2)
         self.assertEqual({row["status"] for row in prepared.availability_rows}, {"OK"})
+
+    def test_load_and_prepare_symbol_bars_enriches_adj_close_from_yahoo(self):
+        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2024, 4, 1, tzinfo=timezone.utc)
+        raw = _bars(80, seed=29).drop(columns=["source"]).copy()
+
+        class _YahooProvider:
+            def ohlcv(self, request):
+                idx = raw.index
+                close = pd.Series(100.0 + np.arange(80, dtype=float), index=idx)
+                df = pd.DataFrame(
+                    {
+                        "open": close * 0.99,
+                        "high": close * 1.01,
+                        "low": close * 0.98,
+                        "close": close,
+                        "adj_close": close * 0.97,
+                        "volume": 1000.0,
+                        "source": "yahoo",
+                    },
+                    index=idx,
+                )
+                return SimpleNamespace(df=df, source="yahoo")
+
+        service = SimpleNamespace(yahoo=_YahooProvider())
+        store = _FakeStore({"0056": raw}, service=service)
+
+        def _apply_adj(bars: pd.DataFrame):
+            if "adj_close" not in bars.columns:
+                return bars, {"applied": False, "coverage_pct": 0.0, "reason": "no_adj_close"}
+            adj = pd.to_numeric(bars["adj_close"], errors="coerce")
+            coverage = float(adj.notna().mean() * 100.0) if len(adj) else 0.0
+            return bars, {"applied": coverage >= 60.0, "coverage_pct": coverage}
+
+        prepared = load_and_prepare_symbol_bars(
+            store=store,
+            market_code="TW",
+            symbols=["0056"],
+            start=start,
+            end=end,
+            use_total_return_adjustment=True,
+            use_split_adjustment=False,
+            auto_detect_split=False,
+            apply_total_return_adjustment=_apply_adj,
+        )
+        self.assertEqual(set(prepared.bars_by_symbol.keys()), {"0056"})
+        out = prepared.bars_by_symbol["0056"]
+        self.assertIn("adj_close", out.columns)
+        self.assertTrue(pd.to_numeric(out["adj_close"], errors="coerce").notna().any())
+        self.assertTrue(str(prepared.availability_rows[0]["adj_mode"]).startswith("ON"))
 
     def test_queue_benchmark_writeback(self):
         class _WritebackStore:

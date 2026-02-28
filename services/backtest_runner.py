@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +17,7 @@ from backtest import (
     walk_forward_portfolio,
     walk_forward_single,
 )
+from providers.base import ProviderRequest
 from services.benchmark_loader import benchmark_candidates_tw
 from utils import normalize_ohlcv_frame
 
@@ -44,6 +46,120 @@ class BacktestExecutionInput:
 class BacktestPreparedBars:
     bars_by_symbol: dict[str, pd.DataFrame]
     availability_rows: list[dict[str, object]]
+
+
+def _coverage_pct_for_adj_close(bars: pd.DataFrame) -> float:
+    if not isinstance(bars, pd.DataFrame) or bars.empty or "adj_close" not in bars.columns:
+        return 0.0
+    adj = pd.to_numeric(bars["adj_close"], errors="coerce")
+    return float(adj.notna().mean() * 100.0) if len(adj) else 0.0
+
+
+def _yahoo_symbol_candidates(symbol: str, market_code: str) -> list[str]:
+    token = str(symbol or "").strip().upper()
+    market = str(market_code or "").strip().upper()
+    if not token:
+        return []
+    if market != "TW":
+        return [token]
+    if "." in token:
+        base = token.split(".", 1)[0].strip().upper()
+        out = [token]
+        if token.endswith(".TW"):
+            out.append(f"{base}.TWO")
+        elif token.endswith(".TWO"):
+            out.append(f"{base}.TW")
+        if re.fullmatch(r"\d{4,6}[A-Z]?", base):
+            out.append(base)
+        return list(dict.fromkeys(out))
+    if re.fullmatch(r"\d{4,6}[A-Z]?", token):
+        return [f"{token}.TW", f"{token}.TWO", token]
+    return [token]
+
+
+def _adj_enrich_note(reason: str) -> str:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return ""
+    if "rate limit" in text or "too many requests" in text:
+        return "yahoo rate-limit"
+    if "empty" in text:
+        return "yahoo empty"
+    return "yahoo unavailable"
+
+
+def _enrich_adj_close_from_yahoo(
+    *,
+    store: HistoryStoreLike,
+    bars: pd.DataFrame,
+    symbol: str,
+    market_code: str,
+    start: datetime,
+    end: datetime,
+    min_coverage_ratio: float = 0.6,
+) -> tuple[pd.DataFrame, bool, str]:
+    if not isinstance(bars, pd.DataFrame) or bars.empty:
+        return bars, False, ""
+    if _coverage_pct_for_adj_close(bars) >= float(min_coverage_ratio) * 100.0:
+        return bars, False, ""
+
+    service = getattr(store, "service", None)
+    yahoo_provider = getattr(service, "yahoo", None) if service is not None else None
+    if yahoo_provider is None or not hasattr(yahoo_provider, "ohlcv"):
+        return bars, False, "no yahoo provider"
+
+    last_error = ""
+    yahoo_bars = pd.DataFrame()
+    for yahoo_symbol in _yahoo_symbol_candidates(symbol, market_code):
+        try:
+            snap = yahoo_provider.ohlcv(
+                ProviderRequest(
+                    symbol=yahoo_symbol,
+                    market=str(market_code).strip().upper(),  # type: ignore[arg-type]
+                    interval="1d",
+                    start=start,
+                    end=end,
+                )
+            )
+            yahoo_bars = normalize_ohlcv_frame(
+                getattr(snap, "df", pd.DataFrame()),
+                columns=["open", "high", "low", "close", "volume", "adj_close"],
+            )
+            if not yahoo_bars.empty and "adj_close" in yahoo_bars.columns:
+                break
+        except Exception as exc:
+            last_error = str(exc)
+            lowered = last_error.lower()
+            if "rate limit" in lowered or "too many requests" in lowered:
+                break
+            continue
+
+    if yahoo_bars.empty or "adj_close" not in yahoo_bars.columns:
+        return bars, False, last_error
+
+    out = bars.copy()
+    out.index = pd.to_datetime(out.index, utc=True, errors="coerce")
+    out = out[~out.index.isna()].sort_index()
+    if out.empty:
+        return bars, False, last_error
+
+    if "adj_close" in out.columns:
+        current_adj = pd.to_numeric(out["adj_close"], errors="coerce")
+    else:
+        current_adj = pd.Series(index=out.index, dtype=float)
+
+    yahoo_adj = pd.to_numeric(yahoo_bars["adj_close"], errors="coerce")
+    yahoo_adj.index = pd.to_datetime(yahoo_adj.index, utc=True, errors="coerce")
+    yahoo_adj = yahoo_adj[~yahoo_adj.index.isna()]
+    if yahoo_adj.empty:
+        return bars, False, last_error
+
+    merged_adj = current_adj.where(current_adj.notna(), yahoo_adj.reindex(out.index))
+    filled = int(merged_adj.notna().sum()) > int(current_adj.notna().sum())
+    if not filled:
+        return bars, False, last_error
+    out["adj_close"] = merged_adj
+    return out, True, ""
 
 
 def parse_symbols(text: str) -> list[str]:
@@ -194,9 +310,22 @@ def load_and_prepare_symbol_bars(
             )
             continue
         bars = bars.sort_index()
+        adj_enriched = False
+        adj_enrich_reason = ""
+        if use_total_return_adjustment:
+            bars, adj_enriched, adj_enrich_reason = _enrich_adj_close_from_yahoo(
+                store=store,
+                bars=bars,
+                symbol=symbol,
+                market_code=market_code,
+                start=start,
+                end=end,
+            )
         adj_info: dict[str, object] = {"applied": False}
         if use_total_return_adjustment:
             bars, adj_info = apply_total_return_adjustment(bars)
+            if adj_enriched:
+                adj_info["adj_enriched"] = "yahoo"
         if use_split_adjustment and not bool(adj_info.get("applied")):
             bars, split_events = apply_split_adjustment(
                 bars=bars,
@@ -212,6 +341,9 @@ def load_and_prepare_symbol_bars(
         elif use_total_return_adjustment:
             reason = str(adj_info.get("reason", "") or "")
             adj_mode = "OFF(no adj_close)" if reason == "no_adj_close" else "OFF(coverage low)"
+            enrich_note = _adj_enrich_note(adj_enrich_reason)
+            if enrich_note:
+                adj_mode = f"{adj_mode}; {enrich_note}"
         else:
             adj_mode = "OFF"
         bars_by_symbol[symbol] = bars

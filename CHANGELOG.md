@@ -102,6 +102,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated data_sources.py, services/backtest_runner.py, tests/test_backtest_runner.py, tests/test_data_sources.py [id:7690360b15]
 - Auto: updated storage/duck_store.py, tests/test_duck_store.py [id:728a922232]
 - Auto: updated ui/pages/backtest.py [id:e33bc58738]
 - Auto: updated app.py, cli.py, di.py, ui/core/charts.py, ui/pages/backtest.py, ui/pages/live.py [id:6bec13c581]
@@ -253,6 +254,16 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正 Yahoo OHLCV 正規化時 `adj_close` 欄位被誤丟棄：
+  - `data_sources.fetch_yf_ohlcv(...)` 現在會保留 `adj_close`（若來源有提供）
+  - 回測工作台 `還原權息（Adj Close）` 可正確取得 Yahoo 的還原欄位來源
+- 改善 `adj_mode` 可觀測性：
+  - 當本地 `adj_close` 覆蓋不足且 Yahoo 補值失敗時，`adj_mode` 會附帶原因（例如 `yahoo rate-limit` / `yahoo empty`）
+  - 台股 Yahoo 補值新增 `.TW/.TWO/原碼` 變體嘗試，並在 rate-limit 時提前停止重試
+- 修正回測工作台 `還原權息（Adj Close）` 在台股資料源缺 `adj_close` 時長期無效：
+  - 當勾選 `還原權息` 且本地 bars 的 `adj_close` 覆蓋不足時，回測 runner 會嘗試以 Yahoo 日K補值 `adj_close`
+  - 補值僅在當次回測流程套用（不影響一般未勾選 Adj Close 的路徑）
+  - 新增 `tests/test_backtest_runner.py` 對應回歸測試
 - 修正 DuckDB `_connect_ctx()` 在例外路徑偶發二次拋錯：
   - 當原始錯誤發生後，`rollback()` 可能回報 `no transaction is active`
   - 改為不讓 rollback 次要錯誤覆蓋原始例外，避免 `TransactionContext Error: cannot rollback` 中斷真正錯誤訊息
