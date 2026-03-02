@@ -1218,6 +1218,42 @@ def _render_backtest_view():
             return
     focus_ind = add_indicators(focus_bars)
     focus_result = result.component_results[focus_symbol] if is_portfolio else result
+    twii_overlay_close = pd.Series(dtype=float)
+    twii_overlay_source = ""
+    if str(market_code or "").strip().upper() == "TW":
+        twii_bars = pd.DataFrame()
+        if (
+            str(benchmark_symbol_now).strip().upper() == "^TWII"
+            and not benchmark_raw.empty
+            and "close" in benchmark_raw.columns
+        ):
+            twii_bars = benchmark_raw.copy()
+        else:
+            twii_bars = _load_benchmark_from_store(
+                market_code="TW",
+                start=sync_start,
+                end=sync_end,
+                choice="twii",
+            )
+            if twii_bars.empty:
+                twii_bars = service.get_benchmark_series(
+                    market="TW",
+                    start=sync_start,
+                    end=sync_end,
+                    benchmark="twii",
+                )
+                runner_queue_benchmark_writeback(
+                    store=store, market_code="TW", benchmark=twii_bars
+                )
+        if not twii_bars.empty and "close" in twii_bars.columns:
+            twii_series = pd.to_numeric(twii_bars["close"], errors="coerce").dropna().sort_index()
+            if len(twii_series) >= 2:
+                twii_overlay_close = twii_series
+                twii_overlay_source = (
+                    str(twii_bars.attrs.get("source", "")).strip()
+                    if hasattr(twii_bars, "attrs")
+                    else ""
+                )
     max_play_idx = len(focus_bars) - 1
     default_play_idx = max_play_idx
     replay_reset_idx = 0
@@ -1939,11 +1975,41 @@ def _render_backtest_view():
             if not benchmark_equity.empty
             else pd.Series(dtype=float)
         )
+        twii_overlay_now = pd.Series(dtype=float)
+        if not twii_overlay_close.empty:
+            focus_close = pd.to_numeric(bars_now.get("close", pd.Series(dtype=float)), errors="coerce")
+            twii_close = pd.to_numeric(
+                twii_overlay_close.reindex(bars_now.index).ffill(),
+                errors="coerce",
+            )
+            focus_valid = focus_close.dropna()
+            twii_valid = twii_close.dropna()
+            if not focus_valid.empty and not twii_valid.empty:
+                focus_base = float(focus_valid.iloc[0])
+                twii_base = float(twii_valid.iloc[0])
+                if focus_base > 0 and twii_base > 0:
+                    twii_overlay_now = (
+                        (twii_close / twii_base) * focus_base
+                    ).replace([np.inf, -np.inf], np.nan)
+                    twii_overlay_now = twii_overlay_now.dropna()
         panel_x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None
         if _replay_kline_renderer() == "lightweight":
             strategy_series = (
                 equity_now["equity"] if "equity" in equity_now.columns else pd.Series(dtype=float)
             )
+            price_overlays: list[dict[str, object]] = []
+            if not twii_overlay_now.empty:
+                price_overlays.append(
+                    {
+                        "name": "TWII（同基準價）",
+                        "series": twii_overlay_now,
+                        "color": _to_rgba(str(palette.get("benchmark", "#64748b")), 0.42),
+                        "width": 1,
+                        "dash": "dash",
+                        "price_line_visible": False,
+                        "last_value_visible": False,
+                    }
+                )
             if st.session_state[viewport_mode_key] == "固定視窗":
                 view_window = int(st.session_state[viewport_window_key])
                 anchor_ratio = float(st.session_state[viewport_anchor_key]) / 100.0
@@ -1967,6 +2033,7 @@ def _render_backtest_view():
                 bars=bars_now,
                 strategy=strategy_series,
                 benchmark=benchmark_now,
+                price_overlays=price_overlays,
                 palette=palette,
                 key=f"playback_lw:{run_key}",
             )
@@ -1983,6 +2050,8 @@ def _render_backtest_view():
                     "lightweight 模式目前專注 K線+Equity+Benchmark；"
                     "訊號點/成交點僅在 Plotly 模式顯示。"
                 )
+                if not twii_overlay_now.empty:
+                    st.caption("價格圖淡灰虛線：台股大盤 TWII（同基準價）。")
                 st.caption(
                     f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）"
                 )
@@ -2008,6 +2077,22 @@ def _render_backtest_view():
             row=1,
             col=1,
         )
+        if not twii_overlay_now.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=twii_overlay_now.index,
+                    y=twii_overlay_now.values,
+                    mode="lines",
+                    name="TWII（同基準價）",
+                    line=dict(
+                        color=_to_rgba(str(palette.get("benchmark", "#64748b")), 0.42),
+                        width=1.4,
+                        dash="dot",
+                    ),
+                ),
+                row=1,
+                col=1,
+            )
         fig.add_trace(
             go.Scatter(
                 x=equity_now.index,
@@ -2277,6 +2362,8 @@ def _render_backtest_view():
             watermark_text=playback_symbol_label,
         )
         _render_replay_indicator_snapshot_table(ind_now, idx)
+        if not twii_overlay_now.empty:
+            st.caption("價格圖淡灰虛線：台股大盤 TWII（同基準價）。")
         st.caption(f"目前回放到：第 {idx + 1} 根K（{bars_now.index[-1].strftime('%Y-%m-%d')}）")
 
     if not multi_symbol_compare:
@@ -2291,6 +2378,8 @@ def _render_backtest_view():
             st.caption(f"回放標的：{replay_symbol_label} | Benchmark：{benchmark_between_label}")
         elif replay_symbol_label:
             st.caption(f"回放標的：{replay_symbol_label}")
+        if twii_overlay_source:
+            st.caption(f"TWII 疊加線來源：{twii_overlay_source}")
 
     model_params = payload.get("best_params") if payload.get("walk_forward") else strategy_params
     if isinstance(model_params, dict):

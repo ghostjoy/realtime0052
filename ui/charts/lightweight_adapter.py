@@ -219,6 +219,7 @@ def render_lightweight_kline_equity_chart(
     bars: pd.DataFrame,
     strategy: pd.Series,
     benchmark: pd.Series | None,
+    price_overlays: list[dict[str, object]] | None = None,
     palette: dict[str, object],
     key: str,
 ) -> bool:
@@ -254,6 +255,27 @@ def render_lightweight_kline_equity_chart(
             }
         ],
     }
+    for overlay in price_overlays or []:
+        series = overlay.get("series")
+        if not isinstance(series, pd.Series):
+            continue
+        line_points = _build_line_points(series)
+        if not line_points:
+            continue
+        price_chart["series"].append(
+            {
+                "type": _series_type("Line"),
+                "data": line_points,
+                "options": {
+                    "title": str(overlay.get("name", "")),
+                    "color": str(overlay.get("color", "#64748b")),
+                    "lineWidth": int(overlay.get("width", 1) or 1),
+                    "lineStyle": _line_style_token(str(overlay.get("dash", "solid"))),
+                    "priceLineVisible": bool(overlay.get("price_line_visible", False)),
+                    "lastValueVisible": bool(overlay.get("last_value_visible", False)),
+                },
+            }
+        )
     equity_chart = {
         "chart": _chart_layout_options(palette, height=280),
         "series": [

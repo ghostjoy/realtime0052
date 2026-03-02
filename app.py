@@ -4295,7 +4295,9 @@ def _build_tw_active_etf_ytd_between(
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _load_twii_twse_month_close_map(month_anchor_yyyymmdd: str) -> tuple[dict[str, float], list[str]]:
+def _load_twii_twse_month_close_map(
+    month_anchor_yyyymmdd: str,
+) -> tuple[dict[str, float], list[str]]:
     import requests
 
     token = re.sub(r"\D", "", str(month_anchor_yyyymmdd or "").strip())
@@ -4392,7 +4394,9 @@ def _load_twii_twse_return_between(
     eligible = [
         (token, value)
         for token, value in close_map.items()
-        if start_token <= str(token) <= end_token and math.isfinite(float(value)) and float(value) > 0
+        if start_token <= str(token) <= end_token
+        and math.isfinite(float(value))
+        and float(value) > 0
     ]
     eligible = sorted(eligible, key=lambda x: x[0])
     if len(eligible) < 2:
@@ -4632,8 +4636,10 @@ def _attach_rank_movement_columns(
     }
     code_series = out.get(code_col, pd.Series(dtype=str)).astype(str).str.strip().str.upper()
     current_rank_series = pd.to_numeric(out.get(rank_col, pd.Series(dtype=float)), errors="coerce")
-    previous_rank_series = code_series.map(prev_rank_lookup) if prev_rank_lookup else pd.Series(
-        [np.nan] * len(out), index=out.index
+    previous_rank_series = (
+        code_series.map(prev_rank_lookup)
+        if prev_rank_lookup
+        else pd.Series([np.nan] * len(out), index=out.index)
     )
     rank_display: list[str] = []
     for idx in out.index:
@@ -6252,11 +6258,15 @@ def _render_top10_etf_2026_ytd_view(
                         columns={"區間報酬(%)": performance_col_label}
                     ).copy()
                     if rank_by_underperform:
-                        if market_return_pct is not None and math.isfinite(float(market_return_pct)):
+                        if market_return_pct is not None and math.isfinite(
+                            float(market_return_pct)
+                        ):
                             underperform_name = str(underperform_col_label or "輸給台股大盤(%)")
                             prev_rank_df[underperform_name] = (
                                 float(market_return_pct)
-                                - pd.to_numeric(prev_rank_df[performance_col_label], errors="coerce")
+                                - pd.to_numeric(
+                                    prev_rank_df[performance_col_label], errors="coerce"
+                                )
                             ).round(2)
                             prev_rank_df = (
                                 prev_rank_df.sort_values(

@@ -107,6 +107,7 @@ class LightweightAdapterTests(unittest.TestCase):
         )
         strategy = pd.Series([1_000_000.0, 1_010_000.0], index=idx)
         benchmark = pd.Series([1_000_000.0, 1_005_000.0], index=idx)
+        twii_overlay = pd.Series([100.0, 101.5], index=idx)
         calls = []
 
         def _fake_render(charts, key=None):
@@ -120,6 +121,15 @@ class LightweightAdapterTests(unittest.TestCase):
                 bars=bars,
                 strategy=strategy,
                 benchmark=benchmark,
+                price_overlays=[
+                    {
+                        "name": "TWII（同基準價）",
+                        "series": twii_overlay,
+                        "color": "rgba(100,100,100,0.4)",
+                        "width": 1,
+                        "dash": "dash",
+                    }
+                ],
                 palette={
                     "grid": "rgba(120,120,120,0.2)",
                     "plot_bg": "#ffffff",
@@ -141,6 +151,10 @@ class LightweightAdapterTests(unittest.TestCase):
         self.assertIsInstance(charts, list)
         assert isinstance(charts, list)
         self.assertEqual(len(charts), 2)
+        price_series = charts[0]["series"]
+        self.assertEqual(len(price_series), 2)
+        self.assertEqual(price_series[0]["type"], "Candlestick")
+        self.assertEqual(price_series[1]["type"], "Line")
 
 
 if __name__ == "__main__":
