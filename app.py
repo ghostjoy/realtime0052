@@ -4691,9 +4691,9 @@ def _style_tw_today_move_table(frame: pd.DataFrame):
         for col in work.columns:
             style_parts: list[str] = []
             if col == "今日漲幅" and today_move is not None:
-                if today_move > 3.0:
+                if today_move > 0:
                     style_parts.append("background-color: #e8f7e8")
-                elif today_move < -3.0:
+                elif today_move < 0:
                     style_parts.append("background-color: #fdecec")
             if col == "今日贏大盤%" and today_vs_market is not None:
                 if today_vs_market > 0:
@@ -6394,12 +6394,34 @@ def _render_top10_etf_2026_ytd_view(
             f"`{compare_col_label}` 採對照區間內首個可交易日計算；若空白代表該檔對照區間無可用日K。"
         )
         st.caption(f"報酬計算：`贏輸台股大盤(%) = {performance_col_label} - 大盤報酬`。")
-        if page_key_prefix == "top10_etf_ytd":
+        table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(
+            table_df,
+            src=f"{page_key_prefix}_rank_table",
+        )
+        table_with_links, code_link_config = _decorate_dataframe_backtest_links(table_with_links)
+        merged_link_config: dict[str, object] = {}
+        if isinstance(code_link_config, dict):
+            merged_link_config.update(code_link_config)
+        if isinstance(table_link_config, dict):
+            merged_link_config.update(table_link_config)
+        styled_table_df = _style_tw_today_move_table(table_with_links)
+        if page_key_prefix in {"top10_etf_ytd", "top10_dividend_etf_ytd"}:
             # 固定顯示完整 11 列（台股大盤 + 前10），方便一次截圖。
             table_height = min(640, 42 + max(1, int(len(table_df))) * 36)
-            st.dataframe(table_df, width="stretch", hide_index=True, height=table_height)
+            st.dataframe(
+                styled_table_df,
+                width="stretch",
+                hide_index=True,
+                height=table_height,
+                column_config=merged_link_config if merged_link_config else None,
+            )
         else:
-            st.dataframe(table_df, width="stretch", hide_index=True)
+            st.dataframe(
+                styled_table_df,
+                width="stretch",
+                hide_index=True,
+                column_config=merged_link_config if merged_link_config else None,
+            )
 
         with st.expander("分類說明", expanded=False):
             st.markdown(

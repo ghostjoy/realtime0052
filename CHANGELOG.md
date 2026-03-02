@@ -102,11 +102,15 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated app.py, ui/pages/backtest.py [id:16f03edeea]
 - Auto: updated app.py, tests/test_lightweight_adapter.py, ui/charts/lightweight_adapter.py, ui/pages/backtest.py [id:917c7ec38c]
 - `app.py` 台股大盤報酬計算改為優先使用 TWSE 官方 `MI_5MINS_HIST`（`^TWII`）月資料；官方來源不可用時才回退至既有 `^TWII/0050/006208` 後備鏈。
 - `更新最新市況` 按鈕同步清除 TWSE `^TWII` 月資料與區間報酬快取，避免短時間內沿用舊快取。
 - `回測工作台` 的回放圖卡在價格區新增淡灰虛線 `TWII（同基準價）` 疊線，方便直接對照標的與台股大盤的漲幅路徑差距（Plotly / lightweight 皆支援）。
-- `2026 YTD 前十大 ETF` 排名表格改為固定高度顯示完整 11 列（台股大盤 + 前10），便於一次截圖，不需垂直捲動。
+- `2026 YTD 前十大 ETF` 與 `2026 YTD 前十大股利型、配息型 ETF` 排名表格改為固定高度顯示完整 11 列（台股大盤 + 前10），便於一次截圖，不需垂直捲動。
+- `2026 YTD 前十大 ETF` 與 `2026 YTD 前十大股利型、配息型 ETF` 排名表格新增今日欄位著色：`今日贏大盤%` 依正負值顯示綠/紅字，`今日漲幅` 依正負值顯示綠/紅底色，並與「台股ETF全類型總表」共用同一套樣式邏輯。
+- 修正兩張 `2026 YTD 前十大` 卡片在套用 `Styler` 後遺失 drilldown 連結的回歸：`代碼` 再次可點擊帶入 `回測工作台`，`ETF` 名稱可點擊開啟對應成分股熱力圖。
+- `回測工作台` 的 `TWII（同基準價）` 疊線新增 TWSE `MI_5MINS_HIST` fallback（當 yfinance `^TWII` 暫時不可用時），避免台股回測時疊線消失。
 - Auto: updated services/backtest_runner.py, tests/test_backtest_runner.py [id:ff1017f60b]
 - Auto: updated data_sources.py, services/backtest_runner.py, tests/test_backtest_runner.py, tests/test_data_sources.py [id:7690360b15]
 - Auto: updated storage/duck_store.py, tests/test_duck_store.py [id:728a922232]

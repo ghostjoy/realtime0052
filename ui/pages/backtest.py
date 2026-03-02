@@ -78,6 +78,7 @@ REQUIRED_RUNTIME_NAMES = (
     "_history_store",
     "_infer_market_target_from_symbols",
     "_load_cached_backtest_payload",
+    "_load_twii_twse_month_close_map",
     "_market_service",
     "_metrics_to_rows",
     "_render_card_section_header",
@@ -111,6 +112,7 @@ _format_tw_symbol_with_name: Any = None
 _history_store: Any = None
 _infer_market_target_from_symbols: Any = None
 _load_cached_backtest_payload: Any = None
+_load_twii_twse_month_close_map: Any = None
 _market_service: Any = None
 _metrics_to_rows: Any = None
 _render_card_section_header: Any = None
@@ -1218,6 +1220,69 @@ def _render_backtest_view():
             return
     focus_ind = add_indicators(focus_bars)
     focus_result = result.component_results[focus_symbol] if is_portfolio else result
+
+    def _load_twii_overlay_from_twse(start: datetime, end: datetime) -> pd.DataFrame:
+        loader = _load_twii_twse_month_close_map
+        if not callable(loader):
+            return pd.DataFrame(columns=["close"])
+        try:
+            start_token = pd.Timestamp(start).tz_convert("UTC").strftime("%Y%m%d")
+            end_token = pd.Timestamp(end).tz_convert("UTC").strftime("%Y%m%d")
+        except Exception:
+            return pd.DataFrame(columns=["close"])
+        if end_token < start_token:
+            return pd.DataFrame(columns=["close"])
+        try:
+            cursor = datetime.strptime(start_token, "%Y%m%d").date().replace(day=1)
+            end_month = datetime.strptime(end_token, "%Y%m%d").date().replace(day=1)
+        except Exception:
+            return pd.DataFrame(columns=["close"])
+        close_map: dict[str, float] = {}
+        while cursor <= end_month:
+            month_token = cursor.strftime("%Y%m01")
+            try:
+                month_map, _ = loader(month_token)
+            except Exception:
+                month_map = {}
+            if isinstance(month_map, dict) and month_map:
+                close_map.update(
+                    {
+                        str(token): float(value)
+                        for token, value in month_map.items()
+                        if str(token).isdigit()
+                    }
+                )
+            if cursor.month == 12:
+                cursor = date(cursor.year + 1, 1, 1)
+            else:
+                cursor = date(cursor.year, cursor.month + 1, 1)
+        if not close_map:
+            return pd.DataFrame(columns=["close"])
+        points: list[tuple[pd.Timestamp, float]] = []
+        for token, value in close_map.items():
+            token_text = str(token).strip()
+            if len(token_text) != 8 or not token_text.isdigit():
+                continue
+            if token_text < start_token or token_text > end_token:
+                continue
+            if not math.isfinite(float(value)) or float(value) <= 0:
+                continue
+            try:
+                ts = pd.Timestamp(datetime.strptime(token_text, "%Y%m%d"), tz="UTC")
+            except Exception:
+                continue
+            points.append((ts, float(value)))
+        if len(points) < 2:
+            return pd.DataFrame(columns=["close"])
+        points.sort(key=lambda item: item[0])
+        out = pd.DataFrame(
+            {"close": [value for _, value in points]},
+            index=pd.DatetimeIndex([ts for ts, _ in points], tz="UTC"),
+        )
+        out.attrs["symbol"] = "^TWII"
+        out.attrs["source"] = "twse_mi_5mins_hist"
+        return out
+
     twii_overlay_close = pd.Series(dtype=float)
     twii_overlay_source = ""
     if str(market_code or "").strip().upper() == "TW":
@@ -1242,7 +1307,12 @@ def _render_backtest_view():
                     end=sync_end,
                     benchmark="twii",
                 )
-                runner_queue_benchmark_writeback(store=store, market_code="TW", benchmark=twii_bars)
+                if not twii_bars.empty:
+                    runner_queue_benchmark_writeback(
+                        store=store, market_code="TW", benchmark=twii_bars
+                    )
+        if twii_bars.empty:
+            twii_bars = _load_twii_overlay_from_twse(sync_start, sync_end)
         if not twii_bars.empty and "close" in twii_bars.columns:
             twii_series = pd.to_numeric(twii_bars["close"], errors="coerce").dropna().sort_index()
             if len(twii_series) >= 2:
