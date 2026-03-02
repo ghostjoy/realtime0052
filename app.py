@@ -6394,7 +6394,12 @@ def _render_top10_etf_2026_ytd_view(
             f"`{compare_col_label}` 採對照區間內首個可交易日計算；若空白代表該檔對照區間無可用日K。"
         )
         st.caption(f"報酬計算：`贏輸台股大盤(%) = {performance_col_label} - 大盤報酬`。")
-        st.dataframe(table_df, width="stretch", hide_index=True)
+        if page_key_prefix == "top10_etf_ytd":
+            # 固定顯示完整 11 列（台股大盤 + 前10），方便一次截圖。
+            table_height = min(640, 42 + max(1, int(len(table_df))) * 36)
+            st.dataframe(table_df, width="stretch", hide_index=True, height=table_height)
+        else:
+            st.dataframe(table_df, width="stretch", hide_index=True)
 
         with st.expander("分類說明", expanded=False):
             st.markdown(

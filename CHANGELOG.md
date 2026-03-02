@@ -106,6 +106,7 @@
 - `app.py` 台股大盤報酬計算改為優先使用 TWSE 官方 `MI_5MINS_HIST`（`^TWII`）月資料；官方來源不可用時才回退至既有 `^TWII/0050/006208` 後備鏈。
 - `更新最新市況` 按鈕同步清除 TWSE `^TWII` 月資料與區間報酬快取，避免短時間內沿用舊快取。
 - `回測工作台` 的回放圖卡在價格區新增淡灰虛線 `TWII（同基準價）` 疊線，方便直接對照標的與台股大盤的漲幅路徑差距（Plotly / lightweight 皆支援）。
+- `2026 YTD 前十大 ETF` 排名表格改為固定高度顯示完整 11 列（台股大盤 + 前10），便於一次截圖，不需垂直捲動。
 - Auto: updated services/backtest_runner.py, tests/test_backtest_runner.py [id:ff1017f60b]
 - Auto: updated data_sources.py, services/backtest_runner.py, tests/test_backtest_runner.py, tests/test_data_sources.py [id:7690360b15]
 - Auto: updated storage/duck_store.py, tests/test_duck_store.py [id:728a922232]
