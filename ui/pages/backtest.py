@@ -1242,9 +1242,7 @@ def _render_backtest_view():
                     end=sync_end,
                     benchmark="twii",
                 )
-                runner_queue_benchmark_writeback(
-                    store=store, market_code="TW", benchmark=twii_bars
-                )
+                runner_queue_benchmark_writeback(store=store, market_code="TW", benchmark=twii_bars)
         if not twii_bars.empty and "close" in twii_bars.columns:
             twii_series = pd.to_numeric(twii_bars["close"], errors="coerce").dropna().sort_index()
             if len(twii_series) >= 2:
@@ -1977,7 +1975,9 @@ def _render_backtest_view():
         )
         twii_overlay_now = pd.Series(dtype=float)
         if not twii_overlay_close.empty:
-            focus_close = pd.to_numeric(bars_now.get("close", pd.Series(dtype=float)), errors="coerce")
+            focus_close = pd.to_numeric(
+                bars_now.get("close", pd.Series(dtype=float)), errors="coerce"
+            )
             twii_close = pd.to_numeric(
                 twii_overlay_close.reindex(bars_now.index).ffill(),
                 errors="coerce",
@@ -1988,9 +1988,9 @@ def _render_backtest_view():
                 focus_base = float(focus_valid.iloc[0])
                 twii_base = float(twii_valid.iloc[0])
                 if focus_base > 0 and twii_base > 0:
-                    twii_overlay_now = (
-                        (twii_close / twii_base) * focus_base
-                    ).replace([np.inf, -np.inf], np.nan)
+                    twii_overlay_now = ((twii_close / twii_base) * focus_base).replace(
+                        [np.inf, -np.inf], np.nan
+                    )
                     twii_overlay_now = twii_overlay_now.dropna()
         panel_x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None
         if _replay_kline_renderer() == "lightweight":
