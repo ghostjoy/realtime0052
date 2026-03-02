@@ -102,6 +102,8 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- `app.py` 台股大盤報酬計算改為優先使用 TWSE 官方 `MI_5MINS_HIST`（`^TWII`）月資料；官方來源不可用時才回退至既有 `^TWII/0050/006208` 後備鏈。
+- `更新最新市況` 按鈕同步清除 TWSE `^TWII` 月資料與區間報酬快取，避免短時間內沿用舊快取。
 - Auto: updated services/backtest_runner.py, tests/test_backtest_runner.py [id:ff1017f60b]
 - Auto: updated data_sources.py, services/backtest_runner.py, tests/test_backtest_runner.py, tests/test_data_sources.py [id:7690360b15]
 - Auto: updated storage/duck_store.py, tests/test_duck_store.py [id:728a922232]

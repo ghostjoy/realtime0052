@@ -13,6 +13,7 @@ from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
     _apply_unified_benchmark_hover,
+    _attach_rank_movement_columns,
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
     _benchmark_candidates_tw,
@@ -44,6 +45,7 @@ from app import (
     _is_tw_active_etf,
     _load_cached_backtest_payload,
     _load_tw_benchmark_bars,
+    _load_tw_market_return_between,
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
     _resolve_tw_symbol_names,
@@ -58,6 +60,22 @@ from ui.helpers import (
 
 
 class ActiveEtfPageTests(unittest.TestCase):
+    def test_attach_rank_movement_columns(self):
+        frame = pd.DataFrame(
+            [
+                {"排名": 1, "代碼": "0050", "ETF": "元大台灣50"},
+                {"排名": 2, "代碼": "0056", "ETF": "元大高股息"},
+                {"排名": 3, "代碼": "00935", "ETF": "野村臺灣新科技50"},
+            ]
+        )
+        out = _attach_rank_movement_columns(
+            frame,
+            previous_rank_map={"0050": 2, "0056": 1, "00878": 3},
+        )
+        self.assertEqual(list(out["排名"]), ["1  (↑1)", "2  (↓1)", "3  (新進榜)"])
+        self.assertNotIn("前次排名", out.columns)
+        self.assertNotIn("排名異動", out.columns)
+
     def test_resolve_tw_symbol_names_uses_full_rows_fallback(self):
         class _FakeService:
             def get_tw_symbol_names(self, symbols):
@@ -482,6 +500,53 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertIn("^TWII: network down", issues)
         self.assertEqual(store.sync_calls, ["^TWII"])
+
+    def test_load_tw_market_return_between_prefers_twse_official_twii(self):
+        _load_tw_market_return_between.clear()
+        with (
+            patch("app._load_twii_twse_return_between", return_value=(12.34, [])),
+            patch("app._history_store", side_effect=AssertionError("fallback should not run")),
+        ):
+            ret, symbol, issues = _load_tw_market_return_between("20251231", "20260302")
+
+        self.assertAlmostEqual(float(ret), 12.34, places=6)
+        self.assertEqual(symbol, "^TWII")
+        self.assertEqual(issues, [])
+
+    def test_load_tw_market_return_between_fallback_to_0050_when_twse_unavailable(self):
+        _load_tw_market_return_between.clear()
+        idx = pd.to_datetime(["2026-01-02", "2026-01-10"], utc=True)
+        bars_0050 = pd.DataFrame(
+            {
+                "open": [100.0, 110.0],
+                "high": [101.0, 111.0],
+                "low": [99.0, 109.0],
+                "close": [100.0, 110.0],
+                "volume": [1000.0, 1200.0],
+            },
+            index=idx,
+        )
+
+        class _FakeStore:
+            def sync_symbol_history(self, symbol, market, start=None, end=None):
+                return SimpleNamespace(error=None)
+
+            def load_daily_bars(self, symbol, market, start=None, end=None):
+                if str(symbol) == "0050":
+                    return bars_0050
+                return pd.DataFrame()
+
+        with (
+            patch("app._load_twii_twse_return_between", return_value=(None, ["twse unavailable"])),
+            patch("app._history_store", return_value=_FakeStore()),
+            patch("app._bars_need_backfill", return_value=False),
+            patch("app.apply_split_adjustment", side_effect=lambda bars, **kwargs: (bars, [])),
+        ):
+            ret, symbol, issues = _load_tw_market_return_between("20260101", "20260110")
+
+        self.assertAlmostEqual(float(ret), 10.0, places=6)
+        self.assertEqual(symbol, "0050")
+        self.assertTrue(any("TWSE:^TWII" in str(item) for item in issues))
 
     def test_classify_issue_level(self):
         self.assertEqual(_classify_issue_level("無法建立 ETF 排行：資料缺失"), "error")
@@ -1364,7 +1429,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         top10 = pd.DataFrame(
             [
                 {
-                    "排名": 1,
+                    "排名": "1  (↑1)",
                     "代碼": "0050",
                     "ETF": "元大台灣50",
                     "類型": "市值型",
@@ -1375,7 +1440,7 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "區間報酬(%)": 12.0,
                 },
                 {
-                    "排名": 2,
+                    "排名": "2  (↓1)",
                     "代碼": "0056",
                     "ETF": "元大高股息",
                     "類型": "股利型",
@@ -1399,6 +1464,10 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertEqual(str(out.iloc[0]["ETF"]), "台股大盤")
         self.assertEqual(str(out.iloc[0]["排名"]), "—")
+        self.assertEqual(str(out.iloc[1]["排名"]), "1  (↑1)")
+        self.assertEqual(str(out.iloc[2]["排名"]), "2  (↓1)")
+        self.assertNotIn("前次排名", out.columns)
+        self.assertNotIn("排名異動", out.columns)
         self.assertEqual(float(out.iloc[0]["YTD報酬(%)"]), 5.0)
         self.assertEqual(float(out.iloc[1]["贏輸台股大盤(%)"]), 7.0)
         self.assertEqual(float(out.iloc[1]["輸給台股大盤(%)"]), 0.0)

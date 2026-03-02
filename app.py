@@ -4295,6 +4295,118 @@ def _build_tw_active_etf_ytd_between(
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _load_twii_twse_month_close_map(month_anchor_yyyymmdd: str) -> tuple[dict[str, float], list[str]]:
+    import requests
+
+    token = re.sub(r"\D", "", str(month_anchor_yyyymmdd or "").strip())
+    if not re.fullmatch(r"\d{8}", token):
+        return {}, [f"invalid month anchor: {month_anchor_yyyymmdd}"]
+    query_token = f"{token[:6]}01"
+    try:
+        resp = requests.get(
+            "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST",
+            params={"response": "json", "date": query_token},
+            timeout=18,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        return {}, [f"{query_token}: {exc}"]
+
+    stat = str(payload.get("stat", "")).strip().upper()
+    if stat != "OK":
+        return {}, [f"{query_token}: {payload.get('stat', 'not ok')}"]
+    fields = payload.get("fields", [])
+    rows = payload.get("data", [])
+    if not isinstance(fields, list) or not isinstance(rows, list):
+        return {}, [f"{query_token}: malformed payload"]
+    if "日期" not in fields or "收盤指數" not in fields:
+        return {}, [f"{query_token}: fields missing"]
+    idx_date = fields.index("日期")
+    idx_close = fields.index("收盤指數")
+
+    out: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        if max(idx_date, idx_close) >= len(row):
+            continue
+        roc_date = str(row[idx_date] or "").strip()
+        close_raw = str(row[idx_close] or "").strip().replace(",", "")
+        m = re.fullmatch(r"(\d{2,3})[/-](\d{1,2})[/-](\d{1,2})", roc_date)
+        if not m:
+            continue
+        try:
+            year = int(m.group(1)) + 1911
+            month = int(m.group(2))
+            day = int(m.group(3))
+            date_token = datetime(year, month, day).strftime("%Y%m%d")
+            close_val = float(close_raw)
+        except Exception:
+            continue
+        if not math.isfinite(close_val) or close_val <= 0:
+            continue
+        out[date_token] = float(close_val)
+    if not out:
+        return {}, [f"{query_token}: no parsable rows"]
+    return out, []
+
+
+def _month_anchor_tokens_between(start_yyyymmdd: str, end_yyyymmdd: str) -> list[str]:
+    start_dt = datetime.strptime(start_yyyymmdd, "%Y%m%d").date().replace(day=1)
+    end_dt = datetime.strptime(end_yyyymmdd, "%Y%m%d").date().replace(day=1)
+    out: list[str] = []
+    cursor = start_dt
+    while cursor <= end_dt:
+        out.append(cursor.strftime("%Y%m01"))
+        if cursor.month == 12:
+            cursor = date(cursor.year + 1, 1, 1)
+        else:
+            cursor = date(cursor.year, cursor.month + 1, 1)
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_twii_twse_return_between(
+    start_yyyymmdd: str,
+    end_yyyymmdd: str,
+) -> tuple[float | None, list[str]]:
+    start_token = re.sub(r"\D", "", str(start_yyyymmdd or "").strip())
+    end_token = re.sub(r"\D", "", str(end_yyyymmdd or "").strip())
+    if not re.fullmatch(r"\d{8}", start_token) or not re.fullmatch(r"\d{8}", end_token):
+        return None, [f"invalid date range: {start_yyyymmdd}->{end_yyyymmdd}"]
+    if end_token <= start_token:
+        return None, [f"non-positive range: {start_token}->{end_token}"]
+
+    issues: list[str] = []
+    close_map: dict[str, float] = {}
+    for month_token in _month_anchor_tokens_between(start_token, end_token):
+        month_map, month_issues = _load_twii_twse_month_close_map(month_token)
+        if month_map:
+            close_map.update(month_map)
+        if month_issues:
+            issues.extend(month_issues)
+    if not close_map:
+        return None, issues
+
+    eligible = [
+        (token, value)
+        for token, value in close_map.items()
+        if start_token <= str(token) <= end_token and math.isfinite(float(value)) and float(value) > 0
+    ]
+    eligible = sorted(eligible, key=lambda x: x[0])
+    if len(eligible) < 2:
+        issues.append(f"{start_token}->{end_token}: insufficient_rows({len(eligible)})")
+        return None, issues
+    base_val = float(eligible[0][1])
+    end_val = float(eligible[-1][1])
+    if not math.isfinite(base_val) or not math.isfinite(end_val) or base_val <= 0:
+        issues.append(f"{start_token}->{end_token}: invalid close values")
+        return None, issues
+    return (end_val / base_val - 1.0) * 100.0, issues
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def _load_tw_market_return_between(
     start_yyyymmdd: str,
     end_yyyymmdd: str,
@@ -4310,8 +4422,17 @@ def _load_tw_market_return_between(
     if end_dt <= start_dt:
         return None, "", []
 
-    store = _history_store()
     issues: list[str] = []
+    twii_return, twii_issues = _load_twii_twse_return_between(
+        start_yyyymmdd=start_yyyymmdd,
+        end_yyyymmdd=end_yyyymmdd,
+    )
+    if twii_issues:
+        issues.extend([f"TWSE:^TWII {msg}" for msg in twii_issues])
+    if twii_return is not None and math.isfinite(float(twii_return)):
+        return float(twii_return), "^TWII", issues
+
+    store = _history_store()
     candidates = ["^TWII", "0050", "006208"]
     for symbol in candidates:
         if force_sync:
@@ -4492,6 +4613,56 @@ def _with_tw_today_fields(
         "end_close",
     ]
     return out.drop(columns=[col for col in drop_cols if col in out.columns], errors="ignore")
+
+
+def _attach_rank_movement_columns(
+    frame: pd.DataFrame,
+    *,
+    previous_rank_map: dict[str, int] | None = None,
+    code_col: str = "代碼",
+    rank_col: str = "排名",
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    out = frame.copy()
+    prev_rank_lookup = {
+        str(code).strip().upper(): int(rank)
+        for code, rank in (previous_rank_map or {}).items()
+        if str(code).strip() and int(rank) > 0
+    }
+    code_series = out.get(code_col, pd.Series(dtype=str)).astype(str).str.strip().str.upper()
+    current_rank_series = pd.to_numeric(out.get(rank_col, pd.Series(dtype=float)), errors="coerce")
+    previous_rank_series = code_series.map(prev_rank_lookup) if prev_rank_lookup else pd.Series(
+        [np.nan] * len(out), index=out.index
+    )
+    rank_display: list[str] = []
+    for idx in out.index:
+        code = str(code_series.get(idx, "")).strip().upper()
+        current_rank_raw = current_rank_series.get(idx)
+        previous_rank_raw = previous_rank_series.get(idx)
+        if code.startswith("^"):
+            rank_display.append(str(out.at[idx, rank_col]))
+            continue
+        if pd.isna(current_rank_raw):
+            rank_display.append(str(out.at[idx, rank_col]))
+            continue
+        current_rank = int(float(current_rank_raw))
+        if not prev_rank_lookup:
+            movement = "—"
+        elif pd.isna(previous_rank_raw):
+            movement = "新進榜"
+        else:
+            prev_rank = int(float(previous_rank_raw))
+            diff = prev_rank - current_rank
+            if diff > 0:
+                movement = f"↑{diff}"
+            elif diff < 0:
+                movement = f"↓{abs(diff)}"
+            else:
+                movement = "持平"
+        rank_display.append(f"{current_rank}  ({movement})")
+    out[rank_col] = rank_display
+    return out
 
 
 def _style_tw_today_move_table(frame: pd.DataFrame):
@@ -5624,6 +5795,8 @@ def _render_tw_etf_all_types_view():
     if refresh_market:
         _fetch_twse_snapshot_with_fallback.clear()
         _build_tw_etf_top10_between.clear()
+        _load_twii_twse_month_close_map.clear()
+        _load_twii_twse_return_between.clear()
         _load_tw_market_return_between.clear()
         _load_tw_etf_daily_change_map.clear()
         _load_tw_snapshot_open_map.clear()
@@ -5953,6 +6126,8 @@ def _render_top10_etf_2026_ytd_view(
         _fetch_twse_snapshot_with_fallback.clear()
         _build_tw_etf_top10_between.clear()
         _build_tw_active_etf_ytd_between.clear()
+        _load_twii_twse_month_close_map.clear()
+        _load_twii_twse_return_between.clear()
         _load_tw_market_return_between.clear()
         _load_tw_etf_daily_change_map.clear()
         _load_tw_snapshot_open_map.clear()
@@ -6054,6 +6229,67 @@ def _render_top10_etf_2026_ytd_view(
         except Exception as exc:
             market_issues.append(f"market_compare: {exc}")
 
+        daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
+        _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or end_used)
+        market_daily_return, market_daily_symbol, _, _, market_daily_issues = (
+            _load_tw_market_daily_return(end_used, force_sync=False)
+        )
+        market_issues.extend(market_daily_issues)
+        previous_rank_map: dict[str, int] = {}
+        if daily_prev_used and daily_prev_used != end_used:
+            try:
+                prev_fetch_n = 99999 if rank_by_underperform else display_n
+                prev_top10, _, _, _ = _build_tw_etf_top10_between(
+                    start_yyyymmdd=start_target,
+                    end_yyyymmdd=daily_prev_used,
+                    type_filter=etf_type_filter_text or None,
+                    top_n=prev_fetch_n,
+                    sort_ascending=bool(sort_ascending),
+                    exclude_split_event=bool(exclude_split_event),
+                )
+                if not prev_top10.empty:
+                    prev_rank_df = prev_top10.rename(
+                        columns={"區間報酬(%)": performance_col_label}
+                    ).copy()
+                    if rank_by_underperform:
+                        if market_return_pct is not None and math.isfinite(float(market_return_pct)):
+                            underperform_name = str(underperform_col_label or "輸給台股大盤(%)")
+                            prev_rank_df[underperform_name] = (
+                                float(market_return_pct)
+                                - pd.to_numeric(prev_rank_df[performance_col_label], errors="coerce")
+                            ).round(2)
+                            prev_rank_df = (
+                                prev_rank_df.sort_values(
+                                    underperform_name, ascending=False, na_position="last"
+                                )
+                                .head(display_n)
+                                .copy()
+                            )
+                        else:
+                            prev_rank_df = (
+                                prev_rank_df.sort_values(
+                                    performance_col_label, ascending=True, na_position="last"
+                                )
+                                .head(display_n)
+                                .copy()
+                            )
+                    else:
+                        prev_rank_df = prev_rank_df.head(display_n).copy()
+                    previous_rank_map = {
+                        str(code).strip().upper(): idx
+                        for idx, code in enumerate(
+                            prev_rank_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
+                            start=1,
+                        )
+                        if str(code).strip()
+                    }
+            except Exception as exc:
+                market_issues.append(f"rank_movement: {exc}")
+        top10_etf_df = _attach_rank_movement_columns(
+            top10_etf_df,
+            previous_rank_map=previous_rank_map,
+        )
+
         benchmark_code = market_symbol_used or market_compare_symbol_used or "^TWII"
         table_df = _decorate_tw_etf_top10_ytd_table(
             top10_etf_df,
@@ -6066,12 +6302,6 @@ def _render_top10_etf_2026_ytd_view(
             performance_col_label=performance_col_label,
             underperform_col_label=underperform_col_label if rank_by_underperform else None,
         )
-        daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
-        _, daily_open_map = _load_tw_snapshot_open_map(daily_end_used or end_used)
-        market_daily_return, market_daily_symbol, _, _, market_daily_issues = (
-            _load_tw_market_daily_return(end_used, force_sync=False)
-        )
-        market_issues.extend(market_daily_issues)
         table_df = _with_tw_today_fields(
             table_df,
             daily_change_map=daily_change_map,
@@ -6127,6 +6357,15 @@ def _render_top10_etf_2026_ytd_view(
             )
         else:
             st.caption("今日大盤漲幅：目前無法取得，`今日贏大盤%` 先顯示空白。")
+        if daily_prev_used:
+            if previous_rank_map:
+                st.caption(
+                    f"排名異動：已併入 `排名` 欄位（例：`1  (持平)`、`10  (新進榜)`），比較基準為 {daily_prev_used}。"
+                )
+            else:
+                st.caption("排名異動：暫無可比較的前一交易日榜單，`排名` 會顯示為 `N  (—)`。")
+        else:
+            st.caption("排名異動：目前無前一交易日可比較，`排名` 會顯示為 `N  (—)`。")
         if market_issues:
             _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
@@ -6745,6 +6984,8 @@ def _render_active_etf_2026_ytd_view():
     if refresh_market:
         _fetch_twse_snapshot_with_fallback.clear()
         _build_tw_active_etf_ytd_between.clear()
+        _load_twii_twse_month_close_map.clear()
+        _load_twii_twse_return_between.clear()
         _load_tw_market_return_between.clear()
         _load_tw_etf_daily_change_map.clear()
         _load_tw_snapshot_open_map.clear()
