@@ -7016,9 +7016,7 @@ def _render_two_etf_pick_view():
         recommendation_df = _attach_tw_etf_management_fee_column(
             recommendation_df, code_col_candidates=("ETF代碼",)
         )
-        recommendation_view = recommendation_df.rename(
-            columns={"YTD報酬(%)": "YTD績效(%)"}
-        )
+        recommendation_view = recommendation_df.rename(columns={"YTD報酬(%)": "YTD績效(%)"})
         with st.container(border=True):
             _render_card_section_header("推薦結果", "核心檔重代表性，衛星檔重低重疊動能。")
             show_cols = [
