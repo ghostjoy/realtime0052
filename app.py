@@ -424,7 +424,9 @@ def _format_tw_code_columns_for_display(frame: pd.DataFrame) -> pd.DataFrame:
         (col for col in frame.columns if str(col).strip() in BACKTEST_DRILL_MARKET_COLUMNS), None
     )
     market_series = (
-        frame[market_col] if market_col in frame.columns else pd.Series(index=frame.index, dtype=str)
+        frame[market_col]
+        if market_col in frame.columns
+        else pd.Series(index=frame.index, dtype=str)
     )
     out = frame.copy()
     for col in code_cols:

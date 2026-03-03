@@ -47,4 +47,3 @@ def provider_quality_base(provider_name: str) -> float:
     if token in {"yahoo", "us_stooq"}:
         return 0.75
     return 0.70
-

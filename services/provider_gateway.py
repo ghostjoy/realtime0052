@@ -226,7 +226,7 @@ class ProviderGateway:
     def _compute_backoff_sleep(*, policy: ProviderPolicy, attempt: int) -> float:
         base = max(1, int(policy.base_backoff_ms))
         cap = max(base, int(policy.max_backoff_ms))
-        step_ms = min(cap, base * (2**max(0, int(attempt))))
+        step_ms = min(cap, base * (2 ** max(0, int(attempt))))
         jitter = random.uniform(0.0, max(0.0, float(policy.jitter_ratio))) * step_ms
         return max(0.0, float(min(cap, step_ms + jitter)) / 1000.0)
 

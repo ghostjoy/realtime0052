@@ -1752,9 +1752,7 @@ class DuckHistoryStore:
                     stale=last_success is not None,
                 )
             df["source"] = source
-            fetched_at = pd.Timestamp(
-                getattr(snap, "fetched_at", datetime.now(tz=timezone.utc))
-            )
+            fetched_at = pd.Timestamp(getattr(snap, "fetched_at", datetime.now(tz=timezone.utc)))
             if fetched_at.tzinfo is None:
                 fetched_at = fetched_at.tz_localize("UTC")
             else:
