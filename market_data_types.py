@@ -25,6 +25,9 @@ class QuoteSnapshot:
     interval: str = "quote"
     currency: str | None = None
     exchange: str | None = None
+    asof: datetime | None = None
+    quality_score: float | None = None
+    raw_json: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -50,6 +53,9 @@ class OhlcvSnapshot:
     source: str
     is_delayed: bool
     fetched_at: datetime
+    asof: datetime | None = None
+    quality_score: float | None = None
+    raw_json: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

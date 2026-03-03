@@ -52,7 +52,9 @@ from app import (
     _snapshot_fallback_depth,
 )
 from ui.helpers import (
+    build_backtest_drill_url,
     build_heatmap_drill_url,
+    format_tw_symbol_for_display,
     normalize_heatmap_etf_code,
     parse_drill_symbol,
     strip_symbol_label_token,
@@ -177,6 +179,19 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("hm_etf=00935", url)
         self.assertIn("hm_open=1", url)
         self.assertIn("hm_src=all_types_table", url)
+
+    def test_format_tw_symbol_for_display(self):
+        self.assertEqual(format_tw_symbol_for_display("0050 元大台灣50", "TW"), "0050.tw")
+        self.assertEqual(format_tw_symbol_for_display("AAPL", "US"), "AAPL")
+        self.assertEqual(format_tw_symbol_for_display("^TWII", "TW"), "^TWII")
+
+    def test_build_backtest_drill_url_has_display_label(self):
+        tw_url = build_backtest_drill_url("0050", "TW")
+        us_url = build_backtest_drill_url("AAPL", "US")
+        self.assertIn("bt_symbol=0050", tw_url)
+        self.assertIn("bt_label=0050.tw", tw_url)
+        self.assertIn("bt_symbol=AAPL", us_url)
+        self.assertIn("bt_label=AAPL", us_url)
 
     def test_decorate_tw_etf_name_heatmap_links(self):
         source = pd.DataFrame(

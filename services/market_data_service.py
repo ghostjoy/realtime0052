@@ -19,7 +19,8 @@ from providers import (
     UsTwelveDataProvider,
     UsYahooProvider,
 )
-from providers.base import ProviderError, ProviderRequest
+from providers.base import ProviderRequest
+from services.provider_gateway import ProviderGateway
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class MarketDataService:
         self.tw_mis = TwMisProvider()
         self.tw_openapi = TwOpenApiProvider()
         self.tw_tpex = TwTpexOpenApiProvider()
+        self.gateway = ProviderGateway()
         self.cache = _TtlCache()
         self._metadata_store = None
 
@@ -123,19 +125,11 @@ class MarketDataService:
     def _try_quote_chain(
         self, providers, request: ProviderRequest
     ) -> tuple[QuoteSnapshot, list[str], str | None, int]:
-        errors: list[str] = []
-        for idx, provider in enumerate(providers):
-            try:
-                quote = provider.quote(request)
-                return quote, [p.name for p in providers], errors[-1] if errors else None, idx
-            except ProviderError as exc:
-                errors.append(str(exc))
-            except Exception as exc:  # pragma: no cover
-                errors.append(f"[{provider.name}] {exc}")
-        raise RuntimeError("; ".join(errors) if errors else "no provider available")
+        candidates = [(provider, request) for provider in providers]
+        return self.gateway.execute_quote_candidates(candidates)
 
     def _try_ohlcv_chain(self, providers, request: ProviderRequest) -> OhlcvSnapshot:
-        errors: list[str] = []
+        candidates: list[tuple[object, ProviderRequest]] = []
         for provider in providers:
             provider_request = request
             if request.market == "TW" and getattr(provider, "name", "") == "yahoo":
@@ -149,13 +143,8 @@ class MarketDataService:
                         end=request.end,
                         exchange=request.exchange,
                     )
-            try:
-                return provider.ohlcv(provider_request)
-            except ProviderError as exc:
-                errors.append(str(exc))
-            except Exception as exc:  # pragma: no cover
-                errors.append(f"[{provider.name}] {exc}")
-        raise RuntimeError("; ".join(errors) if errors else "no provider available")
+            candidates.append((provider, provider_request))
+        return self.gateway.execute_ohlcv_candidates(candidates)
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
@@ -176,18 +165,11 @@ class MarketDataService:
         market: str,
         candidates: list[tuple[object, str]],
     ) -> tuple[QuoteSnapshot, list[str], str | None, int]:
-        errors: list[str] = []
-        chain_names = [provider.name for provider, _ in candidates]
-        for idx, (provider, symbol) in enumerate(candidates):
-            try:
-                req = ProviderRequest(symbol=symbol, market=market, interval="quote")
-                quote = provider.quote(req)
-                return quote, chain_names, errors[-1] if errors else None, idx
-            except ProviderError as exc:
-                errors.append(str(exc))
-            except Exception as exc:  # pragma: no cover
-                errors.append(f"[{provider.name}] {exc}")
-        raise RuntimeError("; ".join(errors) if errors else "no provider available")
+        req_candidates = [
+            (provider, ProviderRequest(symbol=symbol, market=market, interval="quote"))
+            for provider, symbol in candidates
+        ]
+        return self.gateway.execute_quote_candidates(req_candidates)
 
     def _try_ohlcv_chain_with_symbols(
         self,
@@ -195,16 +177,11 @@ class MarketDataService:
         interval: str,
         candidates: list[tuple[object, str]],
     ) -> OhlcvSnapshot:
-        errors: list[str] = []
-        for provider, symbol in candidates:
-            try:
-                req = ProviderRequest(symbol=symbol, market=market, interval=interval)
-                return provider.ohlcv(req)
-            except ProviderError as exc:
-                errors.append(str(exc))
-            except Exception as exc:  # pragma: no cover
-                errors.append(f"[{provider.name}] {exc}")
-        raise RuntimeError("; ".join(errors) if errors else "no provider available")
+        req_candidates = [
+            (provider, ProviderRequest(symbol=symbol, market=market, interval=interval))
+            for provider, symbol in candidates
+        ]
+        return self.gateway.execute_ohlcv_candidates(req_candidates)
 
     def get_us_live_context(
         self,

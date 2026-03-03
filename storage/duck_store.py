@@ -168,6 +168,22 @@ class DuckHistoryStore:
         return str(value or "").strip()
 
     @staticmethod
+    def _normalize_raw_json_text(value: object) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):  # type: ignore[arg-type]
+                return ""
+        except Exception:
+            pass
+        if isinstance(value, str):
+            return value.strip()
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value).strip()
+
+    @staticmethod
     def _is_tw_local_security_symbol(symbol: str) -> bool:
         token = str(symbol or "").strip().upper()
         return bool(re.fullmatch(r"\d{4,6}[A-Z]?", token))
@@ -610,9 +626,9 @@ class DuckHistoryStore:
     def _duck_read_parquet_expr(paths: list[Path]) -> str:
         quoted = [str(path.resolve()).replace("'", "''") for path in paths]
         if len(quoted) == 1:
-            return f"read_parquet('{quoted[0]}')"
+            return f"read_parquet('{quoted[0]}', union_by_name=true)"
         items = ", ".join(f"'{item}'" for item in quoted)
-        return f"read_parquet([{items}])"
+        return f"read_parquet([{items}], union_by_name=true)"
 
     def _daily_parquet_sources(self, symbol: str, market: str) -> list[Path]:
         base = self._daily_symbol_path(symbol, market)
@@ -693,12 +709,30 @@ class DuckHistoryStore:
         norm["volume"] = volume.fillna(0.0)
         if "adj_close" in out.columns:
             norm["adj_close"] = _extract_numeric_col("adj_close")
+        if "asof" in out.columns:
+            norm["asof"] = pd.to_datetime(out["asof"], utc=True, errors="coerce")
+        if "quality_score" in out.columns:
+            norm["quality_score"] = pd.to_numeric(out["quality_score"], errors="coerce")
+        if "raw_json" in out.columns:
+            norm["raw_json"] = out["raw_json"].map(DuckHistoryStore._normalize_raw_json_text)
 
         idx = pd.to_datetime(norm.index, utc=True, errors="coerce")
         norm.index = idx
         norm = norm[~norm.index.isna()]
         keep_cols = [
-            c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in norm.columns
+            c
+            for c in [
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "adj_close",
+                "asof",
+                "quality_score",
+                "raw_json",
+            ]
+            if c in norm.columns
         ]
         norm = norm[keep_cols]
         norm = norm.dropna(subset=["open", "high", "low", "close"], how="any").sort_index()
@@ -726,6 +760,9 @@ class DuckHistoryStore:
             "adj_close",
             "source",
             "fetched_at",
+            "asof",
+            "quality_score",
+            "raw_json",
         ]
         sources = self._daily_parquet_sources(symbol, market)
         if not sources:
@@ -742,6 +779,50 @@ class DuckHistoryStore:
             params.append(pd.Timestamp(end).date().isoformat())
 
         sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(date AS DATE) AS d,
+                    TRY_CAST(open AS DOUBLE) AS open,
+                    TRY_CAST(high AS DOUBLE) AS high,
+                    TRY_CAST(low AS DOUBLE) AS low,
+                    TRY_CAST(close AS DOUBLE) AS close,
+                    TRY_CAST(volume AS DOUBLE) AS volume,
+                    TRY_CAST(adj_close AS DOUBLE) AS adj_close,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts,
+                    CAST(asof AS VARCHAR) AS asof_text,
+                    TRY_CAST(quality_score AS DOUBLE) AS quality_score,
+                    CAST(raw_json AS VARCHAR) AS raw_json_text
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    d, open, high, low, close, volume, adj_close,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    asof_text,
+                    quality_score,
+                    raw_json_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE d IS NOT NULL
+            )
+            SELECT
+                STRFTIME(d, '%Y-%m-%d') AS date,
+                open, high, low, close, volume, adj_close, source,
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(asof_text, fetched_at_text, '') AS asof,
+                quality_score,
+                COALESCE(raw_json_text, '') AS raw_json
+            FROM ranked
+            WHERE {" AND ".join(where)}
+            ORDER BY d ASC
+        """
+        legacy_sql = f"""
             WITH raw AS (
                 SELECT
                     TRY_CAST(date AS DATE) AS d,
@@ -771,7 +852,10 @@ class DuckHistoryStore:
             SELECT
                 STRFTIME(d, '%Y-%m-%d') AS date,
                 open, high, low, close, volume, adj_close, source,
-                COALESCE(fetched_at_text, '') AS fetched_at
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(fetched_at_text, '') AS asof,
+                CAST(NULL AS DOUBLE) AS quality_score,
+                '' AS raw_json
             FROM ranked
             WHERE {" AND ".join(where)}
             ORDER BY d ASC
@@ -780,7 +864,10 @@ class DuckHistoryStore:
         try:
             out = conn.execute(sql, params).df()
         except Exception:
-            return pd.DataFrame(columns=expected)
+            try:
+                out = conn.execute(legacy_sql, params).df()
+            except Exception:
+                return pd.DataFrame(columns=expected)
         finally:
             conn.close()
 
@@ -818,6 +905,18 @@ class DuckHistoryStore:
                     "fetched_at",
                     pd.Series(index=frame.index, data=datetime.now(tz=timezone.utc).isoformat()),
                 ).astype(str),
+                "asof": pd.to_datetime(
+                    frame.get("asof", pd.Series(index=frame.index, data=frame.index)),
+                    utc=True,
+                    errors="coerce",
+                )
+                .astype("datetime64[ns, UTC]")
+                .astype(str),
+                "quality_score": pd.to_numeric(frame.get("quality_score"), errors="coerce"),
+                "raw_json": frame.get(
+                    "raw_json",
+                    pd.Series(index=frame.index, data=""),
+                ).map(self._normalize_raw_json_text),
             }
         )
         payload = payload.dropna(subset=["open", "high", "low", "close"])  # type: ignore[arg-type]
@@ -861,6 +960,50 @@ class DuckHistoryStore:
                     TRY_CAST(adj_close AS DOUBLE) AS adj_close,
                     NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
                     CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts,
+                    CAST(asof AS VARCHAR) AS asof_text,
+                    TRY_CAST(quality_score AS DOUBLE) AS quality_score,
+                    CAST(raw_json AS VARCHAR) AS raw_json_text
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    d, open, high, low, close, volume, adj_close,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    asof_text,
+                    quality_score,
+                    raw_json_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE d IS NOT NULL
+            )
+            SELECT
+                STRFTIME(d, '%Y-%m-%d') AS date,
+                open, high, low, close, volume, adj_close, source,
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(asof_text, fetched_at_text, '') AS asof,
+                quality_score,
+                COALESCE(raw_json_text, '') AS raw_json
+            FROM ranked
+            WHERE rn=1
+            ORDER BY d ASC
+        """
+        legacy_sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(date AS DATE) AS d,
+                    TRY_CAST(open AS DOUBLE) AS open,
+                    TRY_CAST(high AS DOUBLE) AS high,
+                    TRY_CAST(low AS DOUBLE) AS low,
+                    TRY_CAST(close AS DOUBLE) AS close,
+                    TRY_CAST(volume AS DOUBLE) AS volume,
+                    TRY_CAST(adj_close AS DOUBLE) AS adj_close,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
                     TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts
                 FROM {read_expr}
             ),
@@ -879,7 +1022,10 @@ class DuckHistoryStore:
             SELECT
                 STRFTIME(d, '%Y-%m-%d') AS date,
                 open, high, low, close, volume, adj_close, source,
-                COALESCE(fetched_at_text, '') AS fetched_at
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(fetched_at_text, '') AS asof,
+                CAST(NULL AS DOUBLE) AS quality_score,
+                '' AS raw_json
             FROM ranked
             WHERE rn=1
             ORDER BY d ASC
@@ -888,7 +1034,10 @@ class DuckHistoryStore:
         try:
             compacted = conn.execute(sql).df()
         except Exception:
-            return
+            try:
+                compacted = conn.execute(legacy_sql).df()
+            except Exception:
+                return
         finally:
             conn.close()
 
@@ -961,6 +1110,23 @@ class DuckHistoryStore:
                 normalized["source"].fillna(source_text or "writeback").astype(str)
             )
         normalized["fetched_at"] = datetime.now(tz=timezone.utc).isoformat()
+        if "asof" in normalized.columns:
+            normalized["asof"] = pd.to_datetime(normalized["asof"], utc=True, errors="coerce")
+            normalized["asof"] = normalized["asof"].fillna(
+                pd.to_datetime(normalized.index, utc=True, errors="coerce")
+            )
+        else:
+            normalized["asof"] = pd.to_datetime(normalized.index, utc=True, errors="coerce")
+        if "quality_score" in normalized.columns:
+            normalized["quality_score"] = pd.to_numeric(
+                normalized["quality_score"], errors="coerce"
+            )
+        else:
+            normalized["quality_score"] = float("nan")
+        if "raw_json" in normalized.columns:
+            normalized["raw_json"] = normalized["raw_json"].map(self._normalize_raw_json_text)
+        else:
+            normalized["raw_json"] = ""
 
         rows_upserted = self._upsert_daily_bars(symbol=symbol, market=market, bars=normalized)
         if rows_upserted <= 0:
@@ -1051,12 +1217,63 @@ class DuckHistoryStore:
             time.sleep(0.01)
 
     def _load_intraday_frame_raw(self, symbol: str, market: str) -> pd.DataFrame:
-        expected = ["ts_utc", "price", "cum_volume", "source", "fetched_at"]
+        expected = [
+            "ts_utc",
+            "price",
+            "cum_volume",
+            "source",
+            "fetched_at",
+            "asof",
+            "quality_score",
+            "raw_json",
+        ]
         sources = self._intraday_parquet_sources(symbol, market)
         if not sources:
             return pd.DataFrame(columns=expected)
         read_expr = self._duck_read_parquet_expr(sources)
         sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(ts_utc AS TIMESTAMP) AS ts_utc,
+                    TRY_CAST(price AS DOUBLE) AS price,
+                    TRY_CAST(cum_volume AS DOUBLE) AS cum_volume,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts,
+                    CAST(asof AS VARCHAR) AS asof_text,
+                    TRY_CAST(quality_score AS DOUBLE) AS quality_score,
+                    CAST(raw_json AS VARCHAR) AS raw_json_text
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    ts_utc, price, cum_volume,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    asof_text,
+                    quality_score,
+                    raw_json_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ts_utc
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE ts_utc IS NOT NULL
+            )
+            SELECT
+                CAST(ts_utc AS VARCHAR) AS ts_utc,
+                price,
+                cum_volume,
+                source,
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(asof_text, fetched_at_text, '') AS asof,
+                quality_score,
+                COALESCE(raw_json_text, '') AS raw_json
+            FROM ranked
+            WHERE rn=1
+            ORDER BY ts_utc ASC
+        """
+        legacy_sql = f"""
             WITH raw AS (
                 SELECT
                     TRY_CAST(ts_utc AS TIMESTAMP) AS ts_utc,
@@ -1081,7 +1298,13 @@ class DuckHistoryStore:
             )
             SELECT
                 CAST(ts_utc AS VARCHAR) AS ts_utc,
-                price, cum_volume, source, COALESCE(fetched_at_text, '') AS fetched_at
+                price,
+                cum_volume,
+                source,
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(fetched_at_text, '') AS asof,
+                CAST(NULL AS DOUBLE) AS quality_score,
+                '' AS raw_json
             FROM ranked
             WHERE rn=1
             ORDER BY ts_utc ASC
@@ -1090,7 +1313,10 @@ class DuckHistoryStore:
         try:
             out = conn.execute(sql).df()
         except Exception:
-            return pd.DataFrame(columns=expected)
+            try:
+                out = conn.execute(legacy_sql).df()
+            except Exception:
+                return pd.DataFrame(columns=expected)
         finally:
             conn.close()
         if out.empty:
@@ -1123,6 +1349,18 @@ class DuckHistoryStore:
                     "fetched_at",
                     pd.Series(index=frame.index, data=datetime.now(tz=timezone.utc).isoformat()),
                 ).astype(str),
+                "asof": pd.to_datetime(
+                    frame.get("asof", pd.Series(index=frame.index, data=frame.index)),
+                    utc=True,
+                    errors="coerce",
+                )
+                .astype("datetime64[ns, UTC]")
+                .astype(str),
+                "quality_score": pd.to_numeric(frame.get("quality_score"), errors="coerce"),
+                "raw_json": frame.get(
+                    "raw_json",
+                    pd.Series(index=frame.index, data=""),
+                ).map(self._normalize_raw_json_text),
             }
         )
         payload = payload.dropna(subset=["price"])  # type: ignore[arg-type]
@@ -1168,6 +1406,48 @@ class DuckHistoryStore:
                     TRY_CAST(cum_volume AS DOUBLE) AS cum_volume,
                     NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
                     CAST(fetched_at AS VARCHAR) AS fetched_at_text,
+                    TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts,
+                    CAST(asof AS VARCHAR) AS asof_text,
+                    TRY_CAST(quality_score AS DOUBLE) AS quality_score,
+                    CAST(raw_json AS VARCHAR) AS raw_json_text
+                FROM {read_expr}
+            ),
+            ranked AS (
+                SELECT
+                    ts_utc, price, cum_volume,
+                    COALESCE(source, 'unknown') AS source,
+                    fetched_at_text,
+                    asof_text,
+                    quality_score,
+                    raw_json_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ts_utc
+                        ORDER BY fetched_ts DESC NULLS LAST, fetched_at_text DESC NULLS LAST
+                    ) AS rn
+                FROM raw
+                WHERE ts_utc IS NOT NULL
+            )
+            SELECT
+                CAST(ts_utc AS VARCHAR) AS ts_utc,
+                price,
+                cum_volume,
+                source,
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(asof_text, fetched_at_text, '') AS asof,
+                quality_score,
+                COALESCE(raw_json_text, '') AS raw_json
+            FROM ranked
+            WHERE rn=1 AND ts_utc >= CAST(? AS TIMESTAMP)
+            ORDER BY ts_utc ASC
+        """
+        legacy_sql = f"""
+            WITH raw AS (
+                SELECT
+                    TRY_CAST(ts_utc AS TIMESTAMP) AS ts_utc,
+                    TRY_CAST(price AS DOUBLE) AS price,
+                    TRY_CAST(cum_volume AS DOUBLE) AS cum_volume,
+                    NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
+                    CAST(fetched_at AS VARCHAR) AS fetched_at_text,
                     TRY_CAST(fetched_at AS TIMESTAMP) AS fetched_ts
                 FROM {read_expr}
             ),
@@ -1185,7 +1465,13 @@ class DuckHistoryStore:
             )
             SELECT
                 CAST(ts_utc AS VARCHAR) AS ts_utc,
-                price, cum_volume, source, COALESCE(fetched_at_text, '') AS fetched_at
+                price,
+                cum_volume,
+                source,
+                COALESCE(fetched_at_text, '') AS fetched_at,
+                COALESCE(fetched_at_text, '') AS asof,
+                CAST(NULL AS DOUBLE) AS quality_score,
+                '' AS raw_json
             FROM ranked
             WHERE rn=1 AND ts_utc >= CAST(? AS TIMESTAMP)
             ORDER BY ts_utc ASC
@@ -1194,7 +1480,10 @@ class DuckHistoryStore:
         try:
             compacted = conn.execute(sql, [cutoff_iso]).df()
         except Exception:
-            return
+            try:
+                compacted = conn.execute(legacy_sql, [cutoff_iso]).df()
+            except Exception:
+                return
         finally:
             conn.close()
 
@@ -1463,7 +1752,23 @@ class DuckHistoryStore:
                     stale=last_success is not None,
                 )
             df["source"] = source
-            df["fetched_at"] = datetime.now(tz=timezone.utc).isoformat()
+            fetched_at = pd.Timestamp(
+                getattr(snap, "fetched_at", datetime.now(tz=timezone.utc))
+            )
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.tz_localize("UTC")
+            else:
+                fetched_at = fetched_at.tz_convert("UTC")
+            asof_ts = pd.Timestamp(getattr(snap, "asof", None) or df.index.max())
+            if asof_ts.tzinfo is None:
+                asof_ts = asof_ts.tz_localize("UTC")
+            else:
+                asof_ts = asof_ts.tz_convert("UTC")
+            quality_raw = pd.to_numeric(getattr(snap, "quality_score", None), errors="coerce")
+            df["fetched_at"] = fetched_at.isoformat()
+            df["asof"] = asof_ts.isoformat()
+            df["quality_score"] = float(quality_raw) if pd.notna(quality_raw) else float("nan")
+            df["raw_json"] = self._normalize_raw_json_text(getattr(snap, "raw_json", ""))
         except Exception as exc:
             if last_success is not None and fetch_start.date() >= end.date():
                 self._save_sync_state(instrument_id, last_success, source, None)
@@ -1518,7 +1823,18 @@ class DuckHistoryStore:
         df = self._load_daily_frame_window(symbol, market, start=start, end=end)
         if df.empty:
             return pd.DataFrame(
-                columns=["open", "high", "low", "close", "volume", "adj_close", "source"]
+                columns=[
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "adj_close",
+                    "source",
+                    "asof",
+                    "quality_score",
+                    "raw_json",
+                ]
             )
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         df = df.dropna(subset=["date"]).set_index("date").sort_index()
@@ -1527,10 +1843,33 @@ class DuckHistoryStore:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         if "source" not in df.columns:
             df["source"] = "unknown"
+        if "asof" in df.columns:
+            df["asof"] = pd.to_datetime(df["asof"], utc=True, errors="coerce")
+        else:
+            df["asof"] = pd.to_datetime(df.index, utc=True, errors="coerce")
+        if "quality_score" in df.columns:
+            df["quality_score"] = pd.to_numeric(df["quality_score"], errors="coerce")
+        else:
+            df["quality_score"] = float("nan")
+        if "raw_json" in df.columns:
+            df["raw_json"] = df["raw_json"].map(self._normalize_raw_json_text)
+        else:
+            df["raw_json"] = ""
         return df[
             [
                 c
-                for c in ["open", "high", "low", "close", "volume", "adj_close", "source"]
+                for c in [
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "adj_close",
+                    "source",
+                    "asof",
+                    "quality_score",
+                    "raw_json",
+                ]
                 if c in df.columns
             ]
         ]
@@ -1544,7 +1883,7 @@ class DuckHistoryStore:
     ) -> int:
         if not ticks:
             return 0
-        rows: dict[str, tuple[float, float, str, str]] = {}
+        rows: dict[str, tuple[float, float, str, str, str, float, str]] = {}
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         for row in ticks:
             ts_value = row.get("ts") or row.get("ts_utc")
@@ -1559,11 +1898,15 @@ class DuckHistoryStore:
             if pd.isna(price_val):
                 continue
             cum_val = pd.to_numeric(row.get("cum_volume", 0.0), errors="coerce")
+            quality_raw = pd.to_numeric(row.get("quality_score"), errors="coerce")
             rows[ts.isoformat()] = (
                 float(price_val),
                 0.0 if pd.isna(cum_val) else float(cum_val),
                 str(row.get("source", "unknown") or "unknown"),
                 str(row.get("fetched_at", now_iso) or now_iso),
+                str(row.get("asof", ts.isoformat()) or ts.isoformat()),
+                float(quality_raw) if pd.notna(quality_raw) else float("nan"),
+                self._normalize_raw_json_text(row.get("raw_json", "")),
             )
 
         if not rows:
@@ -1576,6 +1919,9 @@ class DuckHistoryStore:
                 "cum_volume": [v[1] for v in rows.values()],
                 "source": [v[2] for v in rows.values()],
                 "fetched_at": [v[3] for v in rows.values()],
+                "asof": [v[4] for v in rows.values()],
+                "quality_score": [v[5] for v in rows.values()],
+                "raw_json": [v[6] for v in rows.values()],
             }
         )
         frame["ts_utc"] = pd.to_datetime(frame["ts_utc"], utc=True, errors="coerce")
@@ -1598,7 +1944,9 @@ class DuckHistoryStore:
         market = self._normalize_market_token(market)
         df = self._load_intraday_frame_raw(symbol, market)
         if df.empty:
-            return pd.DataFrame(columns=["price", "cum_volume", "source"])
+            return pd.DataFrame(
+                columns=["price", "cum_volume", "source", "asof", "quality_score", "raw_json"]
+            )
         df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
         df = df.dropna(subset=["ts_utc"]).set_index("ts_utc").sort_index()
         if start is not None:
@@ -1610,7 +1958,25 @@ class DuckHistoryStore:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         if "source" not in df.columns:
             df["source"] = "unknown"
-        return df[[c for c in ["price", "cum_volume", "source"] if c in df.columns]]
+        if "asof" in df.columns:
+            df["asof"] = pd.to_datetime(df["asof"], utc=True, errors="coerce")
+        else:
+            df["asof"] = pd.to_datetime(df.index, utc=True, errors="coerce")
+        if "quality_score" in df.columns:
+            df["quality_score"] = pd.to_numeric(df["quality_score"], errors="coerce")
+        else:
+            df["quality_score"] = float("nan")
+        if "raw_json" in df.columns:
+            df["raw_json"] = df["raw_json"].map(self._normalize_raw_json_text)
+        else:
+            df["raw_json"] = ""
+        return df[
+            [
+                c
+                for c in ["price", "cum_volume", "source", "asof", "quality_score", "raw_json"]
+                if c in df.columns
+            ]
+        ]
 
     def upsert_symbol_metadata(self, rows: list[dict[str, object]]) -> int:
         payload: list[tuple[str, str, str, str, str, str, str, str, str]] = []

@@ -100,6 +100,62 @@ class _FakeMetadataStore:
 
 
 class MarketDataServiceTests(unittest.TestCase):
+    def test_quote_chain_retries_retryable_error(self):
+        class _FlakyProvider:
+            name = "flaky"
+
+            def __init__(self):
+                self.calls = 0
+
+            def quote(self, request: ProviderRequest):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError("flaky", ProviderErrorKind.NETWORK, "temporary network")
+                return QuoteSnapshot(
+                    symbol=request.symbol,
+                    market=request.market,
+                    ts=datetime.now(tz=timezone.utc),
+                    price=101.0,
+                    prev_close=100.0,
+                    open=100.0,
+                    high=102.0,
+                    low=99.0,
+                    volume=1,
+                    source=self.name,
+                    is_delayed=False,
+                )
+
+        service = MarketDataService()
+        request = ProviderRequest(symbol="TSLA", market="US", interval="quote")
+        flaky = _FlakyProvider()
+        quote, _, _, depth = service._try_quote_chain([flaky], request)  # noqa: SLF001
+        self.assertEqual(quote.source, "flaky")
+        self.assertEqual(depth, 0)
+        self.assertEqual(flaky.calls, 2)
+
+    def test_quote_chain_circuit_breaker_opens_after_threshold(self):
+        class _AlwaysAuthFailProvider:
+            name = "auth_fail"
+
+            def __init__(self):
+                self.calls = 0
+
+            def quote(self, request: ProviderRequest):
+                self.calls += 1
+                raise ProviderError(self.name, ProviderErrorKind.AUTH, "auth failed")
+
+        service = MarketDataService()
+        request = ProviderRequest(symbol="TSLA", market="US", interval="quote")
+        provider = _AlwaysAuthFailProvider()
+
+        for _ in range(5):
+            with self.assertRaises(RuntimeError):
+                service._try_quote_chain([provider], request)  # noqa: SLF001
+        calls_before_open = provider.calls
+        with self.assertRaises(RuntimeError):
+            service._try_quote_chain([provider], request)  # noqa: SLF001
+        self.assertEqual(provider.calls, calls_before_open)
+
     def test_quote_chain_fallback(self):
         service = MarketDataService()
         request = ProviderRequest(symbol="TSLA", market="US", interval="quote")

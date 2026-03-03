@@ -1,6 +1,7 @@
 """UI 共用輔助模組"""
 
 from ui.helpers.symbol_utils import (
+    format_tw_symbol_for_display,
     looks_like_tw_symbol,
     looks_like_us_symbol,
     normalize_heatmap_etf_code,
@@ -13,6 +14,7 @@ from ui.helpers.url_utils import build_backtest_drill_url, build_heatmap_drill_u
 __all__ = [
     "build_backtest_drill_url",
     "build_heatmap_drill_url",
+    "format_tw_symbol_for_display",
     "looks_like_tw_symbol",
     "looks_like_us_symbol",
     "normalize_heatmap_etf_code",

@@ -91,3 +91,24 @@ def looks_like_us_symbol(symbol: str) -> bool:
     if looks_like_tw_symbol(token):
         return False
     return bool(re.fullmatch(r"\^?[A-Z][A-Z0-9.\-]{0,11}", token))
+
+
+def format_tw_symbol_for_display(value: object, market_hint: object = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    upper_raw = raw.upper()
+    if ("BT_SYMBOL=" in upper_raw) or ("HM_ETF=" in upper_raw):
+        return raw
+    symbol, default_market = parse_drill_symbol(raw)
+    if not symbol:
+        token = strip_symbol_label_token(raw)
+        if not looks_like_tw_symbol(token):
+            return raw
+        symbol = token
+    if str(symbol).startswith("^"):
+        return raw
+    market = normalize_market_tag_for_drill(market_hint) or default_market
+    if market not in {"TW", "OTC"} and not looks_like_tw_symbol(symbol):
+        return raw
+    return f"{symbol}.tw"

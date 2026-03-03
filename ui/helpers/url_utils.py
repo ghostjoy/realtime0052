@@ -5,10 +5,16 @@ from urllib.parse import quote, urlencode
 
 def build_backtest_drill_url(symbol: str, market: str) -> str:
     """建構回測 drilldown URL"""
+    symbol_text = str(symbol).strip().upper()
+    market_text = str(market).strip().upper()
+    label = symbol_text
+    if market_text in {"TW", "OTC"} and "." not in symbol_text and not symbol_text.startswith("^"):
+        label = f"{symbol_text}.tw"
     return "?" + urlencode(
         {
-            "bt_symbol": str(symbol).strip().upper(),
-            "bt_market": str(market).strip().upper(),
+            "bt_symbol": symbol_text,
+            "bt_market": market_text,
+            "bt_label": label,
             "bt_autorun": "1",
             "bt_src": "table",
         }

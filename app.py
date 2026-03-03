@@ -109,6 +109,7 @@ from ui.charts import (
 from ui.helpers import (
     build_backtest_drill_url,
     build_heatmap_drill_url,
+    format_tw_symbol_for_display,
     looks_like_tw_symbol,
     looks_like_us_symbol,
     parse_drill_symbol,
@@ -253,7 +254,7 @@ BACKTEST_DRILL_CODE_COLUMNS = {
     "標的",
 }
 BACKTEST_DRILL_MARKET_COLUMNS = {"市場", "market", "Market", "交易所", "exchange", "Exchange"}
-BACKTEST_DRILL_QUERY_KEYS = ("bt_symbol", "bt_market", "bt_autorun", "bt_src")
+BACKTEST_DRILL_QUERY_KEYS = ("bt_symbol", "bt_market", "bt_label", "bt_autorun", "bt_src")
 BACKTEST_AUTORUN_PENDING_KEY = "bt_autorun_pending"
 HEATMAP_DRILL_QUERY_KEYS = ("hm_etf", "hm_name", "hm_label", "hm_open", "hm_src")
 HEATMAP_HUB_SESSION_ACTIVE_KEY = "heatmap_hub_active_etf"
@@ -383,7 +384,7 @@ def _decorate_dataframe_backtest_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
         link_config[str(col)] = st.column_config.LinkColumn(
             label=str(col),
             help="點擊代碼可帶入回測工作台並自動執行回測",
-            display_text=r"bt_symbol=([^&]+)",
+            display_text=r"bt_label=([^&]+)",
             max_chars=20,
         )
     return out, link_config
@@ -413,10 +414,42 @@ def _tw_etf_precision_column_config(frame: pd.DataFrame) -> dict[str, object]:
     return cfg
 
 
+def _format_tw_code_columns_for_display(frame: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    code_cols = [col for col in frame.columns if str(col).strip() in BACKTEST_DRILL_CODE_COLUMNS]
+    if not code_cols:
+        return frame
+    market_col = next(
+        (col for col in frame.columns if str(col).strip() in BACKTEST_DRILL_MARKET_COLUMNS), None
+    )
+    market_series = (
+        frame[market_col] if market_col in frame.columns else pd.Series(index=frame.index, dtype=str)
+    )
+    out = frame.copy()
+    for col in code_cols:
+        values: list[object] = []
+        for row_idx, value in out[col].items():
+            text = str(value or "").strip()
+            if not text:
+                values.append(value)
+                continue
+            lower_text = text.lower()
+            if ("bt_symbol=" in lower_text) or ("hm_etf=" in lower_text):
+                values.append(value)
+                continue
+            market_hint = market_series.get(row_idx, "") if hasattr(market_series, "get") else ""
+            values.append(format_tw_symbol_for_display(text, market_hint))
+        out[col] = values
+    return out
+
+
 def _dataframe_with_backtest_drilldown(data: Any = None, *args, **kwargs):
     opts = dict(kwargs)
     disable_drilldown = bool(opts.pop("disable_backtest_drilldown", False))
     frame = data
+    if isinstance(frame, pd.DataFrame):
+        frame = _format_tw_code_columns_for_display(frame)
     if isinstance(frame, pd.DataFrame) and (not disable_drilldown):
         precision_config = _tw_etf_precision_column_config(frame)
         frame, auto_config = _decorate_dataframe_backtest_links(frame)
@@ -3729,7 +3762,7 @@ def _decorate_tw_etf_aum_history_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
         cfg["台股代號"] = st.column_config.LinkColumn(
             label="台股代號",
             help="點擊代號可帶入回測工作台並自動執行回測",
-            display_text=r"bt_symbol=([^&]+)",
+            display_text=r"bt_label=([^&]+)",
             max_chars=20,
         )
     if linked_name_count > 0:
