@@ -103,6 +103,10 @@
 
 ### Changed
 - Auto: updated README.md, app.py, backtest/adjustments.py, tests/test_active_etf_page.py, tests/test_split_adjustments.py [id:4b2f4601d7]
+- `台股 ETF 全類型總表` 版面調整：
+  - 交換「總表」與「基金規模追蹤」顯示順序，改為先總表、後基金規模追蹤。
+  - 「總表」與「基金規模追蹤」兩張表改為可捲動模式，表格高度約可顯示 30 列資料。
+  - 取消兩張表上方的欄位速覽列（sticky）。
 - ETF 排行卡片欄位命名統一：
   - `YTD報酬(%)` -> `YTD績效(%)`
   - `贏輸台股大盤(%)` / `輸給台股大盤(%)` -> `大盤超額(%)`

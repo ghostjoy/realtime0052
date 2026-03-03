@@ -6001,6 +6001,26 @@ def _render_tw_etf_all_types_view():
             except Exception as exc:
                 st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
 
+        table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(table_df)
+        table_with_links, code_link_config = _decorate_dataframe_backtest_links(table_with_links)
+        merged_link_config: dict[str, object] = {}
+        if isinstance(code_link_config, dict):
+            merged_link_config.update(code_link_config)
+        if isinstance(table_link_config, dict):
+            merged_link_config.update(table_link_config)
+        visible_rows = 30
+        scroll_height = 40 + visible_rows * 36
+        if merged_link_config:
+            st.caption("可直接點擊 `ETF` 中文名稱，在新分頁開啟對應熱力圖（內容同 00935 熱力圖）。")
+        st.dataframe(
+            _style_tw_today_move_table(table_with_links),
+            width="stretch",
+            hide_index=True,
+            height=scroll_height,
+            column_config=merged_link_config if merged_link_config else None,
+        )
+        st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
+
         history_df = store.load_tw_etf_aum_history(
             etf_codes=table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
             keep_days=0,
@@ -6023,27 +6043,12 @@ def _render_tw_etf_all_types_view():
                 _style_tw_etf_aum_history_table(history_with_links),
                 width="stretch",
                 hide_index=True,
-                height=min(_full_table_height(history_wide), 720),
+                height=scroll_height,
                 column_config=history_link_config if history_link_config else None,
             )
+            st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
             st.caption("可點擊 `台股代號` 開啟回測；可點擊 `ETF名稱` 開啟該檔 ETF 成分股熱力圖。")
 
-        table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(table_df)
-        table_with_links, code_link_config = _decorate_dataframe_backtest_links(table_with_links)
-        merged_link_config: dict[str, object] = {}
-        if isinstance(code_link_config, dict):
-            merged_link_config.update(code_link_config)
-        if isinstance(table_link_config, dict):
-            merged_link_config.update(table_link_config)
-        if merged_link_config:
-            st.caption("可直接點擊 `ETF` 中文名稱，在新分頁開啟對應熱力圖（內容同 00935 熱力圖）。")
-        st.dataframe(
-            _style_tw_today_move_table(table_with_links),
-            width="stretch",
-            hide_index=True,
-            height=min(_full_table_height(table_with_links), 1200),
-            column_config=merged_link_config if merged_link_config else None,
-        )
         hub_col1, hub_col2 = st.columns([2, 1])
         with hub_col1:
             st.caption("已開啟/已快取的 ETF 熱力圖可在 `熱力圖總表` 分頁集中管理。")
