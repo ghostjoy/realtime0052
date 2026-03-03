@@ -102,6 +102,13 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated README.md, app.py, backtest/adjustments.py, tests/test_active_etf_page.py, tests/test_split_adjustments.py [id:4b2f4601d7]
+- ETF 排行卡片欄位命名統一：
+  - `YTD報酬(%)` -> `YTD績效(%)`
+  - `贏輸台股大盤(%)` / `輸給台股大盤(%)` -> `大盤超額(%)`
+  - `輸贏大盤2025(%)` -> `大盤超額2025(%)`
+  - `輸贏大盤2026YTD(%)` -> `大盤超額YTD(%)`
+- `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF`、`2025 後20大最差勁 ETF`、`2026 YTD 主動式 ETF`、`台股 ETF 全類型總表` 的績效/大盤差值欄位顯示統一為小數點後兩位。
 - Auto: updated tests/test_active_etf_page.py, ui/helpers/symbol_utils.py, ui/helpers/url_utils.py [id:c4ada2f4d6]
 - Auto: updated app.py, services/provider_gateway.py, services/provider_policies.py, storage/duck_store.py [id:e40f68eb05]
 - Auto: updated app.py, market_data_types.py, services/market_data_service.py, services/provider_gateway.py, services/provider_policies.py, storage/duck_store.py, ... (+5) [id:0d8d66b489]
@@ -270,6 +277,10 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正台股 ETF 全類型總表在部分槓桿/反向 ETF 的 2025 績效失真：
+  - 補齊 `00663L`（2025-06-11）分割事件，修正未復權造成的 2025 績效低估問題。
+  - 補齊 `00676R`（2025-02-19）、`00673R`（2025-10-22）、`00706L`（2025-10-22）、`00715L`（2025-12-10）反分割事件，避免未復權造成績效被放大。
+  - 重新驗算 `00708L`、`00738U`：2025 區間未偵測到同類分割事件，維持原報酬計算。
 - 修正 Yahoo OHLCV 正規化時 `adj_close` 欄位被誤丟棄：
   - `data_sources.fetch_yf_ohlcv(...)` 現在會保留 `adj_close`（若來源有提供）
   - 回測工作台 `還原權息（Adj Close）` 可正確取得 Yahoo 的還原欄位來源

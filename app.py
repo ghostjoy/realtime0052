@@ -401,16 +401,24 @@ def _tw_etf_precision_column_config(frame: pd.DataFrame) -> dict[str, object]:
         cfg["管理費(%)"] = st.column_config.NumberColumn("管理費(%)", format="%.2f")
     if "ETF規模(億)" in frame.columns:
         cfg["ETF規模(億)"] = st.column_config.NumberColumn("ETF規模(億)", format="%d")
-    if "2025績效(%)" in frame.columns:
-        cfg["2025績效(%)"] = st.column_config.NumberColumn("2025績效(%)", format="%.2f")
-    if "輸贏大盤2025(%)" in frame.columns:
-        cfg["輸贏大盤2025(%)"] = st.column_config.NumberColumn("輸贏大盤2025(%)", format="%.2f")
-    if "2026YTD績效(%)" in frame.columns:
-        cfg["2026YTD績效(%)"] = st.column_config.NumberColumn("2026YTD績效(%)", format="%.2f")
-    if "輸贏大盤2026YTD(%)" in frame.columns:
-        cfg["輸贏大盤2026YTD(%)"] = st.column_config.NumberColumn(
-            "輸贏大盤2026YTD(%)", format="%.2f"
-        )
+    precision_cols = (
+        "2025績效(%)",
+        "YTD績效(%)",
+        "大盤超額(%)",
+        "大盤超額2025(%)",
+        "大盤超額YTD(%)",
+        # 舊欄名保留精度設定，避免歷史快取/未遷移資料顯示退化。
+        "2025報酬(%)",
+        "YTD報酬(%)",
+        "贏輸台股大盤(%)",
+        "輸給台股大盤(%)",
+        "輸贏大盤2025(%)",
+        "2026YTD績效(%)",
+        "輸贏大盤2026YTD(%)",
+    )
+    for col in precision_cols:
+        if col in frame.columns:
+            cfg[col] = st.column_config.NumberColumn(col, format="%.2f")
     return cfg
 
 
@@ -4752,14 +4760,23 @@ def _style_tw_today_move_table(frame: pd.DataFrame):
         formatters["管理費(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
     if "ETF規模(億)" in work.columns:
         formatters["ETF規模(億)"] = lambda v: "—" if pd.isna(v) else f"{int(float(v))}"
-    if "2025績效(%)" in work.columns:
-        formatters["2025績效(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
-    if "輸贏大盤2025(%)" in work.columns:
-        formatters["輸贏大盤2025(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
-    if "2026YTD績效(%)" in work.columns:
-        formatters["2026YTD績效(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
-    if "輸贏大盤2026YTD(%)" in work.columns:
-        formatters["輸贏大盤2026YTD(%)"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    for col in (
+        "2025績效(%)",
+        "YTD績效(%)",
+        "大盤超額(%)",
+        "大盤超額2025(%)",
+        "大盤超額YTD(%)",
+        # 舊欄名相容。
+        "2025報酬(%)",
+        "YTD報酬(%)",
+        "贏輸台股大盤(%)",
+        "輸給台股大盤(%)",
+        "輸贏大盤2025(%)",
+        "2026YTD績效(%)",
+        "輸贏大盤2026YTD(%)",
+    ):
+        if col in work.columns:
+            formatters[col] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
     if formatters:
         styler = styler.format(formatters)
     return styler
@@ -4774,27 +4791,34 @@ def _decorate_tw_etf_top10_ytd_table(
     benchmark_code: str,
     end_used: str,
     compare_col_label: str = "2025績效(%)",
-    performance_col_label: str = "YTD報酬(%)",
+    performance_col_label: str = "YTD績效(%)",
+    excess_col_label: str = "大盤超額(%)",
     underperform_col_label: str | None = None,
 ) -> pd.DataFrame:
     etf_df = top10_df.copy()
     if "區間報酬(%)" in etf_df.columns and performance_col_label not in etf_df.columns:
         etf_df = etf_df.rename(columns={"區間報酬(%)": performance_col_label})
+    if (
+        performance_col_label == "YTD績效(%)"
+        and "YTD報酬(%)" in etf_df.columns
+        and "YTD績效(%)" not in etf_df.columns
+    ):
+        etf_df = etf_df.rename(columns={"YTD報酬(%)": "YTD績效(%)"})
     if performance_col_label not in etf_df.columns:
         etf_df[performance_col_label] = np.nan
 
     code_series = etf_df.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
     etf_df[compare_col_label] = code_series.map(compare_return_map)
     etf_df[compare_col_label] = _truncate_series(etf_df[compare_col_label], digits=2)
-    etf_df["贏輸台股大盤(%)"] = np.nan
+    etf_df[excess_col_label] = np.nan
     if market_return_pct is not None and math.isfinite(float(market_return_pct)):
-        etf_df["贏輸台股大盤(%)"] = _truncate_series(
+        etf_df[excess_col_label] = _truncate_series(
             pd.to_numeric(etf_df[performance_col_label], errors="coerce")
             - float(market_return_pct),
             digits=2,
         )
     underperform_label = str(underperform_col_label or "").strip()
-    if underperform_label:
+    if underperform_label and underperform_label != excess_col_label:
         etf_df[underperform_label] = np.nan
         if market_return_pct is not None and math.isfinite(float(market_return_pct)):
             underperform_series = float(market_return_pct) - pd.to_numeric(
@@ -4822,10 +4846,10 @@ def _decorate_tw_etf_top10_ytd_table(
             if market_return_pct is not None
             else np.nan
         ),
-        "贏輸台股大盤(%)": 0.0 if market_return_pct is not None else np.nan,
+        excess_col_label: 0.0 if market_return_pct is not None else np.nan,
         "績效終點日": str(end_used),
     }
-    if underperform_label:
+    if underperform_label and underperform_label != excess_col_label:
         benchmark_row[underperform_label] = 0.0 if market_return_pct is not None else np.nan
     table_df = pd.concat([pd.DataFrame([benchmark_row]), etf_df], ignore_index=True)
     table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
@@ -4842,9 +4866,9 @@ def _decorate_tw_etf_top10_ytd_table(
         "收盤",
         compare_col_label,
         performance_col_label,
-        "贏輸台股大盤(%)",
+        excess_col_label,
     ]
-    if underperform_label:
+    if underperform_label and underperform_label != excess_col_label:
         columns_order.append(underperform_label)
     return table_df[[col for col in columns_order if col in table_df.columns]]
 
@@ -4905,21 +4929,21 @@ def _build_tw_etf_all_types_performance_table(
         _load_tw_market_daily_return(ytd_end_used, force_sync=False)
     )
 
-    table_df = ytd_df.rename(columns={"區間報酬(%)": "2026YTD績效(%)"}).copy()
+    table_df = ytd_df.rename(columns={"區間報酬(%)": "YTD績效(%)"}).copy()
     code_series = table_df.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
     table_df["2025績效(%)"] = code_series.map(compare_map)
     table_df["2025績效(%)"] = _truncate_series(table_df["2025績效(%)"], digits=2)
-    table_df["2026YTD績效(%)"] = _truncate_series(table_df["2026YTD績效(%)"], digits=2)
-    table_df["輸贏大盤2025(%)"] = np.nan
-    table_df["輸贏大盤2026YTD(%)"] = np.nan
+    table_df["YTD績效(%)"] = _truncate_series(table_df["YTD績效(%)"], digits=2)
+    table_df["大盤超額2025(%)"] = np.nan
+    table_df["大盤超額YTD(%)"] = np.nan
     if market_2025_return is not None and math.isfinite(float(market_2025_return)):
-        table_df["輸贏大盤2025(%)"] = _truncate_series(
+        table_df["大盤超額2025(%)"] = _truncate_series(
             table_df["2025績效(%)"] - float(market_2025_return),
             digits=2,
         )
     if market_ytd_return is not None and math.isfinite(float(market_ytd_return)):
-        table_df["輸贏大盤2026YTD(%)"] = _truncate_series(
-            table_df["2026YTD績效(%)"] - float(market_ytd_return),
+        table_df["大盤超額YTD(%)"] = _truncate_series(
+            table_df["YTD績效(%)"] - float(market_ytd_return),
             digits=2,
         )
 
@@ -4931,7 +4955,7 @@ def _build_tw_etf_all_types_performance_table(
     )
     table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
     table_df = table_df.sort_values(
-        ["類型", "2026YTD績效(%)"], ascending=[True, False], na_position="last"
+        ["類型", "YTD績效(%)"], ascending=[True, False], na_position="last"
     ).reset_index(drop=True)
     table_df["編號"] = range(1, len(table_df) + 1)
     columns_order = [
@@ -4942,9 +4966,9 @@ def _build_tw_etf_all_types_performance_table(
         "ETF規模(億)",
         "類型",
         "2025績效(%)",
-        "輸贏大盤2025(%)",
-        "2026YTD績效(%)",
-        "輸贏大盤2026YTD(%)",
+        "大盤超額2025(%)",
+        "YTD績效(%)",
+        "大盤超額YTD(%)",
         "開盤",
         "收盤",
         "今日漲幅",
@@ -5651,11 +5675,11 @@ def _build_two_etf_aggressive_picks(
         _safe_float(selected_row.get("與核心重疊度(%)")) if isinstance(selected_row, dict) else None
     )
     if fallback_mode == "strict_overlap":
-        pick_2_reason = f"在重疊門檻 <= {overlap_cap_value:.1f}% 下，YTD報酬最高。"
+        pick_2_reason = f"在重疊門檻 <= {overlap_cap_value:.1f}% 下，YTD績效最高。"
     elif fallback_mode == "relaxed_overlap_20":
-        pick_2_reason = "原始重疊門檻無候選，放寬到 <= 20% 後選 YTD報酬最高。"
+        pick_2_reason = "原始重疊門檻無候選，放寬到 <= 20% 後選 YTD績效最高。"
     else:
-        pick_2_reason = "重疊門檻放寬後仍無候選，回退為可投資候選中 YTD報酬最高。"
+        pick_2_reason = "重疊門檻放寬後仍無候選，回退為可投資候選中 YTD績效最高。"
 
     recommendation_rows = [
         {
@@ -5896,14 +5920,14 @@ def _render_tw_etf_all_types_view():
         if market_2025_return is not None and market_2025_symbol:
             st.caption(f"2025 台股大盤：{market_2025_symbol} 區間報酬 {market_2025_return:.2f}%")
         else:
-            st.caption("2025 台股大盤：目前無法取得，`輸贏大盤2025(%)` 先顯示空白。")
+            st.caption("2025 台股大盤：目前無法取得，`大盤超額2025(%)` 先顯示空白。")
 
         market_ytd_return = _safe_float(meta.get("market_ytd_return"))
         market_ytd_symbol = str(meta.get("market_ytd_symbol", "")).strip()
         if market_ytd_return is not None and market_ytd_symbol:
             st.caption(f"2026 YTD 台股大盤：{market_ytd_symbol} 區間報酬 {market_ytd_return:.2f}%")
         else:
-            st.caption("2026 YTD 台股大盤：目前無法取得，`輸贏大盤2026YTD(%)` 先顯示空白。")
+            st.caption("2026 YTD 台股大盤：目前無法取得，`大盤超額YTD(%)` 先顯示空白。")
         market_daily_return = _safe_float(meta.get("market_daily_return"))
         market_daily_symbol = str(meta.get("market_daily_symbol", "")).strip()
         daily_prev_used = str(meta.get("daily_prev_used", "")).strip()
@@ -5926,7 +5950,7 @@ def _render_tw_etf_all_types_view():
                 "大盤資料同步有部分錯誤，已盡量使用本地可用資料", issues, preview_limit=2
             )
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已納入所有 ETF 類型。")
-        st.caption("排序規則：先依 ETF 類型，再依 2026 YTD 績效由高到低。")
+        st.caption("排序規則：先依 ETF 類型，再依 `YTD績效(%)` 由高到低。")
 
         today_trade_token = _resolve_latest_tw_trade_day_token()
         today_trade_date = _resolve_latest_tw_trade_date_iso(today_trade_token)
@@ -6111,8 +6135,8 @@ def _render_bottom20_etf_2025_view():
         compare_start_yyyymmdd="20240101",
         compare_end_yyyymmdd="20241231",
         compare_col_label="2024績效(%)",
-        performance_col_label="2025報酬(%)",
-        underperform_col_label="輸給台股大盤(%)",
+        performance_col_label="2025績效(%)",
+        underperform_col_label=None,
         count_label="後20檔數",
         ratio_label="後20占比",
         benchmark_period_note="同 2025 全年區間",
@@ -6137,7 +6161,7 @@ def _render_top10_etf_2026_ytd_view(
     compare_start_yyyymmdd: str = "20250101",
     compare_end_yyyymmdd: str = "20251231",
     compare_col_label: str = "2025績效(%)",
-    performance_col_label: str = "YTD報酬(%)",
+    performance_col_label: str = "YTD績效(%)",
     underperform_col_label: str | None = None,
     count_label: str = "前10檔數",
     ratio_label: str = "前10占比",
@@ -6149,6 +6173,7 @@ def _render_top10_etf_2026_ytd_view(
 ):
     store = _history_store()
     etf_type_filter_text = str(etf_type_filter or "").strip()
+    excess_col_label = "大盤超額(%)"
     payload_key = f"{page_key_prefix}_compare_payload"
     strategy_hover_code = f"{page_key_prefix.upper()}_EW"
     display_n = max(1, int(top_n))
@@ -6211,13 +6236,12 @@ def _render_top10_etf_2026_ytd_view(
 
         if rank_by_underperform:
             if market_return_pct is not None and math.isfinite(float(market_return_pct)):
-                underperform_name = str(underperform_col_label or "輸給台股大盤(%)")
-                top10_etf_df[underperform_name] = (
-                    float(market_return_pct)
-                    - pd.to_numeric(top10_etf_df[performance_col_label], errors="coerce")
+                top10_etf_df[excess_col_label] = (
+                    pd.to_numeric(top10_etf_df[performance_col_label], errors="coerce")
+                    - float(market_return_pct)
                 ).round(2)
                 top10_etf_df = (
-                    top10_etf_df.sort_values(underperform_name, ascending=False, na_position="last")
+                    top10_etf_df.sort_values(excess_col_label, ascending=True, na_position="last")
                     .head(display_n)
                     .copy()
                 )
@@ -6296,16 +6320,13 @@ def _render_top10_etf_2026_ytd_view(
                         if market_return_pct is not None and math.isfinite(
                             float(market_return_pct)
                         ):
-                            underperform_name = str(underperform_col_label or "輸給台股大盤(%)")
-                            prev_rank_df[underperform_name] = (
-                                float(market_return_pct)
-                                - pd.to_numeric(
-                                    prev_rank_df[performance_col_label], errors="coerce"
-                                )
+                            prev_rank_df[excess_col_label] = (
+                                pd.to_numeric(prev_rank_df[performance_col_label], errors="coerce")
+                                - float(market_return_pct)
                             ).round(2)
                             prev_rank_df = (
                                 prev_rank_df.sort_values(
-                                    underperform_name, ascending=False, na_position="last"
+                                    excess_col_label, ascending=True, na_position="last"
                                 )
                                 .head(display_n)
                                 .copy()
@@ -6345,6 +6366,7 @@ def _render_top10_etf_2026_ytd_view(
             end_used=end_used,
             compare_col_label=compare_col_label,
             performance_col_label=performance_col_label,
+            excess_col_label=excess_col_label,
             underperform_col_label=underperform_col_label if rank_by_underperform else None,
         )
         table_df = _with_tw_today_fields(
@@ -6390,7 +6412,7 @@ def _render_top10_etf_2026_ytd_view(
                 f"大盤對照：{market_symbol_used} 區間報酬 {market_return_pct:.2f}%（{benchmark_period_note}）"
             )
         else:
-            st.caption("大盤對照：目前無法取得，`贏輸台股大盤(%)` 先顯示為空白。")
+            st.caption("大盤對照：目前無法取得，`大盤超額(%)` 先顯示為空白。")
         if (
             market_daily_return is not None
             and market_daily_symbol
@@ -6422,13 +6444,13 @@ def _render_top10_etf_2026_ytd_view(
             st.caption("區間處理：已排除區間內含分割事件的標的（避免價格比較失真）。")
         if rank_by_underperform:
             st.caption(
-                f"排行規則：以 `贏輸台股大盤(%)` 最低（輸給大盤最多）排序，取倒數 {display_n} 名。"
+                f"排行規則：以 `大盤超額(%)` 最低（輸給大盤最多）排序，取倒數 {display_n} 名。"
             )
         st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
         st.caption(
             f"`{compare_col_label}` 採對照區間內首個可交易日計算；若空白代表該檔對照區間無可用日K。"
         )
-        st.caption(f"報酬計算：`贏輸台股大盤(%) = {performance_col_label} - 大盤報酬`。")
+        st.caption(f"報酬計算：`大盤超額(%) = {performance_col_label} - 大盤報酬`。")
         table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(
             table_df,
             src=f"{page_key_prefix}_rank_table",
@@ -6967,11 +6989,11 @@ def _render_two_etf_pick_view():
             f"｜候選池=前10 ETF（共 {top10_count} 檔）"
         )
         if fallback_mode == "strict_overlap":
-            st.caption("第2檔選擇規則：在原始重疊門檻內，選 YTD 報酬最高的候選。")
+            st.caption("第2檔選擇規則：在原始重疊門檻內，選 YTD 績效最高的候選。")
         elif fallback_mode == "relaxed_overlap_20":
             st.caption("第2檔選擇規則：原始門檻無候選，已放寬到 20% 重疊門檻後選取。")
         else:
-            st.caption("第2檔選擇規則：放寬門檻仍無候選，已回退為可投資候選中 YTD 最高。")
+            st.caption("第2檔選擇規則：放寬門檻仍無候選，已回退為可投資候選中 YTD 績效最高。")
 
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
@@ -6994,6 +7016,9 @@ def _render_two_etf_pick_view():
         recommendation_df = _attach_tw_etf_management_fee_column(
             recommendation_df, code_col_candidates=("ETF代碼",)
         )
+        recommendation_view = recommendation_df.rename(
+            columns={"YTD報酬(%)": "YTD績效(%)"}
+        )
         with st.container(border=True):
             _render_card_section_header("推薦結果", "核心檔重代表性，衛星檔重低重疊動能。")
             show_cols = [
@@ -7005,19 +7030,20 @@ def _render_two_etf_pick_view():
                     "管理費(%)",
                     "ETF規模(億)",
                     "ETF類型",
-                    "YTD報酬(%)",
+                    "YTD績效(%)",
                     "與核心重疊度(%)",
                     "說明",
                 ]
-                if col in recommendation_df.columns
+                if col in recommendation_view.columns
             ]
-            st.dataframe(recommendation_df[show_cols], width="stretch", hide_index=True)
+            st.dataframe(recommendation_view[show_cols], width="stretch", hide_index=True)
 
     candidate_df = payload.get("candidate_df")
     if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
         candidate_df = _attach_tw_etf_management_fee_column(
             candidate_df, code_col_candidates=("ETF代碼",)
         )
+        candidate_view = candidate_df.rename(columns={"YTD報酬(%)": "YTD績效(%)"})
         with st.container(border=True):
             _render_card_section_header(
                 "候選比較", "顯示前10候選的報酬、重疊度與是否納入本次推薦。"
@@ -7031,16 +7057,16 @@ def _render_two_etf_pick_view():
                     "管理費(%)",
                     "ETF規模(億)",
                     "ETF類型",
-                    "YTD報酬(%)",
+                    "YTD績效(%)",
                     "與核心重疊度(%)",
                     "成分股數",
                     "是否海外成分",
                     "可納入候選",
                     "排除原因",
                 ]
-                if col in candidate_df.columns
+                if col in candidate_view.columns
             ]
-            st.dataframe(candidate_df[show_cols], width="stretch", hide_index=True)
+            st.dataframe(candidate_view[show_cols], width="stretch", hide_index=True)
             st.caption("註：此卡為選股規則透明化，非未來報酬保證；請搭配資金配置與風險控管。")
 
 
@@ -7077,6 +7103,8 @@ def _render_active_etf_2026_ytd_view():
             etf_df, start_used, end_used = _build_tw_active_etf_ytd_between(
                 start_yyyymmdd=start_target, end_yyyymmdd=end_target
             )
+            if "YTD報酬(%)" in etf_df.columns and "YTD績效(%)" not in etf_df.columns:
+                etf_df = etf_df.rename(columns={"YTD報酬(%)": "YTD績效(%)"}).copy()
             if etf_df.empty:
                 st.warning("目前沒有可顯示的台股主動式 ETF YTD 資料。")
                 return
@@ -7128,10 +7156,10 @@ def _render_active_etf_2026_ytd_view():
 
         etf_df["2025績效(%)"] = etf_df["代碼"].astype(str).str.strip().str.upper().map(y2025_map)
         etf_df["2025績效(%)"] = _truncate_series(etf_df["2025績效(%)"], digits=2)
-        etf_df["贏輸台股大盤(%)"] = np.nan
+        etf_df["大盤超額(%)"] = np.nan
         if market_return_pct is not None and math.isfinite(float(market_return_pct)):
-            etf_df["贏輸台股大盤(%)"] = (
-                pd.to_numeric(etf_df["YTD報酬(%)"], errors="coerce") - float(market_return_pct)
+            etf_df["大盤超額(%)"] = (
+                pd.to_numeric(etf_df["YTD績效(%)"], errors="coerce") - float(market_return_pct)
             ).round(2)
 
         benchmark_code = market_symbol_used or market_2025_symbol_used or "^TWII"
@@ -7148,10 +7176,10 @@ def _render_active_etf_2026_ytd_view():
                 if market_2025_return_pct is not None
                 else np.nan
             ),
-            "YTD報酬(%)": round(float(market_return_pct), 2)
+            "YTD績效(%)": round(float(market_return_pct), 2)
             if market_return_pct is not None
             else np.nan,
-            "贏輸台股大盤(%)": 0.0 if market_return_pct is not None else np.nan,
+            "大盤超額(%)": 0.0 if market_return_pct is not None else np.nan,
         }
         table_df = pd.concat([pd.DataFrame([benchmark_row]), etf_df], ignore_index=True)
         daily_change_map, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
@@ -7188,15 +7216,15 @@ def _render_active_etf_2026_ytd_view():
             "今日漲幅",
             "今日贏大盤%",
             "2025績效(%)",
-            "YTD報酬(%)",
-            "贏輸台股大盤(%)",
+            "YTD績效(%)",
+            "大盤超額(%)",
         ]
         table_df = table_df[[col for col in columns_order if col in table_df.columns]]
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("樣本數", str(len(etf_df)))
-        m2.metric("正報酬檔數", str(int((etf_df["YTD報酬(%)"] > 0).sum())))
-        m3.metric("負報酬檔數", str(int((etf_df["YTD報酬(%)"] < 0).sum())))
+        m2.metric("正報酬檔數", str(int((etf_df["YTD績效(%)"] > 0).sum())))
+        m3.metric("負報酬檔數", str(int((etf_df["YTD績效(%)"] < 0).sum())))
         m4.metric("今日上漲檔數", str(int((etf_today_df["今日漲幅"] > 0).sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
@@ -7211,7 +7239,7 @@ def _render_active_etf_2026_ytd_view():
                 f"大盤對照：{market_symbol_used} 區間報酬 {market_return_pct:.2f}%（同 2026 YTD 區間）"
             )
         else:
-            st.caption("大盤對照：目前無法取得，`贏輸台股大盤(%)` 先顯示為空白。")
+            st.caption("大盤對照：目前無法取得，`大盤超額(%)` 先顯示為空白。")
         if (
             market_daily_return is not None
             and market_daily_symbol
@@ -7232,7 +7260,7 @@ def _render_active_etf_2026_ytd_view():
             "`2025績效(%)` 採各檔在 2025 區間內首個可交易日計算；若空白代表該檔 2025 區間無可用日K。"
         )
         st.caption(
-            "報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`贏輸台股大盤(%) = YTD報酬 - 大盤報酬`。"
+            "報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`大盤超額(%) = YTD績效 - 大盤報酬`。"
         )
         st.dataframe(table_df, width="stretch", hide_index=True)
 
@@ -7478,7 +7506,7 @@ def _render_active_etf_2026_ytd_view():
     _render_active_etf_benchmark_card(
         card_title="Benchmark 對照卡",
         period_caption=(
-            f"差異說明：上方表格的 `YTD報酬(%)` 採各檔在區間內首個可交易日起算；"
+            f"差異說明：上方表格的 `YTD績效(%)` 採各檔在區間內首個可交易日起算；"
             f"本對照卡曲線與下方 `Total Return %` 會以共同比較區間 `{start_used} -> {end_used}` 對齊，"
             "因此同一檔數值可能略有差異。"
         ),
@@ -8334,9 +8362,9 @@ def _render_tutorial_view():
     st.markdown("### 6) 指標怎麼讀（Top10/主動式/Benchmark）")
     metric_df = pd.DataFrame(
         [
-            {"欄位": "YTD報酬(%)", "意思": "今年截至目前區間報酬"},
+            {"欄位": "YTD績效(%)", "意思": "今年截至目前區間報酬"},
             {"欄位": "2025績效(%)", "意思": "2025 年區間報酬（各檔以區間內第一個可交易日起算）"},
-            {"欄位": "贏輸台股大盤(%)", "意思": "ETF 報酬 - 大盤報酬；正值=贏大盤"},
+            {"欄位": "大盤超額(%)", "意思": "ETF 績效 - 大盤報酬；正值=贏大盤"},
             {"欄位": "Strategy Equity（等權）", "意思": "把多檔 ETF 等權持有後的資產曲線"},
             {"欄位": "Benchmark Equity", "意思": "同初始資產下，基準標的的資產曲線"},
         ]

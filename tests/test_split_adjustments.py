@@ -73,6 +73,82 @@ class SplitAdjustmentTests(unittest.TestCase):
             float(out.loc[pd.Timestamp("2025-11-26", tz="UTC"), "close"]), 35.04, places=4
         )
 
+    def test_known_reverse_splits_adjust_inverse_and_leveraged_etfs(self):
+        cases = [
+            ("00676R", "2025-02-19", 6.0),
+            ("00673R", "2025-10-22", 4.0),
+            ("00706L", "2025-10-22", 4.0),
+            ("00715L", "2025-12-10", 2.0),
+        ]
+        for symbol, split_date, ratio in cases:
+            with self.subTest(symbol=symbol):
+                prev_date = (pd.Timestamp(split_date, tz="UTC") - pd.Timedelta(days=1)).date()
+                next_date = (pd.Timestamp(split_date, tz="UTC") + pd.Timedelta(days=1)).date()
+                idx = pd.to_datetime(
+                    [prev_date.isoformat(), split_date, next_date.isoformat()],
+                    utc=True,
+                )
+                bars = pd.DataFrame(
+                    {
+                        "open": [2.0, 12.0, 12.2],
+                        "high": [2.1, 12.2, 12.4],
+                        "low": [1.9, 11.8, 12.0],
+                        "close": [2.0, 12.0, 12.2],
+                        "volume": [1000.0, 5000.0, 4800.0],
+                    },
+                    index=idx,
+                )
+                out, events = apply_split_adjustment(
+                    bars,
+                    symbol=symbol,
+                    market="TW",
+                    use_known=True,
+                    use_auto_detect=False,
+                )
+                self.assertEqual(len(events), 1)
+                self.assertAlmostEqual(events[0].ratio, ratio, places=8)
+                self.assertAlmostEqual(
+                    float(out.loc[idx[0], "close"]),
+                    float(bars.loc[idx[0], "close"]) * ratio,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    float(out.loc[idx[1], "close"]),
+                    float(bars.loc[idx[1], "close"]),
+                    places=6,
+                )
+
+    def test_known_split_adjusts_00663l_history(self):
+        idx = pd.to_datetime(
+            [
+                "2025-06-10",
+                "2025-06-11",
+                "2025-06-12",
+            ],
+            utc=True,
+        )
+        bars = pd.DataFrame(
+            {
+                "open": [240.0, 40.0, 41.0],
+                "high": [242.0, 41.0, 42.0],
+                "low": [238.0, 39.0, 40.0],
+                "close": [239.4, 40.1, 41.2],
+                "volume": [1000.0, 6200.0, 6000.0],
+            },
+            index=idx,
+        )
+        out, events = apply_split_adjustment(
+            bars, symbol="00663L", market="TW", use_known=True, use_auto_detect=False
+        )
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].ratio, 1.0 / 6.0, places=8)
+        self.assertAlmostEqual(
+            float(out.loc[pd.Timestamp("2025-06-10", tz="UTC"), "close"]), 239.4 / 6.0, places=4
+        )
+        self.assertAlmostEqual(
+            float(out.loc[pd.Timestamp("2025-06-11", tz="UTC"), "close"]), 40.1, places=4
+        )
+
     def test_auto_detect_split_event(self):
         idx = pd.date_range("2025-01-01", periods=5, freq="B", tz="UTC")
         bars = pd.DataFrame(

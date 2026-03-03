@@ -50,6 +50,8 @@ from app import (
     _render_heatmap_constituent_intro_sections,
     _resolve_tw_symbol_names,
     _snapshot_fallback_depth,
+    _style_tw_today_move_table,
+    _tw_etf_precision_column_config,
 )
 from ui.helpers import (
     build_backtest_drill_url,
@@ -1474,7 +1476,6 @@ class ActiveEtfPageTests(unittest.TestCase):
             market_compare_return_pct=9.0,
             benchmark_code="^TWII",
             end_used="20260214",
-            underperform_col_label="輸給台股大盤(%)",
         )
         self.assertEqual(len(out), 3)
         self.assertEqual(str(out.iloc[0]["ETF"]), "台股大盤")
@@ -1483,12 +1484,12 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(str(out.iloc[2]["排名"]), "2  (↓1)")
         self.assertNotIn("前次排名", out.columns)
         self.assertNotIn("排名異動", out.columns)
-        self.assertEqual(float(out.iloc[0]["YTD報酬(%)"]), 5.0)
-        self.assertEqual(float(out.iloc[1]["贏輸台股大盤(%)"]), 7.0)
-        self.assertEqual(float(out.iloc[1]["輸給台股大盤(%)"]), 0.0)
-        self.assertEqual(float(out.iloc[2]["輸給台股大盤(%)"]), 0.0)
+        self.assertEqual(float(out.iloc[0]["YTD績效(%)"]), 5.0)
+        self.assertEqual(float(out.iloc[1]["大盤超額(%)"]), 7.0)
+        self.assertEqual(float(out.iloc[2]["大盤超額(%)"]), 3.0)
         self.assertIn("2025績效(%)", out.columns)
-        self.assertIn("YTD報酬(%)", out.columns)
+        self.assertIn("YTD績效(%)", out.columns)
+        self.assertIn("大盤超額(%)", out.columns)
 
     def test_build_tw_etf_all_types_performance_table(self):
         _build_tw_etf_all_types_performance_table.clear()
@@ -1563,20 +1564,20 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("編號", out.columns)
         self.assertNotIn("排名", out.columns)
         self.assertIn("2025績效(%)", out.columns)
-        self.assertIn("2026YTD績效(%)", out.columns)
-        self.assertIn("輸贏大盤2025(%)", out.columns)
-        self.assertIn("輸贏大盤2026YTD(%)", out.columns)
+        self.assertIn("YTD績效(%)", out.columns)
+        self.assertIn("大盤超額2025(%)", out.columns)
+        self.assertIn("大盤超額YTD(%)", out.columns)
         self.assertIn("管理費(%)", out.columns)
         self.assertIn("開盤", out.columns)
         self.assertIn("收盤", out.columns)
         self.assertIn("今日漲幅", out.columns)
         self.assertIn("今日贏大盤%", out.columns)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "2025績效(%)"].iloc[0]), 30.45)
-        self.assertEqual(float(out.loc[out["代碼"] == "00935", "2026YTD績效(%)"].iloc[0]), 15.67)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "YTD績效(%)"].iloc[0]), 15.67)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "開盤"].iloc[0]), 113.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 58.0)
-        self.assertEqual(float(out.loc[out["代碼"] == "0050", "輸贏大盤2025(%)"].iloc[0]), 12.33)
-        self.assertEqual(float(out.loc[out["代碼"] == "00935", "輸贏大盤2026YTD(%)"].iloc[0]), 5.11)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "大盤超額2025(%)"].iloc[0]), 12.33)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "大盤超額YTD(%)"].iloc[0]), 5.11)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "今日漲幅"].iloc[0]), 4.2)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "今日贏大盤%"].iloc[0]), 0.7)
         self.assertEqual(str(meta.get("market_2025_symbol", "")), "0050")
@@ -1585,6 +1586,42 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(int(top10_build_mock.call_count), 2)
         for call in top10_build_mock.call_args_list:
             self.assertTrue(bool(call.kwargs.get("include_all_etf", False)))
+
+    def test_tw_etf_precision_column_config_supports_unified_columns(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "2025績效(%)": 11.111,
+                    "YTD績效(%)": 22.222,
+                    "大盤超額(%)": 3.333,
+                    "大盤超額2025(%)": 4.444,
+                    "大盤超額YTD(%)": 5.555,
+                }
+            ]
+        )
+        cfg = _tw_etf_precision_column_config(frame)
+        self.assertIn("2025績效(%)", cfg)
+        self.assertIn("YTD績效(%)", cfg)
+        self.assertIn("大盤超額(%)", cfg)
+        self.assertIn("大盤超額2025(%)", cfg)
+        self.assertIn("大盤超額YTD(%)", cfg)
+
+    def test_style_tw_today_move_table_formats_unified_columns_to_two_decimals(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "YTD績效(%)": 12.349,
+                    "大盤超額(%)": -0.9876,
+                    "大盤超額2025(%)": 3.4567,
+                    "大盤超額YTD(%)": 7.8912,
+                }
+            ]
+        )
+        html = _style_tw_today_move_table(frame).to_html()
+        self.assertIn("12.35", html)
+        self.assertIn("-0.99", html)
+        self.assertIn("3.46", html)
+        self.assertIn("7.89", html)
 
 
 if __name__ == "__main__":
