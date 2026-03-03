@@ -9,7 +9,7 @@ def build_backtest_drill_url(symbol: str, market: str) -> str:
     market_text = str(market).strip().upper()
     label = symbol_text
     if market_text in {"TW", "OTC"} and "." not in symbol_text and not symbol_text.startswith("^"):
-        label = f"{symbol_text}.tw"
+        label = f"{symbol_text}.TW"
     return "?" + urlencode(
         {
             "bt_symbol": symbol_text,

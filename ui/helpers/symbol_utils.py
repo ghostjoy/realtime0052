@@ -111,4 +111,4 @@ def format_tw_symbol_for_display(value: object, market_hint: object = "") -> str
     market = normalize_market_tag_for_drill(market_hint) or default_market
     if market not in {"TW", "OTC"} and not looks_like_tw_symbol(symbol):
         return raw
-    return f"{symbol}.tw"
+    return f"{symbol}.TW"

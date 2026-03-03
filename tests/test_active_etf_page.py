@@ -181,7 +181,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("hm_src=all_types_table", url)
 
     def test_format_tw_symbol_for_display(self):
-        self.assertEqual(format_tw_symbol_for_display("0050 元大台灣50", "TW"), "0050.tw")
+        self.assertEqual(format_tw_symbol_for_display("0050 元大台灣50", "TW"), "0050.TW")
         self.assertEqual(format_tw_symbol_for_display("AAPL", "US"), "AAPL")
         self.assertEqual(format_tw_symbol_for_display("^TWII", "TW"), "^TWII")
 
@@ -189,7 +189,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         tw_url = build_backtest_drill_url("0050", "TW")
         us_url = build_backtest_drill_url("AAPL", "US")
         self.assertIn("bt_symbol=0050", tw_url)
-        self.assertIn("bt_label=0050.tw", tw_url)
+        self.assertIn("bt_label=0050.TW", tw_url)
         self.assertIn("bt_symbol=AAPL", us_url)
         self.assertIn("bt_label=AAPL", us_url)
 

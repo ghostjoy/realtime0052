@@ -102,6 +102,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated tests/test_active_etf_page.py, ui/helpers/symbol_utils.py, ui/helpers/url_utils.py [id:c4ada2f4d6]
 - Auto: updated app.py, services/provider_gateway.py, services/provider_policies.py, storage/duck_store.py [id:e40f68eb05]
 - Auto: updated app.py, market_data_types.py, services/market_data_service.py, services/provider_gateway.py, services/provider_policies.py, storage/duck_store.py, ... (+5) [id:0d8d66b489]
 - Auto: updated app.py, ui/pages/backtest.py [id:16f03edeea]
