@@ -6,7 +6,9 @@ import logging
 import math
 import re
 import sqlite3
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -3099,91 +3101,255 @@ def _render_page_cards_nav() -> str:
     return render_page_cards_nav(cards=cards, default_active_page=DEFAULT_ACTIVE_PAGE)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+TWSE_SNAPSHOT_DATASET_KEY = "twse_mi_index_allbut0999"
+_TWSE_BG_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="twse-bg")
+_TWSE_BG_LOCK = threading.Lock()
+_TWSE_BG_INFLIGHT: set[str] = set()
+
+
+def _twse_snapshot_from_payload(payload: object) -> pd.DataFrame:
+    if isinstance(payload, dict):
+        rows = payload.get("rows")
+    else:
+        rows = payload
+    if not isinstance(rows, list):
+        return pd.DataFrame(columns=["code", "name", "open", "close"])
+    out_rows: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code", "")).strip().upper()
+        name = str(row.get("name", "")).strip()
+        close = pd.to_numeric(row.get("close"), errors="coerce")
+        open_ = pd.to_numeric(row.get("open"), errors="coerce")
+        if not code or pd.isna(close):
+            continue
+        out_rows.append(
+            {
+                "code": code,
+                "name": name,
+                "open": None if pd.isna(open_) else float(open_),
+                "close": float(close),
+            }
+        )
+    if not out_rows:
+        return pd.DataFrame(columns=["code", "name", "open", "close"])
+    arr = np.asarray(
+        [
+            (
+                str(item["code"]),
+                str(item["name"]),
+                np.nan if item["open"] is None else float(item["open"]),
+                float(item["close"]),
+            )
+            for item in out_rows
+        ],
+        dtype=[("code", "U16"), ("name", "U64"), ("open", "f8"), ("close", "f8")],
+    )
+    frame = pd.DataFrame.from_records(arr)
+    frame["open"] = frame["open"].where(np.isfinite(frame["open"]), None)
+    return frame[["code", "name", "open", "close"]]
+
+
+def _persist_twse_snapshot(
+    *,
+    date_token: str,
+    frame: pd.DataFrame,
+    source: str,
+    stale: bool,
+) -> None:
+    if frame is None or frame.empty:
+        return
+    store = _history_store()
+    writer = getattr(store, "save_market_snapshot", None)
+    if not callable(writer):
+        return
+    rows = frame[["code", "name", "open", "close"]].to_dict(orient="records")
+    now_utc = datetime.now(tz=timezone.utc)
+    try:
+        asof_dt = datetime.strptime(str(date_token), "%Y%m%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        asof_dt = now_utc
+    freshness = max(0, int((now_utc - asof_dt).total_seconds()))
+    try:
+        writer(
+            dataset_key=TWSE_SNAPSHOT_DATASET_KEY,
+            market="TW",
+            symbol="ALL",
+            interval="1d",
+            source=source,
+            asof=asof_dt,
+            payload={"rows": rows, "date": date_token},
+            freshness_sec=freshness,
+            quality_score=1.0 if not stale else 0.7,
+            stale=bool(stale),
+            raw_json={"dataset": TWSE_SNAPSHOT_DATASET_KEY, "rows": len(rows), "date": date_token},
+        )
+    except Exception:
+        return
+
+
+def _load_cached_twse_snapshot(
+    *,
+    target_yyyymmdd: str,
+    lookback_days: int,
+) -> tuple[str, pd.DataFrame] | None:
+    store = _history_store()
+    loader = getattr(store, "load_market_snapshot_window", None)
+    if not callable(loader):
+        return None
+    try:
+        end_dt = datetime.strptime(target_yyyymmdd, "%Y%m%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+    start_dt = end_dt - pd.Timedelta(days=max(0, int(lookback_days) - 1))
+    try:
+        rows = loader(
+            dataset_key=TWSE_SNAPSHOT_DATASET_KEY,
+            market="TW",
+            symbol="ALL",
+            interval="1d",
+            asof_start=start_dt,
+            asof_end=end_dt,
+            limit=max(1, int(lookback_days)),
+        )
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        asof = row.get("asof")
+        if not isinstance(asof, datetime):
+            continue
+        token = asof.astimezone(timezone.utc).strftime("%Y%m%d")
+        frame = _twse_snapshot_from_payload(row.get("payload"))
+        if not frame.empty:
+            return token, frame
+    return None
+
+
+def _fetch_twse_snapshot_network_single(date_token: str) -> tuple[str, pd.DataFrame] | None:
+    import requests
+
+    try:
+        resp = requests.get(
+            "https://www.twse.com.tw/exchangeReport/MI_INDEX",
+            params={"response": "json", "date": date_token, "type": "ALLBUT0999"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+
+    if str(payload.get("stat", "")).strip().upper() != "OK":
+        return None
+    tables = payload.get("tables", [])
+    if not isinstance(tables, list):
+        return None
+    target_fields = {"證券代號", "證券名稱", "收盤價"}
+    selected: dict | None = None
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        fields = table.get("fields", [])
+        if not isinstance(fields, list):
+            continue
+        if target_fields.issubset(set(fields)):
+            selected = table
+            break
+    if selected is None:
+        return None
+
+    fields = [str(x) for x in selected.get("fields", [])]
+    rows = selected.get("data", [])
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    idx_code = fields.index("證券代號")
+    idx_name = fields.index("證券名稱")
+    idx_close = fields.index("收盤價")
+    idx_open = fields.index("開盤價") if "開盤價" in fields else -1
+    out_rows: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        if max(idx_code, idx_name, idx_close) >= len(row):
+            continue
+        code = str(row[idx_code] or "").strip().upper()
+        name = str(row[idx_name] or "").strip()
+        close_raw = str(row[idx_close] or "").strip().replace(",", "")
+        if not code or close_raw in {"", "--", "-"}:
+            continue
+        try:
+            close = float(close_raw)
+        except Exception:
+            continue
+        open_price: float | None = None
+        if idx_open >= 0 and idx_open < len(row):
+            open_raw = str(row[idx_open] or "").strip().replace(",", "")
+            if open_raw not in {"", "--", "-"}:
+                try:
+                    open_candidate = float(open_raw)
+                    if math.isfinite(open_candidate) and open_candidate > 0:
+                        open_price = float(open_candidate)
+                except Exception:
+                    pass
+        out_rows.append({"code": code, "name": name, "open": open_price, "close": close})
+    if not out_rows:
+        return None
+    frame = pd.DataFrame(out_rows)
+    _persist_twse_snapshot(date_token=date_token, frame=frame, source="twse_mi_index", stale=False)
+    return date_token, frame
+
+
+def _queue_twse_snapshot_refresh(target_yyyymmdd: str) -> None:
+    token = str(target_yyyymmdd or "").strip()
+    if not re.fullmatch(r"\d{8}", token):
+        return
+    with _TWSE_BG_LOCK:
+        if token in _TWSE_BG_INFLIGHT:
+            return
+        _TWSE_BG_INFLIGHT.add(token)
+
+    def _worker() -> None:
+        try:
+            _fetch_twse_snapshot_network_single(token)
+        finally:
+            with _TWSE_BG_LOCK:
+                _TWSE_BG_INFLIGHT.discard(token)
+
+    try:
+        _TWSE_BG_EXECUTOR.submit(_worker)
+    except Exception:
+        with _TWSE_BG_LOCK:
+            _TWSE_BG_INFLIGHT.discard(token)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
 def _fetch_twse_snapshot_with_fallback(
     target_yyyymmdd: str, lookback_days: int = 14
 ) -> tuple[str, pd.DataFrame]:
-    import requests
-
     target_dt = datetime.strptime(target_yyyymmdd, "%Y%m%d").date()
+    cached = _load_cached_twse_snapshot(
+        target_yyyymmdd=target_yyyymmdd,
+        lookback_days=lookback_days,
+    )
+    if cached is not None:
+        _queue_twse_snapshot_refresh(target_yyyymmdd)
+        return cached
+
     errors: list[str] = []
     for offset in range(max(1, int(lookback_days))):
         query_dt = target_dt - pd.Timedelta(days=offset)
         date_token = query_dt.strftime("%Y%m%d")
-        try:
-            resp = requests.get(
-                "https://www.twse.com.tw/exchangeReport/MI_INDEX",
-                params={"response": "json", "date": date_token, "type": "ALLBUT0999"},
-                timeout=18,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-        except Exception as exc:
-            errors.append(f"{date_token}:{exc}")
+        result = _fetch_twse_snapshot_network_single(date_token)
+        if result is None:
+            errors.append(f"{date_token}:fetch_failed")
             continue
-
-        if str(payload.get("stat", "")).strip().upper() != "OK":
-            errors.append(f"{date_token}:{payload.get('stat', 'not ok')}")
-            continue
-
-        tables = payload.get("tables", [])
-        if not isinstance(tables, list):
-            errors.append(f"{date_token}:tables missing")
-            continue
-        target_fields = {"證券代號", "證券名稱", "收盤價"}
-        selected: dict | None = None
-        for table in tables:
-            if not isinstance(table, dict):
-                continue
-            fields = table.get("fields", [])
-            if not isinstance(fields, list):
-                continue
-            if target_fields.issubset(set(fields)):
-                selected = table
-                break
-        if selected is None:
-            errors.append(f"{date_token}:price table missing")
-            continue
-
-        fields = [str(x) for x in selected.get("fields", [])]
-        rows = selected.get("data", [])
-        if not isinstance(rows, list) or not rows:
-            errors.append(f"{date_token}:empty rows")
-            continue
-
-        idx_code = fields.index("證券代號")
-        idx_name = fields.index("證券名稱")
-        idx_close = fields.index("收盤價")
-        idx_open = fields.index("開盤價") if "開盤價" in fields else -1
-        out_rows: list[dict[str, object]] = []
-        for row in rows:
-            if not isinstance(row, list):
-                continue
-            if max(idx_code, idx_name, idx_close) >= len(row):
-                continue
-            code = str(row[idx_code] or "").strip().upper()
-            name = str(row[idx_name] or "").strip()
-            close_raw = str(row[idx_close] or "").strip().replace(",", "")
-            if not code or close_raw in {"", "--", "-"}:
-                continue
-            try:
-                close = float(close_raw)
-            except Exception:
-                continue
-            open_price: float | None = None
-            if idx_open >= 0 and idx_open < len(row):
-                open_raw = str(row[idx_open] or "").strip().replace(",", "")
-                if open_raw not in {"", "--", "-"}:
-                    try:
-                        open_candidate = float(open_raw)
-                        if math.isfinite(open_candidate) and open_candidate > 0:
-                            open_price = float(open_candidate)
-                    except Exception:
-                        pass
-            out_rows.append({"code": code, "name": name, "open": open_price, "close": close})
-        if out_rows:
-            return date_token, pd.DataFrame(out_rows)
-        errors.append(f"{date_token}:no parsable rows")
+        return result
 
     raise RuntimeError("TWSE snapshot fetch failed: " + " | ".join(errors[-5:]))
 
@@ -3403,6 +3569,27 @@ def _is_twse_trading_day(target_yyyymmdd: str) -> bool:
     token = str(target_yyyymmdd or "").strip()
     if not re.fullmatch(r"\d{8}", token):
         return False
+    store = _history_store()
+    loader = getattr(store, "load_latest_market_snapshot", None)
+    if callable(loader):
+        try:
+            cached = loader(
+                dataset_key="twse_trading_day_flag",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+            )
+        except Exception:
+            cached = None
+        if isinstance(cached, dict):
+            asof = cached.get("asof")
+            payload = cached.get("payload")
+            if isinstance(asof, datetime) and asof.strftime("%Y%m%d") == token and isinstance(
+                payload, dict
+            ):
+                cached_flag = payload.get("is_trading")
+                if isinstance(cached_flag, bool):
+                    return cached_flag
     try:
         resp = requests.get(
             "https://www.twse.com.tw/exchangeReport/MI_INDEX",
@@ -3413,7 +3600,26 @@ def _is_twse_trading_day(target_yyyymmdd: str) -> bool:
         payload = resp.json()
     except Exception:
         return False
-    return str(payload.get("stat", "")).strip().upper() == "OK"
+    is_trading = str(payload.get("stat", "")).strip().upper() == "OK"
+    writer = getattr(store, "save_market_snapshot", None)
+    if callable(writer):
+        try:
+            writer(
+                dataset_key="twse_trading_day_flag",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                source="twse_mi_index",
+                asof=token,
+                payload={"date": token, "is_trading": bool(is_trading)},
+                freshness_sec=0,
+                quality_score=1.0,
+                stale=False,
+                raw_json={"date": token},
+            )
+        except Exception:
+            pass
+    return is_trading
 
 
 def _recent_twse_trading_days(
@@ -4347,6 +4553,32 @@ def _load_twii_twse_month_close_map(
     if not re.fullmatch(r"\d{8}", token):
         return {}, [f"invalid month anchor: {month_anchor_yyyymmdd}"]
     query_token = f"{token[:6]}01"
+    store = _history_store()
+    loader = getattr(store, "load_market_snapshot_window", None)
+    if callable(loader):
+        try:
+            cached_rows = loader(
+                dataset_key="twse_twii_month_close_map",
+                market="TW",
+                symbol="^TWII",
+                interval="1d",
+                asof_start=query_token,
+                asof_end=query_token,
+                limit=1,
+            )
+        except Exception:
+            cached_rows = []
+        if isinstance(cached_rows, list) and cached_rows:
+            payload = cached_rows[0].get("payload") if isinstance(cached_rows[0], dict) else None
+            if isinstance(payload, dict) and isinstance(payload.get("map"), dict):
+                out_cached: dict[str, float] = {}
+                for key, value in payload.get("map", {}).items():
+                    date_key = str(key or "").strip()
+                    val = pd.to_numeric(value, errors="coerce")
+                    if re.fullmatch(r"\d{8}", date_key) and pd.notna(val):
+                        out_cached[date_key] = float(val)
+                if out_cached:
+                    return out_cached, []
     try:
         resp = requests.get(
             "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST",
@@ -4394,6 +4626,24 @@ def _load_twii_twse_month_close_map(
         out[date_token] = float(close_val)
     if not out:
         return {}, [f"{query_token}: no parsable rows"]
+    writer = getattr(store, "save_market_snapshot", None)
+    if callable(writer):
+        try:
+            writer(
+                dataset_key="twse_twii_month_close_map",
+                market="TW",
+                symbol="^TWII",
+                interval="1d",
+                source="twse_mi_5mins_hist",
+                asof=query_token,
+                payload={"month": query_token, "map": out},
+                freshness_sec=0,
+                quality_score=1.0,
+                stale=False,
+                raw_json={"month": query_token, "rows": len(out)},
+            )
+        except Exception:
+            pass
     return out, []
 
 

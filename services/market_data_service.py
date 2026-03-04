@@ -73,6 +73,71 @@ class MarketDataService:
     def set_metadata_store(self, store: object):
         self._metadata_store = store
 
+    def _save_market_snapshot(
+        self,
+        *,
+        dataset_key: str,
+        market: str,
+        symbol: str,
+        interval: str,
+        source: str,
+        asof: datetime,
+        payload: object,
+        freshness_sec: int | None = None,
+        quality_score: float | None = None,
+        stale: bool = False,
+        raw_json: object = None,
+    ) -> None:
+        store = getattr(self, "_metadata_store", None)
+        if store is None:
+            return
+        writer = getattr(store, "save_market_snapshot", None)
+        if not callable(writer):
+            return
+        try:
+            writer(
+                dataset_key=dataset_key,
+                market=market,
+                symbol=symbol,
+                interval=interval,
+                source=source,
+                asof=asof,
+                payload=payload,
+                freshness_sec=freshness_sec,
+                quality_score=quality_score,
+                stale=stale,
+                raw_json=raw_json,
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _serialize_ohlcv_tail(df: pd.DataFrame, *, limit: int = 480) -> list[dict[str, object]]:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return []
+        out = df.tail(max(1, int(limit))).copy()
+        out = out.reset_index()
+        ts_col = str(out.columns[0])
+        out = out.rename(columns={ts_col: "ts"})
+        rows: list[dict[str, object]] = []
+        for _, row in out.iterrows():
+            ts = pd.Timestamp(row.get("ts"))
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+            rows.append(
+                {
+                    "ts": ts.isoformat(),
+                    "open": pd.to_numeric(row.get("open"), errors="coerce"),
+                    "high": pd.to_numeric(row.get("high"), errors="coerce"),
+                    "low": pd.to_numeric(row.get("low"), errors="coerce"),
+                    "close": pd.to_numeric(row.get("close"), errors="coerce"),
+                    "volume": pd.to_numeric(row.get("volume"), errors="coerce"),
+                }
+            )
+        return rows
+
     def _load_cached_symbol_metadata(
         self, market: str, symbols: list[str]
     ) -> dict[str, dict[str, object]]:
@@ -211,6 +276,30 @@ class MarketDataService:
             raise RuntimeError(
                 f"{exc}; 請確認美股代碼是否正確（例如 AAPL/TSLA）或稍後再試"
             ) from exc
+        now_utc = datetime.now(tz=timezone.utc)
+        quote_freshness = max(0, int((now_utc - quote.ts).total_seconds()))
+        self._save_market_snapshot(
+            dataset_key="live_quote",
+            market="US",
+            symbol=symbol,
+            interval="quote",
+            source=str(quote.source or "unknown"),
+            asof=quote.ts,
+            payload={
+                "symbol": symbol,
+                "price": quote.price,
+                "prev_close": quote.prev_close,
+                "open": quote.open,
+                "high": quote.high,
+                "low": quote.low,
+                "volume": quote.volume,
+                "source_chain": chain,
+            },
+            freshness_sec=quote_freshness,
+            quality_score=quote.quality_score,
+            stale=quote_freshness > 60,
+            raw_json=quote.raw_json,
+        )
 
         daily_candidates: list[tuple[object, str]] = []
         if getattr(self.us_twelve, "api_key", None):
@@ -224,6 +313,27 @@ class MarketDataService:
             daily_snap = self._try_ohlcv_chain_with_symbols("US", "1d", daily_candidates)
             daily = daily_snap.df
             daily_source = str(daily_snap.source or "") or None
+            self._save_market_snapshot(
+                dataset_key="live_ohlcv",
+                market="US",
+                symbol=symbol,
+                interval="1d",
+                source=str(daily_snap.source or "unknown"),
+                asof=daily_snap.asof or daily_snap.fetched_at,
+                payload={"rows": self._serialize_ohlcv_tail(daily), "symbol": symbol},
+                freshness_sec=max(
+                    0,
+                    int(
+                        (
+                            datetime.now(tz=timezone.utc)
+                            - (daily_snap.asof or daily_snap.fetched_at)
+                        ).total_seconds()
+                    ),
+                ),
+                quality_score=daily_snap.quality_score,
+                stale=False,
+                raw_json=daily_snap.raw_json,
+            )
         except Exception:
             last_good = self.cache.get(last_good_key)
             if isinstance(last_good, LiveContext) and isinstance(last_good.daily, pd.DataFrame):
@@ -239,6 +349,27 @@ class MarketDataService:
                 intraday = intraday_snap.df
                 if not intraday.empty:
                     intraday_source = str(intraday_snap.source or "") or "yahoo"
+                    self._save_market_snapshot(
+                        dataset_key="live_ohlcv",
+                        market="US",
+                        symbol=symbol,
+                        interval="1m",
+                        source=str(intraday_snap.source or "unknown"),
+                        asof=intraday_snap.asof or intraday_snap.fetched_at,
+                        payload={"rows": self._serialize_ohlcv_tail(intraday), "symbol": symbol},
+                        freshness_sec=max(
+                            0,
+                            int(
+                                (
+                                    datetime.now(tz=timezone.utc)
+                                    - (intraday_snap.asof or intraday_snap.fetched_at)
+                                ).total_seconds()
+                            ),
+                        ),
+                        quality_score=intraday_snap.quality_score,
+                        stale=False,
+                        raw_json=intraday_snap.raw_json,
+                    )
             except Exception:
                 intraday = pd.DataFrame()
         if intraday.empty:
@@ -320,6 +451,30 @@ class MarketDataService:
             symbol=symbol, market="TW", interval="quote", exchange=options.exchange
         )
         quote, chain, reason, depth = self._try_quote_chain(quote_providers, quote_req)
+        now_utc = datetime.now(tz=timezone.utc)
+        quote_freshness = max(0, int((now_utc - quote.ts).total_seconds()))
+        self._save_market_snapshot(
+            dataset_key="live_quote",
+            market="TW",
+            symbol=symbol,
+            interval="quote",
+            source=str(quote.source or "unknown"),
+            asof=quote.ts,
+            payload={
+                "symbol": symbol,
+                "price": quote.price,
+                "prev_close": quote.prev_close,
+                "open": quote.open,
+                "high": quote.high,
+                "low": quote.low,
+                "volume": quote.volume,
+                "source_chain": chain,
+            },
+            freshness_sec=quote_freshness,
+            quality_score=quote.quality_score,
+            stale=quote_freshness > 60,
+            raw_json=quote.raw_json,
+        )
 
         if quote.price is not None:
             tick_ts = pd.Timestamp(quote.ts)
@@ -371,6 +526,27 @@ class MarketDataService:
                 if not yahoo_intraday.empty:
                     intraday = yahoo_intraday
                     intraday_source = str(intraday_snap.source or "") or "yahoo"
+                    self._save_market_snapshot(
+                        dataset_key="live_ohlcv",
+                        market="TW",
+                        symbol=symbol,
+                        interval="1m",
+                        source=str(intraday_snap.source or "unknown"),
+                        asof=intraday_snap.asof or intraday_snap.fetched_at,
+                        payload={"rows": self._serialize_ohlcv_tail(intraday), "symbol": symbol},
+                        freshness_sec=max(
+                            0,
+                            int(
+                                (
+                                    datetime.now(tz=timezone.utc)
+                                    - (intraday_snap.asof or intraday_snap.fetched_at)
+                                ).total_seconds()
+                            ),
+                        ),
+                        quality_score=intraday_snap.quality_score,
+                        stale=False,
+                        raw_json=intraday_snap.raw_json,
+                    )
                     self.cache.set(
                         intraday_cache_key,
                         {"df": intraday.copy(), "source": intraday_source},
@@ -406,6 +582,27 @@ class MarketDataService:
                 if not fugle_intraday.empty:
                     intraday = fugle_intraday
                     intraday_source = str(fugle_intraday_snap.source or "") or "tw_fugle_rest"
+                    self._save_market_snapshot(
+                        dataset_key="live_ohlcv",
+                        market="TW",
+                        symbol=symbol,
+                        interval="1m",
+                        source=str(fugle_intraday_snap.source or "unknown"),
+                        asof=fugle_intraday_snap.asof or fugle_intraday_snap.fetched_at,
+                        payload={"rows": self._serialize_ohlcv_tail(intraday), "symbol": symbol},
+                        freshness_sec=max(
+                            0,
+                            int(
+                                (
+                                    datetime.now(tz=timezone.utc)
+                                    - (fugle_intraday_snap.asof or fugle_intraday_snap.fetched_at)
+                                ).total_seconds()
+                            ),
+                        ),
+                        quality_score=fugle_intraday_snap.quality_score,
+                        stale=False,
+                        raw_json=fugle_intraday_snap.raw_json,
+                    )
                     self.cache.set(
                         intraday_cache_key,
                         {"df": intraday.copy(), "source": intraday_source},
@@ -439,6 +636,26 @@ class MarketDataService:
             daily_snap = self._try_ohlcv_chain(daily_providers, daily_req)
             daily = daily_snap.df
             daily_source = str(daily_snap.source or "") or None
+            self._save_market_snapshot(
+                dataset_key="live_ohlcv",
+                market="TW",
+                symbol=symbol,
+                interval="1d",
+                source=str(daily_snap.source or "unknown"),
+                asof=daily_snap.asof or daily_snap.fetched_at,
+                payload={"rows": self._serialize_ohlcv_tail(daily), "symbol": symbol},
+                freshness_sec=max(
+                    0,
+                    int(
+                        (
+                            datetime.now(tz=timezone.utc) - (daily_snap.asof or daily_snap.fetched_at)
+                        ).total_seconds()
+                    ),
+                ),
+                quality_score=daily_snap.quality_score,
+                stale=False,
+                raw_json=daily_snap.raw_json,
+            )
         except Exception:
             if options.use_yahoo:
                 try:
@@ -447,6 +664,27 @@ class MarketDataService:
                     )
                     daily = daily_snap.df
                     daily_source = str(daily_snap.source or "") or "yahoo"
+                    self._save_market_snapshot(
+                        dataset_key="live_ohlcv",
+                        market="TW",
+                        symbol=symbol,
+                        interval="1d",
+                        source=str(daily_snap.source or "unknown"),
+                        asof=daily_snap.asof or daily_snap.fetched_at,
+                        payload={"rows": self._serialize_ohlcv_tail(daily), "symbol": symbol},
+                        freshness_sec=max(
+                            0,
+                            int(
+                                (
+                                    datetime.now(tz=timezone.utc)
+                                    - (daily_snap.asof or daily_snap.fetched_at)
+                                ).total_seconds()
+                            ),
+                        ),
+                        quality_score=daily_snap.quality_score,
+                        stale=False,
+                        raw_json=daily_snap.raw_json,
+                    )
                 except Exception:
                     daily = pd.DataFrame()
 

@@ -21,7 +21,7 @@
 - `0050 熱力圖`：0050 成分股逐檔回測，對大盤做超額報酬熱力圖
 - `0052 熱力圖`：0052 成分股逐檔回測，對大盤做超額報酬熱力圖
 - `00910 / 00935 / 00993A / 0050 / 0052`：頁首統一顯示官方編製/管理規則摘要（附來源連結）
-- `資料庫檢視`：直接查看 DuckDB/SQLite 各資料表內容與欄位
+- `資料庫檢視`：直接查看 DuckDB 各資料表內容與欄位
 - `新手教學`：參數解釋、常見誤區、操作流程
 
 ## 2) 核心模組
@@ -31,7 +31,7 @@
   - `即時看盤/回測工作台` 主渲染在 `ui/pages/*`
   - 以顯式 runtime symbol 註冊取代舊 `ctx=globals()` 橋接
 - `di.py`
-  - Service/Store 工廠與容器註冊（DuckDB/SQLite 配置切換）
+  - Service/Store 工廠與容器註冊（DuckDB only）
 - `cli.py`
   - `sync / backtest / bootstrap / info / serve` 指令入口
 - `ui/pages/live.py`
@@ -70,10 +70,8 @@
   - 頁面級分段耗時工具（`REALTIME0052_PERF_DEBUG=1`）
 - `ui/shared/session_utils.py`
   - `session_state` 預設值初始化 helper
-- `storage/history_store.py`
-  - SQLite fallback store（回滾/相容用途）
 - `storage/duck_store.py`
-  - DuckDB + Parquet hybrid（目前預設）
+  - DuckDB + Parquet（唯一儲存技術線）
   - DuckDB 儲存 metadata/回測快取；Parquet 儲存 `daily_bars`/`intraday_ticks`
 - `backtest/*`
   - 回測核心邏輯、績效計算、walk-forward

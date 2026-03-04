@@ -492,6 +492,98 @@ class DuckStoreTests(unittest.TestCase):
             self.assertIn("rollback", calls)
             self.assertIn("close", calls)
 
+    def test_market_snapshot_roundtrip_and_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+
+            store.save_market_snapshot(
+                dataset_key="twse_mi_index_allbut0999",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                source="unit",
+                asof="20260301",
+                payload={"rows": [{"code": "0050", "name": "元大台灣50", "close": 100.0}]},
+                freshness_sec=10,
+                quality_score=0.9,
+                stale=False,
+            )
+            store.save_market_snapshot(
+                dataset_key="twse_mi_index_allbut0999",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                source="unit",
+                asof="20260302",
+                payload={"rows": [{"code": "0050", "name": "元大台灣50", "close": 101.0}]},
+                freshness_sec=20,
+                quality_score=0.8,
+                stale=True,
+            )
+
+            latest = store.load_latest_market_snapshot(
+                dataset_key="twse_mi_index_allbut0999",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+            )
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(str(latest["source"]), "unit")
+            self.assertTrue(bool(latest["stale"]))
+            payload = latest.get("payload")
+            self.assertIsInstance(payload, dict)
+            assert isinstance(payload, dict)
+            rows = payload.get("rows")
+            self.assertIsInstance(rows, list)
+            assert isinstance(rows, list)
+            self.assertEqual(float(rows[0]["close"]), 101.0)
+
+            window = store.load_market_snapshot_window(
+                dataset_key="twse_mi_index_allbut0999",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                asof_start="20260301",
+                asof_end="20260302",
+                limit=8,
+            )
+            self.assertEqual(len(window), 2)
+
+    def test_market_snapshot_purge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            store.save_market_snapshot(
+                dataset_key="unit_snapshot",
+                market="TW",
+                symbol="TEST",
+                interval="1d",
+                source="unit",
+                asof=datetime(2000, 1, 1, tzinfo=timezone.utc),
+                payload={"ok": True},
+            )
+            removed = store.purge_market_snapshots(dataset_key="unit_snapshot", keep_days=1)
+            self.assertGreaterEqual(int(removed), 1)
+            latest = store.load_latest_market_snapshot(
+                dataset_key="unit_snapshot",
+                market="TW",
+                symbol="TEST",
+                interval="1d",
+            )
+            self.assertIsNone(latest)
+
     def test_sync_tw_index_uses_yahoo_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

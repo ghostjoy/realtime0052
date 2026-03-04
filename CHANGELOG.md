@@ -102,6 +102,25 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, di.py, scripts/backup_duckdb_snapshot.py, ... (+7) [id:f2be7b4f75]
+- DuckDB-only 儲存技術線落地：
+  - `di.create_history_store(...)` 改為固定回傳 `DuckHistoryStore`，不再走 SQLite backend 分支。
+  - `storage/__init__.py` 對外 `HistoryStore` 直接映射 DuckDB store，文件同步改為 DuckDB only 描述。
+- 新增 DuckDB `market_snapshots` 快照能力：
+  - `DuckHistoryStore` 新增 `save/load/window/purge market snapshot` API 與索引，統一保存來源、asof、新鮮度、stale 與 payload。
+- TWSE 相關卡片改為本地快照優先：
+  - `_fetch_twse_snapshot_with_fallback` 先查 DuckDB 快照，命中後立即回傳並背景補抓。
+  - `MI_INDEX` 交易日判斷與 `MI_5MINS_HIST` 月資料新增 DuckDB 快照寫入/讀取。
+- `即時看盤` 台股模式新增本地快照 + 背景刷新：
+  - 優先讀 DuckDB `tw_live_context` 快照顯示，背景 thread 非阻塞刷新並回寫快照。
+- `MarketDataService` 新增 live quote/ohlcv 快照寫入 hook：
+  - TW/US 即時流程中的 provider 成功回應會同步落入 DuckDB `market_snapshots`。
+- 新增 DuckDB 快照腳本：
+  - `scripts/backup_duckdb_snapshot.py`
+  - `scripts/restore_duckdb_snapshot.py`
+- 新增測試：
+  - `tests/test_duck_store.py`：market snapshot roundtrip/purge
+  - `tests/test_active_etf_page.py`：TWSE 快照函式優先使用 DuckDB 本地快照
 - Auto: updated README.md, app.py, backtest/adjustments.py, tests/test_active_etf_page.py, tests/test_split_adjustments.py [id:4b2f4601d7]
 - `台股 ETF 全類型總表` 版面調整：
   - 交換「總表」與「基金規模追蹤」顯示順序，改為先總表、後基金規模追蹤。

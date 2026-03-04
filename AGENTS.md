@@ -44,7 +44,7 @@ uv run python -m compileall app.py
 - 回測摘要與回放快取：`backtest_runs`、`backtest_replay_runs`
 - 成分股快取：`universe_snapshots`（`00910 / 00935 / 00993A / 0050 / 0052`）
 - 專題結果快取：`heatmap_runs`、`rotation_runs`、`bootstrap_runs`
-- 原則：優先重用 DuckDB/Parquet（SQLite 僅 fallback/相容）；只做必要增量同步，避免重複打外部來源
+- 原則：優先重用 DuckDB/Parquet（DuckDB-only）；只做必要增量同步，避免重複打外部來源
 
 ## 5) 修改時注意事項
 
@@ -65,7 +65,7 @@ uv run python -m compileall app.py
 
 ## 7) 不要做的事
 
-- 不要清空或覆蓋使用者本地 SQLite 資料
+- 不要清空或覆蓋使用者本地 DuckDB / Parquet 資料
 - 不要引入需付費或需金鑰才能基本運作的強依賴
 - 不要在未說明的情況下改動回測交易規則（T+1 成交）
 

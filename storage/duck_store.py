@@ -389,6 +389,26 @@ class DuckHistoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS market_snapshots (
+                    id BIGINT,
+                    dataset_key VARCHAR,
+                    market VARCHAR,
+                    symbol VARCHAR,
+                    interval VARCHAR,
+                    source VARCHAR,
+                    as_of VARCHAR,
+                    fetched_at VARCHAR,
+                    freshness_sec BIGINT,
+                    quality_score DOUBLE,
+                    stale INTEGER DEFAULT 0,
+                    payload_json VARCHAR,
+                    raw_json VARCHAR,
+                    UNIQUE(dataset_key, market, symbol, interval, as_of)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS migration_meta (
                     key VARCHAR,
                     value VARCHAR,
@@ -417,6 +437,12 @@ class DuckHistoryStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_heatmap_runs_universe_created_at ON heatmap_runs(universe_id, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_market_snapshots_lookup ON market_snapshots(dataset_key, market, symbol, interval, fetched_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_market_snapshots_as_of ON market_snapshots(as_of)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_heatmap_hub_entries_pin_updated ON heatmap_hub_entries(pin_as_card, updated_at)"
@@ -2302,6 +2328,262 @@ class DuckHistoryStore:
             payload=payload,
             created_at=created_at,
         )
+
+    def save_market_snapshot(
+        self,
+        *,
+        dataset_key: str,
+        market: str = "",
+        symbol: str = "",
+        interval: str = "",
+        source: str = "",
+        asof: datetime | str | None = None,
+        payload: object = None,
+        freshness_sec: int | None = None,
+        quality_score: float | None = None,
+        stale: bool = False,
+        raw_json: object = None,
+    ) -> int:
+        key = self._normalize_text(dataset_key)
+        if not key:
+            return 0
+        market_token = self._normalize_market_token(market) if market else ""
+        symbol_token = self._normalize_symbol_token(symbol) if symbol else ""
+        interval_token = self._normalize_text(interval)
+        source_token = self._normalize_text(source)
+
+        now = datetime.now(tz=timezone.utc)
+        asof_dt: datetime | None = None
+        if isinstance(asof, datetime):
+            asof_dt = asof if asof.tzinfo is not None else asof.replace(tzinfo=timezone.utc)
+        else:
+            asof_text = self._normalize_text(asof)
+            if asof_text:
+                if re.fullmatch(r"\d{8}", asof_text):
+                    try:
+                        asof_dt = datetime.strptime(asof_text, "%Y%m%d").replace(tzinfo=timezone.utc)
+                    except Exception:
+                        asof_dt = None
+                else:
+                    asof_dt = self._parse_iso_datetime(asof_text)
+        if asof_dt is None:
+            asof_dt = now
+        asof_iso = asof_dt.astimezone(timezone.utc).isoformat()
+        fetched_at_iso = now.isoformat()
+
+        try:
+            payload_json = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            payload_json = json.dumps({}, ensure_ascii=False)
+        raw_json_text = self._normalize_raw_json_text(raw_json if raw_json is not None else {})
+        freshness_value = None if freshness_sec is None else max(0, int(freshness_sec))
+        quality_value = None
+        if quality_score is not None:
+            try:
+                quality_value = float(quality_score)
+            except Exception:
+                quality_value = None
+
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                DELETE FROM market_snapshots
+                WHERE dataset_key=? AND market=? AND symbol=? AND interval=? AND as_of=?
+                """,
+                (key, market_token, symbol_token, interval_token, asof_iso),
+            )
+            row_id = self._next_id(conn, "market_snapshots")
+            conn.execute(
+                """
+                INSERT INTO market_snapshots(
+                    id, dataset_key, market, symbol, interval, source, as_of, fetched_at,
+                    freshness_sec, quality_score, stale, payload_json, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row_id,
+                    key,
+                    market_token,
+                    symbol_token,
+                    interval_token,
+                    source_token,
+                    asof_iso,
+                    fetched_at_iso,
+                    freshness_value,
+                    quality_value,
+                    1 if bool(stale) else 0,
+                    payload_json,
+                    raw_json_text,
+                ),
+            )
+        return 1
+
+    def _load_market_snapshot_rows(
+        self,
+        *,
+        dataset_key: str,
+        market: str = "",
+        symbol: str = "",
+        interval: str = "",
+        asof_start: datetime | str | None = None,
+        asof_end: datetime | str | None = None,
+        limit: int = 1,
+    ) -> list[tuple[Any, ...]]:
+        key = self._normalize_text(dataset_key)
+        if not key:
+            return []
+        where = ["dataset_key=?"]
+        params: list[object] = [key]
+
+        market_token = self._normalize_market_token(market) if market else ""
+        symbol_token = self._normalize_symbol_token(symbol) if symbol else ""
+        interval_token = self._normalize_text(interval)
+        if market_token:
+            where.append("market=?")
+            params.append(market_token)
+        if symbol_token:
+            where.append("symbol=?")
+            params.append(symbol_token)
+        if interval_token:
+            where.append("interval=?")
+            params.append(interval_token)
+
+        def _asof_iso(value: datetime | str | None) -> str | None:
+            if value is None:
+                return None
+            if isinstance(value, datetime):
+                dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc).isoformat()
+            text = self._normalize_text(value)
+            if not text:
+                return None
+            if re.fullmatch(r"\d{8}", text):
+                try:
+                    return datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
+                except Exception:
+                    return None
+            dt = self._parse_iso_datetime(text)
+            return dt.isoformat() if dt is not None else None
+
+        start_iso = _asof_iso(asof_start)
+        end_iso = _asof_iso(asof_end)
+        if start_iso:
+            where.append("as_of>=?")
+            params.append(start_iso)
+        if end_iso:
+            where.append("as_of<=?")
+            params.append(end_iso)
+
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT dataset_key, market, symbol, interval, source, as_of, fetched_at,
+                       freshness_sec, quality_score, stale, payload_json, raw_json
+                FROM market_snapshots
+                WHERE {" AND ".join(where)}
+                ORDER BY as_of DESC, fetched_at DESC, id DESC
+                LIMIT ?
+                """,
+                [*params, max(1, int(limit))],
+            ).fetchall()
+        finally:
+            conn.close()
+        return rows
+
+    def _decode_market_snapshot_row(self, row: tuple[Any, ...]) -> dict[str, object]:
+        payload_obj: object
+        raw_obj: object
+        try:
+            payload_obj = json.loads(str(row[10] or "null"))
+        except Exception:
+            payload_obj = None
+        try:
+            raw_obj = json.loads(str(row[11] or "null"))
+        except Exception:
+            raw_obj = self._normalize_raw_json_text(row[11])
+        return {
+            "dataset_key": self._normalize_text(row[0]),
+            "market": self._normalize_market_token(row[1]),
+            "symbol": self._normalize_symbol_token(row[2]),
+            "interval": self._normalize_text(row[3]),
+            "source": self._normalize_text(row[4]),
+            "asof": self._parse_iso_datetime(row[5]),
+            "fetched_at": self._parse_iso_datetime(row[6]),
+            "freshness_sec": int(row[7]) if row[7] is not None else None,
+            "quality_score": float(row[8]) if row[8] is not None else None,
+            "stale": bool(int(row[9] or 0)),
+            "payload": payload_obj,
+            "raw_json": raw_obj,
+        }
+
+    def load_latest_market_snapshot(
+        self,
+        *,
+        dataset_key: str,
+        market: str = "",
+        symbol: str = "",
+        interval: str = "",
+    ) -> dict[str, object] | None:
+        rows = self._load_market_snapshot_rows(
+            dataset_key=dataset_key,
+            market=market,
+            symbol=symbol,
+            interval=interval,
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._decode_market_snapshot_row(rows[0])
+
+    def load_market_snapshot_window(
+        self,
+        *,
+        dataset_key: str,
+        market: str = "",
+        symbol: str = "",
+        interval: str = "",
+        asof_start: datetime | str | None = None,
+        asof_end: datetime | str | None = None,
+        limit: int = 128,
+    ) -> list[dict[str, object]]:
+        rows = self._load_market_snapshot_rows(
+            dataset_key=dataset_key,
+            market=market,
+            symbol=symbol,
+            interval=interval,
+            asof_start=asof_start,
+            asof_end=asof_end,
+            limit=limit,
+        )
+        return [self._decode_market_snapshot_row(row) for row in rows]
+
+    def purge_market_snapshots(
+        self,
+        *,
+        dataset_key: str | None = None,
+        keep_days: int = 30,
+    ) -> int:
+        cutoff = datetime.now(tz=timezone.utc) - pd.Timedelta(days=max(1, int(keep_days)))
+        cutoff_iso = cutoff.isoformat()
+        where = ["as_of < ?"]
+        params: list[object] = [cutoff_iso]
+        if dataset_key:
+            where.append("dataset_key=?")
+            params.append(self._normalize_text(dataset_key))
+
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM market_snapshots WHERE {' AND '.join(where)}",
+                params,
+            ).fetchone()
+            count = int(row[0] or 0) if row is not None else 0
+            if count > 0:
+                conn.execute(
+                    f"DELETE FROM market_snapshots WHERE {' AND '.join(where)}",
+                    params,
+                )
+        return count
 
     def save_universe_snapshot(
         self,

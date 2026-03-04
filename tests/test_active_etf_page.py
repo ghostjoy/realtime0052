@@ -39,6 +39,7 @@ from app import (
     _decorate_tw_etf_name_heatmap_links,
     _decorate_tw_etf_top10_ytd_table,
     _dynamic_heatmap_page_renderers,
+    _fetch_twse_snapshot_with_fallback,
     _fill_unresolved_tw_names,
     _format_weight_pct_label,
     _infer_market_target_from_symbols,
@@ -64,6 +65,38 @@ from ui.helpers import (
 
 
 class ActiveEtfPageTests(unittest.TestCase):
+    def test_fetch_twse_snapshot_prefers_duckdb_cache(self):
+        _fetch_twse_snapshot_with_fallback.clear()
+        fake_store = SimpleNamespace(
+            load_market_snapshot_window=lambda **kwargs: [
+                {
+                    "asof": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                    "payload": {
+                        "rows": [
+                            {
+                                "code": "0050",
+                                "name": "元大台灣50",
+                                "open": 100.0,
+                                "close": 101.0,
+                            }
+                        ]
+                    },
+                }
+            ]
+        )
+        with (
+            patch("app._history_store", return_value=fake_store),
+            patch("app._queue_twse_snapshot_refresh") as queue_mock,
+            patch("app._fetch_twse_snapshot_network_single") as network_mock,
+        ):
+            used, frame = _fetch_twse_snapshot_with_fallback("20260304", lookback_days=14)
+
+        self.assertEqual(used, "20260303")
+        self.assertFalse(frame.empty)
+        self.assertEqual(str(frame.iloc[0]["code"]), "0050")
+        queue_mock.assert_called_once_with("20260304")
+        network_mock.assert_not_called()
+
     def test_attach_rank_movement_columns(self):
         frame = pd.DataFrame(
             [

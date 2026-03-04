@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
-from config_loader import cfg_or_env, cfg_or_env_bool, cfg_or_env_str
+from config_loader import cfg_or_env, cfg_or_env_bool
 from services.market_data_service import MarketDataService
 from storage.history_store import HistoryStore
 from ui.loaders import (
@@ -61,48 +61,37 @@ def create_market_service() -> MarketDataService:
 
 def create_history_store(*, service: MarketDataService | None = None) -> HistoryStore:
     svc = service or create_market_service()
-    backend = (
-        cfg_or_env_str("features.storage_backend", "REALTIME0052_STORAGE_BACKEND", "duckdb")
-        .strip()
-        .lower()
+    from storage.duck_store import DuckHistoryStore
+
+    duck_db_path = cfg_or_env("storage.duckdb.db_path", "REALTIME0052_DUCKDB_PATH", default=None)
+    parquet_root = cfg_or_env(
+        "storage.duckdb.parquet_root", "REALTIME0052_PARQUET_ROOT", default=None
     )
-    if backend not in {"duckdb", "sqlite"}:
-        backend = "duckdb"
-
-    if backend == "duckdb":
-        from storage.duck_store import DuckHistoryStore
-
-        duck_db_path = cfg_or_env(
-            "storage.duckdb.db_path", "REALTIME0052_DUCKDB_PATH", default=None
-        )
-        parquet_root = cfg_or_env(
-            "storage.duckdb.parquet_root", "REALTIME0052_PARQUET_ROOT", default=None
-        )
-        retain_days = cfg_or_env(
-            "storage.duckdb.intraday_retain_days",
-            "REALTIME0052_INTRADAY_RETAIN_DAYS",
-            default=1095,
-            cast=int,
-        )
-        legacy_sqlite_path = cfg_or_env(
-            "storage.duckdb.legacy_sqlite_path", "REALTIME0052_DB_PATH", default=None
-        )
-        auto_migrate = cfg_or_env_bool(
-            "storage.duckdb.auto_migrate_legacy_sqlite",
-            "REALTIME0052_AUTO_MIGRATE_LEGACY_SQLITE",
-            default=True,
-        )
-        return DuckHistoryStore(
+    retain_days = cfg_or_env(
+        "storage.duckdb.intraday_retain_days",
+        "REALTIME0052_INTRADAY_RETAIN_DAYS",
+        default=1095,
+        cast=int,
+    )
+    legacy_sqlite_path = cfg_or_env(
+        "storage.duckdb.legacy_sqlite_path", "REALTIME0052_DB_PATH", default=None
+    )
+    auto_migrate = cfg_or_env_bool(
+        "storage.duckdb.auto_migrate_legacy_sqlite",
+        "REALTIME0052_AUTO_MIGRATE_LEGACY_SQLITE",
+        default=True,
+    )
+    return cast(
+        HistoryStore,
+        DuckHistoryStore(
             service=svc,
             db_path=duck_db_path,
             parquet_root=parquet_root,
             intraday_retain_days=int(retain_days),
             legacy_sqlite_path=legacy_sqlite_path,
             auto_migrate_legacy_sqlite=bool(auto_migrate),
-        )
-
-    sqlite_db_path = cfg_or_env("storage.sqlite.db_path", "REALTIME0052_DB_PATH", default=None)
-    return HistoryStore(db_path=sqlite_db_path, service=svc)
+        ),
+    )
 
 
 def register_market_service() -> None:

@@ -18,7 +18,7 @@
 - `0050 熱力圖`：0050 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `0052 熱力圖`：0052 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `00910 / 00935 / 00993A / 0050 / 0052` 熱力圖頁：頁首統一顯示「官方編製/管理規則摘要」與來源連結
-- `資料庫檢視`：查看 SQLite / DuckDB 內各資料表筆數、欄位結構與分頁資料
+- `資料庫檢視`：查看 DuckDB 內各資料表筆數、欄位結構與分頁資料
 - `新手教學`：技術面與回測參數白話解釋、常見誤區、建議操作流程
 
 > 免責聲明：僅供教育/研究，非投資建議。
@@ -156,7 +156,7 @@ uv run realtime0052 bootstrap --scope both --years 5
 
 ### 3.6) 00935 成分股熱力圖回測
 
-- 使用 00935 成分股（快取到 SQLite）逐檔回測，並與 Benchmark（`^TWII/0050/006208`）比較
+- 使用 00935 成分股（快取到 DuckDB）逐檔回測，並與 Benchmark（`^TWII/0050/006208`）比較
 - 熱力圖顯示相對大盤超額報酬：
   - 綠色：贏過大盤（贏越多越深）
   - 紅色：輸給大盤（輸越多越深）
@@ -164,7 +164,7 @@ uv run realtime0052 bootstrap --scope both --years 5
 
 ### 3.7) 0050 成分股熱力圖回測
 
-- 使用 0050 成分股（快取到 SQLite）逐檔回測，並與 Benchmark（`^TWII/0050/006208`）比較
+- 使用 0050 成分股（快取到 DuckDB）逐檔回測，並與 Benchmark（`^TWII/0050/006208`）比較
 - 熱力圖顯示相對大盤超額報酬：
   - 綠色：贏過大盤（贏越多越深）
   - 紅色：輸給大盤（輸越多越深）
@@ -179,7 +179,7 @@ uv run realtime0052 bootstrap --scope both --years 5
 - 持有與成交：月調倉；訊號後「下一交易日開盤」執行（避免前視偏誤）
 - 風控：分數 `<= 0` 或跌破 `SMA60` 不納入當月排名
 - 與 `Benchmark Equity`、`Buy-and-Hold (ETF池等權)` 同圖比較
-- 調倉明細與成交紀錄可直接在分頁查看，並快取到 SQLite（`rotation_runs`）
+- 調倉明細與成交紀錄可直接在分頁查看，並快取到 DuckDB（`rotation_runs`）
 
 ### 4) 回放式視覺化
 
@@ -320,18 +320,19 @@ export REALTIME0052_BENCHMARK_RENDERER="lightweight"
 export REALTIME0052_INTRADAY_RETAIN_DAYS="1095"
 ```
 
-## SQLite -> DuckDB 一次性遷移（可回滾）
+## DuckDB 快照備份與回復
 
-先保留舊 SQLite 檔案不動，再執行：
+建立完整快照（DuckDB + Parquet）：
 
 ```bash
-uv run python scripts/migrate_sqlite_to_duckdb.py \
-  --sqlite-path "/your/path/market_history.sqlite3" \
-  --duckdb-path "/your/path/market_history.duckdb" \
-  --parquet-root "/your/path/parquet"
+uv run python scripts/backup_duckdb_snapshot.py
 ```
 
-回滾方式：執行 `./scripts/rollback_legacy_stack.sh`，或手動把 `REALTIME0052_STORAGE_BACKEND=sqlite`。
+回復指定快照（會覆蓋目標，需 `--force`）：
+
+```bash
+uv run python scripts/restore_duckdb_snapshot.py /path/to/snapshot_dir --force
+```
 
 ## 台股 ETF 管理費（可逐步補齊）
 
@@ -374,14 +375,7 @@ cd ~/codexapp/realtime0052_minimax
 ```
 
 腳本會在啟動前列印目前技術線摘要（`config_source / storage_backend / renderer / 路徑是否 iCloud`）。
-若偵測到 iCloud `codexapp` 目錄，腳本預設會直接使用 iCloud 路徑（DuckDB / Parquet / SQLite）。
-
-一鍵回滾舊技術線（legacy_env + SQLite + Plotly）：
-
-```bash
-cd ~/codexapp/realtime0052_minimax
-./scripts/rollback_legacy_stack.sh
-```
+若偵測到 iCloud `codexapp` 目錄，腳本預設會直接使用 iCloud 路徑（DuckDB / Parquet）。
 
 ## 測試
 
@@ -403,8 +397,7 @@ uv run mypy
 - `ui/core/page_registry.py`：功能卡片導覽組裝與切頁 helper
 - `services/market_data_service.py`：多來源 provider chain 與資料品質封裝
 - `providers/`：各資料來源 adapter
-- `storage/history_store.py`：SQLite schema、增量同步、回測紀錄
-- `storage/duck_store.py`：DuckDB + Parquet hybrid store（與既有介面相容）
+- `storage/duck_store.py`：DuckDB + Parquet store（唯一儲存技術線）
 - `conf/`：Hydra YAML 設定（預設直接啟用 `hydra`）
 - `config_loader.py`：Hydra/環境變數雙軌設定讀取器
 - `backtest/`：策略模板、回測引擎、結果型別

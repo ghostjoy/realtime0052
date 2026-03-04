@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -10,6 +12,7 @@ import streamlit as st
 from advice import Profile, render_advice, render_advice_scai_style
 from backtest import apply_split_adjustment
 from indicators import add_indicators
+from market_data_types import DataQuality, LiveContext, QuoteSnapshot
 from services import LiveOptions
 from ui.constants import COMPACT_CHART_HEIGHT, INDICATOR_CHART_HEIGHT
 from ui.shared import get_or_set
@@ -47,9 +50,218 @@ _render_quality_bar: Any = None
 _resolve_live_change_metrics: Any = None
 _symbol_watermark_text: Any = None
 
+TW_LIVE_SNAPSHOT_DATASET_KEY = "tw_live_context_v1"
+_LIVE_BG_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="live-bg")
+
 
 def configure_runtime(values: Mapping[str, Any]) -> None:
     configure_module_runtime(globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__)
+
+
+def _serialize_live_frame(frame: pd.DataFrame, *, limit: int) -> list[dict[str, object]]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    safe = frame.tail(max(1, int(limit))).copy()
+    safe = safe.reset_index()
+    ts_col = str(safe.columns[0])
+    safe = safe.rename(columns={ts_col: "ts"})
+    def _to_float(value: object) -> float:
+        num = pd.to_numeric(value, errors="coerce")
+        if pd.isna(num):
+            return 0.0
+        try:
+            return float(num)
+        except Exception:
+            return 0.0
+
+    out: list[dict[str, object]] = []
+    for _, row in safe.iterrows():
+        ts = pd.Timestamp(row.get("ts"))
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        out.append(
+            {
+                "ts": ts.isoformat(),
+                "open": _to_float(row.get("open")),
+                "high": _to_float(row.get("high")),
+                "low": _to_float(row.get("low")),
+                "close": _to_float(row.get("close")),
+                "volume": _to_float(row.get("volume")),
+            }
+        )
+    return out
+
+
+def _deserialize_live_frame(rows: object) -> pd.DataFrame:
+    if not isinstance(rows, list) or not rows:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    frame = pd.DataFrame(rows)
+    if frame.empty or "ts" not in frame.columns:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    frame["ts"] = pd.to_datetime(frame.get("ts"), utc=True, errors="coerce")
+    frame = frame.dropna(subset=["ts"])
+    if frame.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    frame = frame.set_index("ts").sort_index()
+    for col in ["open", "high", "low", "close", "volume"]:
+        frame[col] = pd.to_numeric(frame.get(col), errors="coerce")
+    frame = frame.dropna(subset=["open", "high", "low", "close"], how="any")
+    return frame[["open", "high", "low", "close", "volume"]]
+
+
+def _persist_tw_live_context_snapshot(*, store, symbol: str, ctx: LiveContext) -> None:
+    writer = getattr(store, "save_market_snapshot", None)
+    if not callable(writer):
+        return
+    quote = ctx.quote
+    now_utc = datetime.now(tz=timezone.utc)
+    quote_ts = pd.Timestamp(quote.ts)
+    if quote_ts.tzinfo is None:
+        quote_ts = quote_ts.tz_localize("UTC")
+    else:
+        quote_ts = quote_ts.tz_convert("UTC")
+    freshness = max(0, int((now_utc - quote_ts.to_pydatetime()).total_seconds()))
+    payload = {
+        "quote": {
+            "symbol": str(quote.symbol or symbol),
+            "market": str(quote.market or "TW"),
+            "ts": quote_ts.isoformat(),
+            "price": quote.price,
+            "prev_close": quote.prev_close,
+            "open": quote.open,
+            "high": quote.high,
+            "low": quote.low,
+            "volume": quote.volume,
+            "source": str(quote.source or "unknown"),
+            "is_delayed": bool(quote.is_delayed),
+            "interval": str(quote.interval or "quote"),
+            "currency": quote.currency,
+            "exchange": quote.exchange,
+            "extra": dict(getattr(quote, "extra", {}) or {}),
+        },
+        "intraday": _serialize_live_frame(ctx.intraday, limit=720),
+        "daily": _serialize_live_frame(ctx.daily, limit=520),
+        "source_chain": list(getattr(ctx, "source_chain", []) or []),
+        "intraday_source": str(getattr(ctx, "intraday_source", "") or ""),
+        "daily_source": str(getattr(ctx, "daily_source", "") or ""),
+        "fallback_depth": int(getattr(ctx.quality, "fallback_depth", 0) or 0),
+        "reason": str(getattr(ctx.quality, "reason", "") or ""),
+    }
+    try:
+        writer(
+            dataset_key=TW_LIVE_SNAPSHOT_DATASET_KEY,
+            market="TW",
+            symbol=symbol,
+            interval="live",
+            source=str(quote.source or "unknown"),
+            asof=quote_ts.to_pydatetime(),
+            payload=payload,
+            freshness_sec=freshness,
+            quality_score=quote.quality_score,
+            stale=freshness > 60,
+            raw_json=getattr(quote, "raw_json", {}),
+        )
+    except Exception:
+        return
+
+
+def _load_tw_live_context_snapshot(*, store, symbol: str) -> LiveContext | None:
+    loader = getattr(store, "load_latest_market_snapshot", None)
+    if not callable(loader):
+        return None
+    try:
+        snap = loader(
+            dataset_key=TW_LIVE_SNAPSHOT_DATASET_KEY,
+            market="TW",
+            symbol=symbol,
+            interval="live",
+        )
+    except Exception:
+        return None
+    if not isinstance(snap, dict):
+        return None
+    payload = snap.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    quote_payload = payload.get("quote")
+    if not isinstance(quote_payload, dict):
+        return None
+    def _to_optional_float(value: object) -> float | None:
+        num = pd.to_numeric(value, errors="coerce")
+        if pd.isna(num):
+            return None
+        try:
+            return float(num)
+        except Exception:
+            return None
+
+    quote_ts = pd.Timestamp(quote_payload.get("ts"))
+    if quote_ts.tzinfo is None:
+        quote_ts = quote_ts.tz_localize("UTC")
+    else:
+        quote_ts = quote_ts.tz_convert("UTC")
+    quote = QuoteSnapshot(
+        symbol=str(quote_payload.get("symbol") or symbol),
+        market="TW",
+        ts=quote_ts.to_pydatetime(),
+        price=_to_optional_float(quote_payload.get("price")),
+        prev_close=_to_optional_float(quote_payload.get("prev_close")),
+        open=_to_optional_float(quote_payload.get("open")),
+        high=_to_optional_float(quote_payload.get("high")),
+        low=_to_optional_float(quote_payload.get("low")),
+        volume=(
+            int(float(quote_payload.get("volume")))
+            if pd.notna(pd.to_numeric(quote_payload.get("volume"), errors="coerce"))
+            else None
+        ),
+        source=str(quote_payload.get("source") or "duckdb_local"),
+        is_delayed=bool(quote_payload.get("is_delayed", True)),
+        interval=str(quote_payload.get("interval") or "quote"),
+        currency=str(quote_payload.get("currency") or "TWD"),
+        exchange=str(quote_payload.get("exchange") or "TWSE"),
+        extra=(
+            dict(quote_payload.get("extra"))
+            if isinstance(quote_payload.get("extra"), dict)
+            else {}
+        ),
+    )
+    intraday = _deserialize_live_frame(payload.get("intraday"))
+    daily = _deserialize_live_frame(payload.get("daily"))
+    freshness = snap.get("freshness_sec")
+    if not isinstance(freshness, int):
+        freshness = max(
+            0, int((datetime.now(tz=timezone.utc) - quote_ts.to_pydatetime()).total_seconds())
+        )
+    quality = DataQuality(
+        freshness_sec=freshness,
+        degraded=bool(snap.get("stale", False)),
+        fallback_depth=int(payload.get("fallback_depth") or 0),
+        reason=str(payload.get("reason") or "") or None,
+    )
+    return LiveContext(
+        quote=quote,
+        intraday=intraday,
+        daily=daily,
+        quality=quality,
+        source_chain=[str(x) for x in list(payload.get("source_chain") or []) if str(x).strip()],
+        used_fallback=True,
+        fundamentals=None,
+        intraday_source=str(payload.get("intraday_source") or "cache:duckdb"),
+        daily_source=str(payload.get("daily_source") or "cache:duckdb"),
+    )
+
+
+def _run_tw_live_refresh(
+    *,
+    service,
+    symbol: str,
+    yahoo_symbol: str,
+    ticks: pd.DataFrame,
+    options: LiveOptions,
+) -> tuple[LiveContext, pd.DataFrame]:
+    return service.get_tw_live_context(symbol, yahoo_symbol, ticks=ticks, options=options)
 
 
 def _render_live_view():
@@ -117,17 +329,70 @@ def _render_live_view():
         if market == "台股(TWSE)":
             assert stock_id is not None
             tick_key = f"ticks:TW:{stock_id}:{exchange}"
-            ticks = st.session_state.get(
+            refresh_future_key = f"tw_live_future:{stock_id}:{exchange}:{yahoo_symbol}"
+            refresh_next_key = f"tw_live_future_next:{stock_id}:{exchange}:{yahoo_symbol}"
+
+            ticks_raw = st.session_state.get(
                 tick_key, pd.DataFrame(columns=["ts", "price", "cum_volume"])
             )
-            try:
-                ctx, ticks = service.get_tw_live_context(
-                    stock_id, yahoo_symbol, ticks=ticks, options=options
+            ticks = (
+                ticks_raw.copy()
+                if isinstance(ticks_raw, pd.DataFrame)
+                else pd.DataFrame(columns=["ts", "price", "cum_volume"])
+            )
+
+            ctx: LiveContext | None = _load_tw_live_context_snapshot(store=store, symbol=stock_id)
+
+            inflight = st.session_state.get(refresh_future_key)
+            if isinstance(inflight, Future) and inflight.done():
+                try:
+                    ctx_rt, ticks_rt = inflight.result()
+                    if isinstance(ticks_rt, pd.DataFrame):
+                        ticks = ticks_rt
+                        st.session_state[tick_key] = ticks
+                    _persist_tw_live_context_snapshot(store=store, symbol=stock_id, ctx=ctx_rt)
+                    ctx = ctx_rt
+                except Exception:
+                    pass
+                finally:
+                    st.session_state[refresh_future_key] = None
+
+            now_ts = datetime.now(tz=timezone.utc).timestamp()
+            next_allowed = float(st.session_state.get(refresh_next_key, 0.0) or 0.0)
+            inflight = st.session_state.get(refresh_future_key)
+            if (not isinstance(inflight, Future) or inflight.done()) and now_ts >= next_allowed:
+                ticks_refresh = (
+                    ticks.copy()
+                    if isinstance(ticks, pd.DataFrame)
+                    else pd.DataFrame(columns=["ts", "price", "cum_volume"])
                 )
-                st.session_state[tick_key] = ticks
-            except Exception as exc:
-                st.error(f"台股資料取得失敗：{exc}")
-                return
+                try:
+                    future = _LIVE_BG_EXECUTOR.submit(
+                        _run_tw_live_refresh,
+                        service=service,
+                        symbol=stock_id,
+                        yahoo_symbol=yahoo_symbol,
+                        ticks=ticks_refresh,
+                        options=options,
+                    )
+                    st.session_state[refresh_future_key] = future
+                    st.session_state[refresh_next_key] = now_ts + max(5.0, float(refresh_sec) * 0.5)
+                except Exception:
+                    st.session_state[refresh_next_key] = now_ts + 10.0
+
+            if ctx is None:
+                try:
+                    ctx, ticks = service.get_tw_live_context(
+                        stock_id, yahoo_symbol, ticks=ticks, options=options
+                    )
+                    st.session_state[tick_key] = ticks
+                    _persist_tw_live_context_snapshot(store=store, symbol=stock_id, ctx=ctx)
+                except Exception as exc:
+                    st.error(f"台股資料取得失敗：{exc}")
+                    return
+            else:
+                st.caption("本輪先顯示 DuckDB 本地快照，背景持續更新中。")
+
             quote = ctx.quote
             buffer_key = f"intraday_buffer:TW:{stock_id}:{exchange}"
             flush_key = f"intraday_buffer_flush:TW:{stock_id}:{exchange}"
