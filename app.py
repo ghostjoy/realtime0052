@@ -457,13 +457,16 @@ def _format_tw_code_columns_for_display(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _dataframe_with_backtest_drilldown(data: Any = None, *args, **kwargs):
     opts = dict(kwargs)
+    enable_drilldown = bool(opts.pop("enable_backtest_drilldown", False))
     disable_drilldown = bool(opts.pop("disable_backtest_drilldown", False))
     frame = data
     if isinstance(frame, pd.DataFrame):
         frame = _format_tw_code_columns_for_display(frame)
-    if isinstance(frame, pd.DataFrame) and (not disable_drilldown):
+    if isinstance(frame, pd.DataFrame):
         precision_config = _tw_etf_precision_column_config(frame)
-        frame, auto_config = _decorate_dataframe_backtest_links(frame)
+        auto_config: dict[str, object] = {}
+        if enable_drilldown and (not disable_drilldown):
+            frame, auto_config = _decorate_dataframe_backtest_links(frame)
         merged_config: dict[str, object] = {}
         existing = opts.get("column_config")
         if isinstance(existing, dict):
@@ -6323,23 +6326,13 @@ def _render_tw_etf_all_types_view():
             except Exception as exc:
                 st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
 
-        table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(table_df)
-        table_with_links, code_link_config = _decorate_dataframe_backtest_links(table_with_links)
-        merged_link_config: dict[str, object] = {}
-        if isinstance(code_link_config, dict):
-            merged_link_config.update(code_link_config)
-        if isinstance(table_link_config, dict):
-            merged_link_config.update(table_link_config)
         visible_rows = 30
         scroll_height = 40 + visible_rows * 36
-        if merged_link_config:
-            st.caption("可直接點擊 `ETF` 中文名稱，在新分頁開啟對應熱力圖（內容同 00935 熱力圖）。")
         st.dataframe(
-            _style_tw_today_move_table(table_with_links),
+            _style_tw_today_move_table(table_df),
             width="stretch",
             hide_index=True,
             height=scroll_height,
-            column_config=merged_link_config if merged_link_config else None,
         )
         st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
 
@@ -6352,7 +6345,6 @@ def _render_tw_etf_all_types_view():
             start_date=aum_track_anchor_date,
             max_date_cols=10,
         )
-        history_with_links, history_link_config = _decorate_tw_etf_aum_history_links(history_wide)
         st.markdown("#### 基金規模追蹤（最近 10 交易日）")
         st.caption("欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以粉紅標示。")
         st.caption(
@@ -6362,14 +6354,12 @@ def _render_tw_etf_all_types_view():
             st.info("尚無規模追蹤資料，請按「更新規模追蹤」。")
         else:
             st.dataframe(
-                _style_tw_etf_aum_history_table(history_with_links),
+                _style_tw_etf_aum_history_table(history_wide),
                 width="stretch",
                 hide_index=True,
                 height=scroll_height,
-                column_config=history_link_config if history_link_config else None,
             )
             st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
-            st.caption("可點擊 `台股代號` 開啟回測；可點擊 `ETF名稱` 開啟該檔 ETF 成分股熱力圖。")
 
         hub_col1, hub_col2 = st.columns([2, 1])
         with hub_col1:
@@ -6778,17 +6768,7 @@ def _render_top10_etf_2026_ytd_view(
             f"`{compare_col_label}` 採對照區間內首個可交易日計算；若空白代表該檔對照區間無可用日K。"
         )
         st.caption(f"報酬計算：`大盤超額(%) = {performance_col_label} - 大盤報酬`。")
-        table_with_links, table_link_config = _decorate_tw_etf_name_heatmap_links(
-            table_df,
-            src=f"{page_key_prefix}_rank_table",
-        )
-        table_with_links, code_link_config = _decorate_dataframe_backtest_links(table_with_links)
-        merged_link_config: dict[str, object] = {}
-        if isinstance(code_link_config, dict):
-            merged_link_config.update(code_link_config)
-        if isinstance(table_link_config, dict):
-            merged_link_config.update(table_link_config)
-        styled_table_df = _style_tw_today_move_table(table_with_links)
+        styled_table_df = _style_tw_today_move_table(table_df)
         if page_key_prefix in {"top10_etf_ytd", "top10_dividend_etf_ytd"}:
             # 固定顯示完整 11 列（台股大盤 + 前10），方便一次截圖。
             table_height = min(640, 42 + max(1, int(len(table_df))) * 36)
@@ -6797,14 +6777,12 @@ def _render_top10_etf_2026_ytd_view(
                 width="stretch",
                 hide_index=True,
                 height=table_height,
-                column_config=merged_link_config if merged_link_config else None,
             )
         else:
             st.dataframe(
                 styled_table_df,
                 width="stretch",
                 hide_index=True,
-                column_config=merged_link_config if merged_link_config else None,
             )
 
         with st.expander("分類說明", expanded=False):
