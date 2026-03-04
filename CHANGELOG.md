@@ -312,6 +312,9 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正 `台股 ETF 全類型總表` 在顯示 `台股大盤(^TWII)` 基準列時的資料表序列化警告：
+  - 避免 `pd.concat` 於全 NA 欄位觸發 `FutureWarning`。
+  - 統一 `編號` 欄位輸出為字串，排除 Streamlit/PyArrow `ArrowTypeError: Expected bytes, got int`。
 - 修正台股 ETF 全類型總表在部分槓桿/反向 ETF 的 2025 績效失真：
   - 補齊 `00663L`（2025-06-11）分割事件，修正未復權造成的 2025 績效低估問題。
   - 補齊 `00676R`（2025-02-19）、`00673R`（2025-10-22）、`00706L`（2025-10-22）、`00715L`（2025-12-10）反分割事件，避免未復權造成績效被放大。

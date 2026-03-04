@@ -6379,7 +6379,16 @@ def _render_tw_etf_all_types_view():
             else np.nan,
             "今日贏大盤%": 0.0 if market_daily_return is not None else np.nan,
         }
-        table_view_df = pd.concat([pd.DataFrame([benchmark_row]), table_df], ignore_index=True)
+        # Use records assembly to avoid pandas concat all-NA dtype deprecation warnings.
+        table_view_df = pd.DataFrame.from_records(
+            [benchmark_row, *table_df.to_dict("records")],
+            columns=table_df.columns,
+        )
+        if "編號" in table_view_df.columns:
+            serial_numbers = pd.to_numeric(table_view_df["編號"], errors="coerce")
+            table_view_df["編號"] = serial_numbers.map(
+                lambda v: "—" if pd.isna(v) else f"{int(v)}"
+            )
         table_display = table_view_df
         merged_link_config: dict[str, object] = {}
         if table_drilldown_enabled:
