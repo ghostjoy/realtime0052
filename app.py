@@ -257,7 +257,7 @@ BACKTEST_DRILL_CODE_COLUMNS = {
 BACKTEST_DRILL_MARKET_COLUMNS = {"市場", "market", "Market", "交易所", "exchange", "Exchange"}
 BACKTEST_DRILL_QUERY_KEYS = ("bt_symbol", "bt_market", "bt_label", "bt_autorun", "bt_src")
 BACKTEST_AUTORUN_PENDING_KEY = "bt_autorun_pending"
-TABLE_DRILLDOWN_SESSION_KEY = "ui_enable_table_drilldown"
+TABLE_DRILLDOWN_KEY_PREFIX = "ui_table_drilldown"
 HEATMAP_DRILL_QUERY_KEYS = ("hm_etf", "hm_name", "hm_label", "hm_open", "hm_src")
 HEATMAP_HUB_SESSION_ACTIVE_KEY = "heatmap_hub_active_etf"
 HEATMAP_DYNAMIC_CARD_PREFIX = "ETF熱力圖:"
@@ -322,13 +322,13 @@ def _decorate_tw_etf_name_heatmap_links(
     if (name_col not in df.columns) or (code_col not in df.columns):
         return df, {}
     out = df.copy()
-    links: list[str | None] = []
+    links: list[object] = []
     linked_count = 0
     for _, row in out.iterrows():
         code = _normalize_heatmap_etf_code(row.get(code_col))
         name = str(row.get(name_col, "")).strip()
         if not code:
-            links.append(None)
+            links.append(name)
             continue
         links.append(build_heatmap_drill_url(code, name, src=src))
         linked_count += 1
@@ -359,13 +359,13 @@ def _decorate_dataframe_backtest_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
     out = df.copy()
     link_config: dict[str, object] = {}
     for col in code_cols:
-        links: list[str | None] = []
+        links: list[object] = []
         linked_count = 0
         col_series = out[col]
         for row_idx, value in col_series.items():
             symbol, default_market = parse_drill_symbol(value)
             if not symbol or symbol.startswith("^"):
-                links.append(None)
+                links.append(value)
                 continue
             row_market = _normalize_market_tag_for_drill(
                 market_series.get(row_idx, "") if hasattr(market_series, "get") else ""
@@ -395,27 +395,29 @@ def _decorate_dataframe_backtest_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
 _ORIGINAL_ST_DATAFRAME = st.dataframe
 
 
-def _table_drilldown_enabled() -> bool:
-    try:
-        raw = st.session_state.get(TABLE_DRILLDOWN_SESSION_KEY, True)
-    except Exception:
-        return True
-    return bool(raw)
+def _table_drilldown_state_key(scope: str) -> str:
+    token = str(scope or "").strip().lower() or "default"
+    return f"{TABLE_DRILLDOWN_KEY_PREFIX}:{token}"
 
 
-def _render_table_drilldown_toggle() -> None:
-    if TABLE_DRILLDOWN_SESSION_KEY not in st.session_state:
-        st.session_state[TABLE_DRILLDOWN_SESSION_KEY] = True
-    with st.sidebar:
+def _render_table_drilldown_toggle_inline(
+    *,
+    scope: str,
+    label: str = "表格點擊導流",
+    default: bool = True,
+) -> bool:
+    state_key = _table_drilldown_state_key(scope)
+    enabled = bool(
         st.checkbox(
-            "表格點擊導流",
-            key=TABLE_DRILLDOWN_SESSION_KEY,
-            help=(
-                "開啟：表格可點擊導向回測/熱力圖。關閉：表格只顯示純資料，適合直接下載到 Excel。"
-            ),
+            label,
+            key=state_key,
+            value=bool(default),
+            help="開啟：可點擊導向回測/熱力圖。關閉：只顯示純資料（下載到 Excel 較乾淨）。",
         )
-        if st.session_state.get(TABLE_DRILLDOWN_SESSION_KEY, True):
-            st.caption("若要匯出乾淨表格，先關閉此開關再下載。")
+    )
+    if enabled:
+        st.caption("若要匯出乾淨表格，先關閉此開關再下載。")
+    return enabled
 
 
 def _tw_etf_precision_column_config(frame: pd.DataFrame) -> dict[str, object]:
@@ -481,7 +483,7 @@ def _format_tw_code_columns_for_display(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _dataframe_with_backtest_drilldown(data: Any = None, *args, **kwargs):
     opts = dict(kwargs)
-    enable_drilldown = bool(opts.pop("enable_backtest_drilldown", _table_drilldown_enabled()))
+    enable_drilldown = bool(opts.pop("enable_backtest_drilldown", False))
     disable_drilldown = bool(opts.pop("disable_backtest_drilldown", False))
     frame = data
     if isinstance(frame, pd.DataFrame):
@@ -4054,8 +4056,8 @@ def _decorate_tw_etf_aum_history_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
         return df, {}
     out = df.copy()
 
-    code_links: list[str | None] = []
-    name_links: list[str | None] = []
+    code_links: list[object] = []
+    name_links: list[object] = []
     linked_code_count = 0
     linked_name_count = 0
 
@@ -4063,8 +4065,8 @@ def _decorate_tw_etf_aum_history_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
         code = _normalize_heatmap_etf_code(row.get("台股代號"))
         name = str(row.get("ETF名稱", "")).strip()
         if not code:
-            code_links.append(None)
-            name_links.append(None)
+            code_links.append(row.get("台股代號"))
+            name_links.append(name)
             continue
         code_links.append(build_backtest_drill_url(symbol=code, market="TW"))
         linked_code_count += 1
@@ -5180,7 +5182,7 @@ def _decorate_tw_etf_top10_ytd_table(
 
     benchmark_row = {
         "排名": "—",
-        "代碼": str(benchmark_code or "^TWII"),
+        "代碼": "^TWII",
         "ETF": "台股大盤",
         "類型": "大盤",
         "開盤": np.nan,
@@ -6350,10 +6352,38 @@ def _render_tw_etf_all_types_view():
             except Exception as exc:
                 st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
 
-        table_display = table_df
+        table_drilldown_enabled = _render_table_drilldown_toggle_inline(
+            scope="tw_etf_all_types_main",
+            label="總表點擊導流",
+            default=True,
+        )
+        benchmark_row = {
+            "編號": "—",
+            "代碼": "^TWII",
+            "ETF": "台股大盤",
+            "管理費(%)": np.nan,
+            "ETF規模(億)": np.nan,
+            "類型": "大盤",
+            "2025績效(%)": _truncate_value(market_2025_return, digits=2)
+            if market_2025_return is not None
+            else np.nan,
+            "大盤超額2025(%)": 0.0 if market_2025_return is not None else np.nan,
+            "YTD績效(%)": _truncate_value(market_ytd_return, digits=2)
+            if market_ytd_return is not None
+            else np.nan,
+            "大盤超額YTD(%)": 0.0 if market_ytd_return is not None else np.nan,
+            "開盤": np.nan,
+            "收盤": np.nan,
+            "今日漲幅": _truncate_value(market_daily_return, digits=2)
+            if market_daily_return is not None
+            else np.nan,
+            "今日贏大盤%": 0.0 if market_daily_return is not None else np.nan,
+        }
+        table_view_df = pd.concat([pd.DataFrame([benchmark_row]), table_df], ignore_index=True)
+        table_display = table_view_df
         merged_link_config: dict[str, object] = {}
-        if _table_drilldown_enabled():
-            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(table_df)
+        if table_drilldown_enabled:
+            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(table_view_df)
             table_display, code_link_config = _decorate_dataframe_backtest_links(table_display)
             if isinstance(code_link_config, dict):
                 merged_link_config.update(code_link_config)
@@ -6382,9 +6412,14 @@ def _render_tw_etf_all_types_view():
             start_date=aum_track_anchor_date,
             max_date_cols=10,
         )
+        history_drilldown_enabled = _render_table_drilldown_toggle_inline(
+            scope="tw_etf_all_types_history",
+            label="規模追蹤點擊導流",
+            default=True,
+        )
         history_display = history_wide
         history_link_config: dict[str, object] = {}
-        if _table_drilldown_enabled():
+        if history_drilldown_enabled:
             history_display, history_link_config = _decorate_tw_etf_aum_history_links(history_wide)
         st.markdown("#### 基金規模追蹤（最近 10 交易日）")
         st.caption("欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以粉紅標示。")
@@ -6815,9 +6850,14 @@ def _render_top10_etf_2026_ytd_view(
             f"`{compare_col_label}` 採對照區間內首個可交易日計算；若空白代表該檔對照區間無可用日K。"
         )
         st.caption(f"報酬計算：`大盤超額(%) = {performance_col_label} - 大盤報酬`。")
+        table_drilldown_enabled = _render_table_drilldown_toggle_inline(
+            scope=f"{page_key_prefix}_rank",
+            label="排行表點擊導流",
+            default=True,
+        )
         table_display = table_df
         merged_link_config: dict[str, object] = {}
-        if _table_drilldown_enabled():
+        if table_drilldown_enabled:
             table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(
                 table_df,
                 src=f"{page_key_prefix}_rank_table",
@@ -7528,10 +7568,9 @@ def _render_active_etf_2026_ytd_view():
                 pd.to_numeric(etf_df["YTD績效(%)"], errors="coerce") - float(market_return_pct)
             ).round(2)
 
-        benchmark_code = market_symbol_used or market_2025_symbol_used or "^TWII"
         benchmark_row = {
             "排名": "—",
-            "代碼": benchmark_code,
+            "代碼": "^TWII",
             "ETF": "台股大盤",
             "開盤": np.nan,
             "收盤": np.nan,
@@ -7628,7 +7667,29 @@ def _render_active_etf_2026_ytd_view():
         st.caption(
             "報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`大盤超額(%) = YTD績效 - 大盤報酬`。"
         )
-        st.dataframe(table_df, width="stretch", hide_index=True)
+        table_drilldown_enabled = _render_table_drilldown_toggle_inline(
+            scope="active_etf_ytd_main",
+            label="主動式排行表點擊導流",
+            default=True,
+        )
+        table_display = table_df
+        merged_link_config: dict[str, object] = {}
+        if table_drilldown_enabled:
+            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(
+                table_df, src="active_etf_ytd_rank_table"
+            )
+            table_display, code_link_config = _decorate_dataframe_backtest_links(table_display)
+            if isinstance(code_link_config, dict):
+                merged_link_config.update(code_link_config)
+            if isinstance(table_link_config, dict):
+                merged_link_config.update(table_link_config)
+        st.dataframe(
+            table_display,
+            width="stretch",
+            hide_index=True,
+            column_config=merged_link_config if merged_link_config else None,
+            disable_backtest_drilldown=True,
+        )
 
     symbols = [
         str(x).strip().upper() for x in etf_df["代碼"].astype(str).tolist() if str(x).strip()
@@ -10981,7 +11042,6 @@ def main():
     _auto_run_daily_incremental_refresh(_history_store())
     st.title("即時走勢 / 多來源資料 / 回測平台")
     st.caption(_runtime_stack_caption())
-    _render_table_drilldown_toggle()
     _render_design_toolbox()
     active_page = _render_page_cards_nav()
     page_renderers = {

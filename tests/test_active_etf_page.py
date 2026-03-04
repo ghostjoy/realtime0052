@@ -202,9 +202,15 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertTrue(str(out.iloc[0]["代碼"]).startswith("?bt_symbol=0050&bt_market=TW"))
         self.assertTrue(str(out.iloc[1]["代碼"]).startswith("?bt_symbol=8069&bt_market=OTC"))
         self.assertTrue(str(out.iloc[2]["代碼"]).startswith("?bt_symbol=AAPL&bt_market=US"))
-        self.assertTrue(pd.isna(out.iloc[3]["代碼"]))
+        self.assertEqual(str(out.iloc[3]["代碼"]), "—")
 
-    def test_dataframe_with_backtest_drilldown_defaults_to_links(self):
+    def test_decorate_dataframe_backtest_links_keeps_twii_text(self):
+        source = pd.DataFrame([{"代碼": "^TWII", "ETF": "台股大盤", "市場": "TW"}])
+        out, cfg = _decorate_dataframe_backtest_links(source)
+        self.assertEqual(cfg, {})
+        self.assertEqual(str(out.iloc[0]["代碼"]), "^TWII")
+
+    def test_dataframe_with_backtest_drilldown_defaults_to_plain_values(self):
         source = pd.DataFrame([{"代碼": "0050", "市場": "TW"}])
         captured: dict[str, object] = {}
 
@@ -219,9 +225,10 @@ class ActiveEtfPageTests(unittest.TestCase):
         frame = captured.get("frame")
         self.assertIsInstance(frame, pd.DataFrame)
         assert isinstance(frame, pd.DataFrame)
-        self.assertIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
+        self.assertNotIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
+        self.assertNotIn("hm_etf=", str(frame.iloc[0]["代碼"]))
 
-    def test_dataframe_with_backtest_drilldown_can_disable_links_with_switch(self):
+    def test_dataframe_with_backtest_drilldown_can_enable_links(self):
         source = pd.DataFrame([{"代碼": "0050", "市場": "TW"}])
         captured: dict[str, object] = {}
 
@@ -230,17 +237,13 @@ class ActiveEtfPageTests(unittest.TestCase):
             captured["kwargs"] = kwargs
             return frame
 
-        with (
-            patch("app._ORIGINAL_ST_DATAFRAME", side_effect=_fake_dataframe),
-            patch.dict("app.st.session_state", {"ui_enable_table_drilldown": False}, clear=False),
-        ):
-            _dataframe_with_backtest_drilldown(source)
+        with patch("app._ORIGINAL_ST_DATAFRAME", side_effect=_fake_dataframe):
+            _dataframe_with_backtest_drilldown(source, enable_backtest_drilldown=True)
 
         frame = captured.get("frame")
         self.assertIsInstance(frame, pd.DataFrame)
         assert isinstance(frame, pd.DataFrame)
-        self.assertNotIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
-        self.assertNotIn("hm_etf=", str(frame.iloc[0]["代碼"]))
+        self.assertIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
 
     def testnormalize_heatmap_etf_code(self):
         self.assertEqual(normalize_heatmap_etf_code("00935"), "00935")
@@ -516,6 +519,7 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "ETF名稱": "野村臺灣新科技50",
                     "2026-01-03(億)": 800,
                 },
+                {"編號": 3, "台股代號": "^TWII", "ETF名稱": "台股大盤", "2026-01-03(億)": 0},
             ]
         )
         out, cfg = _decorate_tw_etf_aum_history_links(source)
@@ -523,6 +527,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("ETF名稱", cfg)
         self.assertTrue(str(out.iloc[0]["台股代號"]).startswith("?bt_symbol=0050"))
         self.assertIn("hm_etf=00935", str(out.iloc[1]["ETF名稱"]))
+        self.assertEqual(str(out.iloc[2]["台股代號"]), "^TWII")
+        self.assertEqual(str(out.iloc[2]["ETF名稱"]), "台股大盤")
 
     def test_recent_twse_trading_days(self):
         is_trading = {
@@ -1551,6 +1557,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         self.assertEqual(len(out), 3)
         self.assertEqual(str(out.iloc[0]["ETF"]), "台股大盤")
+        self.assertEqual(str(out.iloc[0]["代碼"]), "^TWII")
         self.assertEqual(str(out.iloc[0]["排名"]), "—")
         self.assertEqual(str(out.iloc[1]["排名"]), "1  (↑1)")
         self.assertEqual(str(out.iloc[2]["排名"]), "2  (↓1)")
