@@ -346,6 +346,8 @@ uv run python scripts/duckdb_housekeeping.py \
   --checkpoint
 ```
 
+完整參數與情境範例請見：`docs/duckdb_housekeeping.md`
+
 ## 台股 ETF 管理費（可逐步補齊）
 
 - 管理費資料檔：`conf/tw_etf_management_fees.json`
