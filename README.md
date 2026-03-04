@@ -88,6 +88,7 @@ git config --get core.hooksPath
   - `universe_snapshots`
   - `heatmap_runs`
   - `rotation_runs`
+  - `market_snapshots`（外部來源快照、來源鏈路與新鮮度）
 
 ```bash
 # 可選：自訂 DuckDB 與 Parquet 路徑
@@ -332,6 +333,17 @@ uv run python scripts/backup_duckdb_snapshot.py
 
 ```bash
 uv run python scripts/restore_duckdb_snapshot.py /path/to/snapshot_dir --force
+```
+
+執行快照清理與 DuckDB 維護（可選 CHECKPOINT/VACUUM）：
+
+```bash
+uv run python scripts/duckdb_housekeeping.py \
+  --keep live_quote=5 \
+  --keep live_ohlcv=14 \
+  --keep twse_mi_index_allbut0999=60 \
+  --default-keep-days 30 \
+  --checkpoint
 ```
 
 ## 台股 ETF 管理費（可逐步補齊）

@@ -584,6 +584,81 @@ class DuckStoreTests(unittest.TestCase):
             )
             self.assertIsNone(latest)
 
+    def test_market_snapshot_stats_housekeeping_and_maintenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            now_utc = datetime.now(tz=timezone.utc)
+            store.save_market_snapshot(
+                dataset_key="live_quote",
+                market="TW",
+                symbol="0050",
+                interval="quote",
+                source="unit",
+                asof=now_utc,
+                payload={"price": 100.0},
+                freshness_sec=5,
+                stale=False,
+            )
+            store.save_market_snapshot(
+                dataset_key="live_quote",
+                market="TW",
+                symbol="0050",
+                interval="quote",
+                source="unit",
+                asof=datetime(2000, 1, 1, tzinfo=timezone.utc),
+                payload={"price": 80.0},
+                freshness_sec=5,
+                stale=True,
+            )
+            store.save_market_snapshot(
+                dataset_key="twse_mi_index_allbut0999",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                source="unit",
+                asof=datetime(2000, 1, 1, tzinfo=timezone.utc),
+                payload={"rows": []},
+                freshness_sec=0,
+                stale=True,
+            )
+
+            stats = store.get_market_snapshot_stats(limit=20)
+            self.assertTrue(any(str(item.get("dataset_key")) == "live_quote" for item in stats))
+            self.assertTrue(
+                any(str(item.get("dataset_key")) == "twse_mi_index_allbut0999" for item in stats)
+            )
+
+            report = store.run_market_snapshot_housekeeping(
+                policy={"live_quote": 1},
+                default_keep_days=50000,
+            )
+            self.assertGreaterEqual(int(report.get("removed_total", 0) or 0), 1)
+            removed_map = report.get("removed_by_dataset", {})
+            self.assertIsInstance(removed_map, dict)
+            assert isinstance(removed_map, dict)
+            self.assertGreaterEqual(int(removed_map.get("live_quote", 0) or 0), 1)
+            self.assertEqual(int(removed_map.get("twse_mi_index_allbut0999", 0) or 0), 0)
+
+            latest = store.load_latest_market_snapshot(
+                dataset_key="live_quote",
+                market="TW",
+                symbol="0050",
+                interval="quote",
+            )
+            self.assertIsNotNone(latest)
+
+            maintenance = store.run_duckdb_maintenance(checkpoint=True, vacuum=False)
+            actions = maintenance.get("actions")
+            self.assertIsInstance(actions, list)
+            assert isinstance(actions, list)
+            self.assertIn("CHECKPOINT", actions)
+
     def test_sync_tw_index_uses_yahoo_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

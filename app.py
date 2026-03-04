@@ -5,7 +5,6 @@ import json
 import logging
 import math
 import re
-import sqlite3
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -870,7 +869,7 @@ def _persist_live_tick_buffer(
     st.session_state[buffer_key] = buffer
 
 
-def _load_intraday_bars_from_sqlite(
+def _load_intraday_bars_from_local_cache(
     *,
     store: HistoryStore,
     symbol: str,
@@ -1851,7 +1850,7 @@ PAGE_CARDS = [
     {"key": "00735 熱力圖", "desc": "00735 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "0052 熱力圖", "desc": "0052 成分股回測的相對大盤熱力圖。"},
-    {"key": "資料庫檢視", "desc": "直接查看 SQLite / DuckDB 各表筆數、欄位與內容。"},
+    {"key": "資料庫檢視", "desc": "直接查看 DuckDB 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
 ]
 DEFAULT_ACTIVE_PAGE = "回測工作台"
@@ -3527,10 +3526,57 @@ def _normalize_tw_etf_management_fee_label(value: object) -> str:
 def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
     import requests
 
+    store = _history_store()
+    token = str(target_yyyymmdd or "").strip()
+    asof_token = (
+        token if re.fullmatch(r"\d{8}", token) else datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+    )
+
+    def _decode_payload(payload: object) -> dict[str, float]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("map"), dict):
+            return {}
+        out_map: dict[str, float] = {}
+        for code_raw, value_raw in payload.get("map", {}).items():
+            code = str(code_raw or "").strip().upper()
+            value_num = pd.to_numeric(value_raw, errors="coerce")
+            if not code or pd.isna(value_num):
+                continue
+            try:
+                value = float(value_num)
+            except Exception:
+                continue
+            if math.isfinite(value) and value >= 0:
+                out_map[code] = value
+        return out_map
+
+    latest_cached_map: dict[str, float] = {}
+    loader = getattr(store, "load_latest_market_snapshot", None)
+    if callable(loader):
+        try:
+            cached = loader(
+                dataset_key="twse_etf_aum_billion_map",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+            )
+        except Exception:
+            cached = None
+        if isinstance(cached, dict):
+            cached_asof = cached.get("asof")
+            cached_map = _decode_payload(cached.get("payload"))
+            latest_cached_map = dict(cached_map)
+            if cached_map:
+                if not token:
+                    return cached_map
+                if (
+                    isinstance(cached_asof, datetime)
+                    and cached_asof.strftime("%Y%m%d") == asof_token
+                ):
+                    return cached_map
+
     out: dict[str, float] = {}
     try:
         params: dict[str, str] = {}
-        token = str(target_yyyymmdd or "").strip()
         if re.fullmatch(r"\d{8}", token):
             params["date"] = token
         resp = requests.get(
@@ -3558,7 +3604,31 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
                 continue
             out[code] = float(aum)
     except Exception:
-        return {}
+        return latest_cached_map
+    writer = getattr(store, "save_market_snapshot", None)
+    if out and callable(writer):
+        now_utc = datetime.now(tz=timezone.utc)
+        try:
+            asof_dt = datetime.strptime(asof_token, "%Y%m%d").replace(tzinfo=timezone.utc)
+        except Exception:
+            asof_dt = now_utc
+        freshness = max(0, int((now_utc - asof_dt).total_seconds()))
+        try:
+            writer(
+                dataset_key="twse_etf_aum_billion_map",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                source="twse_etf_excel",
+                asof=asof_dt,
+                payload={"date": asof_token, "map": out},
+                freshness_sec=freshness,
+                quality_score=1.0,
+                stale=freshness > 86400,
+                raw_json={"date": asof_token, "rows": len(out)},
+            )
+        except Exception:
+            pass
     return out
 
 
@@ -8480,7 +8550,7 @@ def _render_tutorial_view():
             },
             {
                 "分頁": "資料庫檢視",
-                "你會看到什麼": "DuckDB/SQLite 表格總覽、欄位、分頁資料",
+                "你會看到什麼": "DuckDB 表格總覽、欄位、分頁資料",
                 "什麼時候用": "確認資料是否有進本地資料庫",
             },
             {
@@ -10498,18 +10568,147 @@ def _render_0052_heatmap_view():
 def _render_db_browser_view():
     store = _history_store()
     backend_name = str(getattr(store, "backend_name", "duckdb") or "duckdb").strip().lower()
-    backend_label = "DuckDB" if backend_name == "duckdb" else "SQLite"
-
-    st.subheader(f"{backend_label} 資料庫檢視")
+    if backend_name != "duckdb":
+        st.warning(f"目前後端為 `{backend_name}`，此頁面已以 DuckDB-only 設計。")
+    st.subheader("DuckDB 資料庫檢視")
     db_path = store.db_path
 
-    st.caption(f"資料庫路徑：`{db_path}` | backend: `{backend_label}`")
+    st.caption(f"資料庫路徑：`{db_path}` | backend: `DuckDB`")
     if not db_path.exists():
         st.error(f"找不到資料庫檔案：`{db_path}`。")
         return
 
     db_size_mb = db_path.stat().st_size / (1024 * 1024)
-    st.caption(f"檔案大小：約 {db_size_mb:.2f} MB")
+    parquet_root = Path(str(getattr(store, "parquet_root", db_path.parent / "parquet")))
+    parquet_size_mb = 0.0
+    parquet_files = 0
+    if parquet_root.exists():
+        parquet_files = sum(1 for p in parquet_root.rglob("*.parquet"))
+        parquet_size_mb = sum(
+            p.stat().st_size for p in parquet_root.rglob("*.parquet") if p.is_file()
+        ) / (1024 * 1024)
+    st.caption(
+        f"DuckDB 檔案大小：約 {db_size_mb:.2f} MB | Parquet：{parquet_files} 檔 / {parquet_size_mb:.2f} MB"
+    )
+
+    st.markdown("#### Snapshot 監控與維護")
+    snapshot_stats_loader = getattr(store, "get_market_snapshot_stats", None)
+    if callable(snapshot_stats_loader):
+        try:
+            snapshot_stats = snapshot_stats_loader(limit=200)
+        except Exception as exc:
+            snapshot_stats = []
+            st.warning(f"讀取 market_snapshots 統計失敗：{exc}")
+        if isinstance(snapshot_stats, list) and snapshot_stats:
+            st.dataframe(pd.DataFrame(snapshot_stats), width="stretch", hide_index=True)
+        else:
+            st.caption("尚無 market_snapshots 統計資料。")
+    else:
+        st.caption("目前 store 未提供 market_snapshots 統計 API。")
+
+    keep_col1, keep_col2, keep_col3, keep_col4 = st.columns(4)
+    keep_quote_days = int(
+        keep_col1.number_input(
+            "live_quote 保留天數",
+            min_value=1,
+            value=5,
+            step=1,
+            key="db_housekeeping_keep_live_quote",
+        )
+    )
+    keep_ohlcv_days = int(
+        keep_col2.number_input(
+            "live_ohlcv 保留天數",
+            min_value=1,
+            value=14,
+            step=1,
+            key="db_housekeeping_keep_live_ohlcv",
+        )
+    )
+    keep_twse_days = int(
+        keep_col3.number_input(
+            "TWSE 類快照保留天數",
+            min_value=1,
+            value=60,
+            step=1,
+            key="db_housekeeping_keep_twse",
+        )
+    )
+    keep_default_days = int(
+        keep_col4.number_input(
+            "其他快照保留天數",
+            min_value=1,
+            value=30,
+            step=1,
+            key="db_housekeeping_keep_default",
+        )
+    )
+
+    policy = {
+        "live_quote": keep_quote_days,
+        "live_ohlcv": keep_ohlcv_days,
+        TWSE_SNAPSHOT_DATASET_KEY: keep_twse_days,
+        "twse_trading_day_flag": keep_twse_days,
+        "twse_twii_month_close_map": keep_twse_days,
+        "twse_etf_aum_billion_map": keep_twse_days,
+    }
+    housekeeping_runner = getattr(store, "run_market_snapshot_housekeeping", None)
+    checkpoint_runner = getattr(store, "run_duckdb_maintenance", None)
+    op_col1, op_col2, op_col3 = st.columns([2, 1, 1])
+    if op_col1.button(
+        "執行 market_snapshots 清理",
+        width="stretch",
+        key="db_housekeeping_purge_snapshots",
+    ):
+        if callable(housekeeping_runner):
+            with st.spinner("清理 market_snapshots 中..."):
+                try:
+                    report = housekeeping_runner(
+                        policy=policy,
+                        default_keep_days=keep_default_days,
+                    )
+                    st.session_state["db_housekeeping_snapshot_report"] = report
+                    st.success("market_snapshots 清理完成。")
+                except Exception as exc:
+                    st.error(f"清理失敗：{exc}")
+        else:
+            st.warning("目前 store 未提供 run_market_snapshot_housekeeping API。")
+
+    if op_col2.button("CHECKPOINT", width="stretch", key="db_housekeeping_checkpoint"):
+        if callable(checkpoint_runner):
+            with st.spinner("執行 DuckDB CHECKPOINT..."):
+                try:
+                    out = checkpoint_runner(checkpoint=True, vacuum=False)
+                    st.session_state["db_housekeeping_checkpoint"] = out
+                    st.success("CHECKPOINT 完成。")
+                except Exception as exc:
+                    st.error(f"CHECKPOINT 失敗：{exc}")
+        else:
+            st.warning("目前 store 未提供 run_duckdb_maintenance API。")
+
+    if op_col3.button("VACUUM", width="stretch", key="db_housekeeping_vacuum"):
+        if callable(checkpoint_runner):
+            with st.spinner("執行 DuckDB VACUUM（可能需要較久）..."):
+                try:
+                    out = checkpoint_runner(checkpoint=True, vacuum=True)
+                    st.session_state["db_housekeeping_vacuum"] = out
+                    st.success("VACUUM 完成。")
+                except Exception as exc:
+                    st.error(f"VACUUM 失敗：{exc}")
+        else:
+            st.warning("目前 store 未提供 run_duckdb_maintenance API。")
+
+    report = st.session_state.get("db_housekeeping_snapshot_report")
+    if isinstance(report, dict) and report:
+        st.caption("最近一次快照清理結果")
+        rows: list[dict[str, object]] = []
+        removed_by_dataset = report.get("removed_by_dataset", {})
+        if isinstance(removed_by_dataset, dict):
+            for key, value in sorted(removed_by_dataset.items(), key=lambda x: str(x[0])):
+                rows.append({"dataset_key": str(key), "removed": int(value or 0)})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.caption(f"總刪除筆數：{int(report.get('removed_total', 0) or 0)}")
 
     st.markdown("#### 市場基礎資料預載")
     latest_bootstrap = store.load_latest_bootstrap_run()
@@ -10628,33 +10827,20 @@ def _render_db_browser_view():
                 "增量更新有部分同步錯誤", [str(item) for item in issues], preview_limit=3
             )
 
-    conn_sqlite: sqlite3.Connection | None = None
     conn_duck = None
     try:
-        if backend_name == "duckdb":
-            if duckdb is None:
-                st.error("目前環境缺少 duckdb 套件，無法開啟 DuckDB 檢視。")
-                return
-            conn_duck = duckdb.connect(str(db_path), read_only=True)
-            tables_df = conn_duck.execute(
-                """
-                SELECT table_name AS name
-                FROM information_schema.tables
-                WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
-                ORDER BY table_name ASC
-                """
-            ).df()
-        else:
-            conn_sqlite = sqlite3.connect(str(db_path))
-            tables_df = pd.read_sql_query(
-                """
-                SELECT name
-                FROM sqlite_master
-                WHERE type='table' AND name NOT LIKE 'sqlite_%'
-                ORDER BY name ASC
-                """,
-                conn_sqlite,
-            )
+        if duckdb is None:
+            st.error("目前環境缺少 duckdb 套件，無法開啟 DuckDB 檢視。")
+            return
+        conn_duck = duckdb.connect(str(db_path), read_only=True)
+        tables_df = conn_duck.execute(
+            """
+            SELECT table_name AS name
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
+            ORDER BY table_name ASC
+            """
+        ).df()
         if tables_df.empty:
             st.info("目前資料庫中沒有可檢視的資料表。")
             return
@@ -10664,12 +10850,8 @@ def _render_db_browser_view():
         count_map: dict[str, int] = {}
         for table in table_names:
             escaped = table.replace('"', '""')
-            if backend_name == "duckdb":
-                assert conn_duck is not None
-                count = int(conn_duck.execute(f'SELECT COUNT(*) FROM "{escaped}"').fetchone()[0])
-            else:
-                assert conn_sqlite is not None
-                count = int(conn_sqlite.execute(f'SELECT COUNT(*) FROM "{escaped}"').fetchone()[0])
+            assert conn_duck is not None
+            count = int(conn_duck.execute(f'SELECT COUNT(*) FROM "{escaped}"').fetchone()[0])
             count_map[table] = count
             summary_rows.append({"資料表": table, "筆數": count})
 
@@ -10704,12 +10886,8 @@ def _render_db_browser_view():
 
         escaped_table = selected_table.replace('"', '""')
         escaped_table_literal = selected_table.replace("'", "''")
-        if backend_name == "duckdb":
-            assert conn_duck is not None
-            schema_df = conn_duck.execute(f"PRAGMA table_info('{escaped_table_literal}')").df()
-        else:
-            assert conn_sqlite is not None
-            schema_df = pd.read_sql_query(f'PRAGMA table_info("{escaped_table}")', conn_sqlite)
+        assert conn_duck is not None
+        schema_df = conn_duck.execute(f"PRAGMA table_info('{escaped_table_literal}')").df()
         col_names = schema_df["name"].astype(str).tolist() if not schema_df.empty else []
         order_candidates = ["updated_at", "created_at", "date", "fetched_at", "id"]
         order_col = next((col for col in order_candidates if col in col_names), None)
@@ -10720,12 +10898,8 @@ def _render_db_browser_view():
             query += f' ORDER BY "{order_col}" {direction}'
         query += " LIMIT ? OFFSET ?"
 
-        if backend_name == "duckdb":
-            assert conn_duck is not None
-            data_df = conn_duck.execute(query, [page_size, offset]).df()
-        else:
-            assert conn_sqlite is not None
-            data_df = pd.read_sql_query(query, conn_sqlite, params=[page_size, offset])
+        assert conn_duck is not None
+        data_df = conn_duck.execute(query, [page_size, offset]).df()
         st.markdown("#### 資料表內容")
         if data_df.empty:
             st.info("此頁沒有資料。")
@@ -10754,8 +10928,6 @@ def _render_db_browser_view():
     except Exception as exc:
         st.error(f"讀取資料庫失敗：{exc}")
     finally:
-        if conn_sqlite is not None:
-            conn_sqlite.close()
         if conn_duck is not None:
             conn_duck.close()
 

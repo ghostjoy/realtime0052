@@ -297,7 +297,7 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertTrue(mock_get.called)
 
     @patch("requests.get")
-    def test_get_tw_symbol_names_prefers_sqlite_metadata(self, mock_get):
+    def test_get_tw_symbol_names_prefers_local_metadata_cache(self, mock_get):
         service = MarketDataService()
         service.set_metadata_store(
             _FakeMetadataStore(
@@ -414,7 +414,7 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertEqual(out2["2330"], "24")
 
     @patch("requests.get")
-    def test_get_tw_symbol_industries_prefers_sqlite_metadata(self, mock_get):
+    def test_get_tw_symbol_industries_prefers_local_metadata_cache(self, mock_get):
         service = MarketDataService()
         service.set_metadata_store(
             _FakeMetadataStore(

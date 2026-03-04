@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
-from config_loader import cfg_or_env, cfg_or_env_bool
+from config_loader import cfg_or_env
 from services.market_data_service import MarketDataService
 from storage.history_store import HistoryStore
 from ui.loaders import (
@@ -73,14 +73,6 @@ def create_history_store(*, service: MarketDataService | None = None) -> History
         default=1095,
         cast=int,
     )
-    legacy_sqlite_path = cfg_or_env(
-        "storage.duckdb.legacy_sqlite_path", "REALTIME0052_DB_PATH", default=None
-    )
-    auto_migrate = cfg_or_env_bool(
-        "storage.duckdb.auto_migrate_legacy_sqlite",
-        "REALTIME0052_AUTO_MIGRATE_LEGACY_SQLITE",
-        default=True,
-    )
     return cast(
         HistoryStore,
         DuckHistoryStore(
@@ -88,8 +80,6 @@ def create_history_store(*, service: MarketDataService | None = None) -> History
             db_path=duck_db_path,
             parquet_root=parquet_root,
             intraday_retain_days=int(retain_days),
-            legacy_sqlite_path=legacy_sqlite_path,
-            auto_migrate_legacy_sqlite=bool(auto_migrate),
         ),
     )
 

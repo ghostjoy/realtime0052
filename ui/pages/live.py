@@ -23,7 +23,7 @@ REQUIRED_RUNTIME_NAMES = (
     "_format_int",
     "_format_price",
     "_history_store",
-    "_load_intraday_bars_from_sqlite",
+    "_load_intraday_bars_from_local_cache",
     "_market_service",
     "_normalize_ohlcv_frame",
     "_persist_live_tick_buffer",
@@ -39,7 +39,7 @@ _current_theme_name: Any = None
 _format_int: Any = None
 _format_price: Any = None
 _history_store: Any = None
-_load_intraday_bars_from_sqlite: Any = None
+_load_intraday_bars_from_local_cache: Any = None
 _market_service: Any = None
 _normalize_ohlcv_frame: Any = None
 _persist_live_tick_buffer: Any = None
@@ -453,19 +453,19 @@ def _render_live_view():
         if market == "台股(TWSE)":
             assert stock_id is not None
             min_k_for_chart = max(8, int(max(30, keep_minutes) // 15))
-            need_sqlite_fill = bars_intraday.empty or len(bars_intraday) < min_k_for_chart
-            if need_sqlite_fill:
-                sqlite_bars = _normalize_ohlcv_frame(
-                    _load_intraday_bars_from_sqlite(
+            need_local_fill = bars_intraday.empty or len(bars_intraday) < min_k_for_chart
+            if need_local_fill:
+                local_bars = _normalize_ohlcv_frame(
+                    _load_intraday_bars_from_local_cache(
                         store=store,
                         symbol=stock_id,
                         market="TW",
                         keep_minutes=keep_minutes,
                     )
                 )
-                if not sqlite_bars.empty and len(sqlite_bars) > len(bars_intraday):
+                if not local_bars.empty and len(local_bars) > len(bars_intraday):
                     before = int(len(bars_intraday))
-                    bars_intraday = sqlite_bars
+                    bars_intraday = local_bars
                     if before <= 0:
                         st.caption("即時走勢：本輪改用本地即時快取。")
                     else:

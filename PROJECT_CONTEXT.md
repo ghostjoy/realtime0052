@@ -99,6 +99,7 @@
 - `heatmap_runs`（熱力圖最近一次結果）
 - `rotation_runs`（ETF 輪動最近一次結果）
 - `bootstrap_runs`（預載與增量更新任務紀錄）
+- `market_snapshots`（外部來源快照、來源與新鮮度）
 - `daily_bars` / `intraday_ticks`：Parquet 分區資料（market/symbol）
 
 ## 5) 既定行為與假設

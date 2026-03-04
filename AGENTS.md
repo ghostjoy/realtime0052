@@ -44,6 +44,7 @@ uv run python -m compileall app.py
 - 回測摘要與回放快取：`backtest_runs`、`backtest_replay_runs`
 - 成分股快取：`universe_snapshots`（`00910 / 00935 / 00993A / 0050 / 0052`）
 - 專題結果快取：`heatmap_runs`、`rotation_runs`、`bootstrap_runs`
+- 外部來源快照：`market_snapshots`（來源與新鮮度追蹤）
 - 原則：優先重用 DuckDB/Parquet（DuckDB-only）；只做必要增量同步，避免重複打外部來源
 
 ## 5) 修改時注意事項

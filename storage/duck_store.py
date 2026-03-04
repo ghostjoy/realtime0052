@@ -49,7 +49,7 @@ class DuckHistoryStore:
         service: MarketDataService | None = None,
         intraday_retain_days: int | None = None,
         legacy_sqlite_path: str | None = None,
-        auto_migrate_legacy_sqlite: bool = True,
+        auto_migrate_legacy_sqlite: bool = False,
     ):
         self.db_path = self.resolve_history_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2588,6 +2588,127 @@ class DuckHistoryStore:
                     params,
                 )
         return count
+
+    def get_market_snapshot_stats(
+        self,
+        *,
+        dataset_key: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, object]]:
+        where: list[str] = []
+        params: list[object] = []
+        if dataset_key:
+            where.append("dataset_key=?")
+            params.append(self._normalize_text(dataset_key))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    dataset_key,
+                    market,
+                    interval,
+                    COUNT(*) AS row_count,
+                    COUNT(DISTINCT symbol) AS symbol_count,
+                    SUM(CASE WHEN stale THEN 1 ELSE 0 END) AS stale_rows,
+                    MIN(as_of) AS min_as_of,
+                    MAX(as_of) AS max_as_of,
+                    MAX(fetched_at) AS last_fetched_at
+                FROM market_snapshots
+                {where_sql}
+                GROUP BY dataset_key, market, interval
+                ORDER BY row_count DESC, dataset_key ASC, market ASC, interval ASC
+                LIMIT ?
+                """,
+                [*params, max(1, int(limit))],
+            ).fetchall()
+        finally:
+            conn.close()
+        out: list[dict[str, object]] = []
+        for row in rows:
+            out.append(
+                {
+                    "dataset_key": self._normalize_text(row[0]),
+                    "market": self._normalize_market_token(row[1]),
+                    "interval": self._normalize_text(row[2]),
+                    "rows": int(row[3] or 0),
+                    "symbols": int(row[4] or 0),
+                    "stale_rows": int(row[5] or 0),
+                    "min_as_of": self._parse_iso_datetime(row[6]),
+                    "max_as_of": self._parse_iso_datetime(row[7]),
+                    "last_fetched_at": self._parse_iso_datetime(row[8]),
+                }
+            )
+        return out
+
+    def run_market_snapshot_housekeeping(
+        self,
+        *,
+        policy: dict[str, int] | None = None,
+        default_keep_days: int = 30,
+    ) -> dict[str, object]:
+        normalized_policy: dict[str, int] = {}
+        for key, value in (policy or {}).items():
+            token = self._normalize_text(key)
+            if not token:
+                continue
+            try:
+                keep = max(1, int(value))
+            except Exception:
+                continue
+            normalized_policy[token] = keep
+
+        keep_default = max(1, int(default_keep_days))
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT dataset_key FROM market_snapshots ORDER BY dataset_key ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+        dataset_keys = [
+            self._normalize_text(row[0]) for row in rows if self._normalize_text(row[0])
+        ]
+        removed_by_dataset: dict[str, int] = {}
+        removed_total = 0
+        for dataset_key_value in dataset_keys:
+            keep_days = normalized_policy.get(dataset_key_value, keep_default)
+            removed = self.purge_market_snapshots(
+                dataset_key=dataset_key_value, keep_days=keep_days
+            )
+            removed_by_dataset[dataset_key_value] = int(removed)
+            removed_total += int(removed)
+        return {
+            "removed_total": int(removed_total),
+            "removed_by_dataset": removed_by_dataset,
+            "applied_policy": {k: int(v) for k, v in normalized_policy.items()},
+            "default_keep_days": int(keep_default),
+            "at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+    def run_duckdb_maintenance(
+        self,
+        *,
+        checkpoint: bool = True,
+        vacuum: bool = False,
+    ) -> dict[str, object]:
+        actions: list[str] = []
+        conn = self._connect()
+        try:
+            if checkpoint:
+                conn.execute("CHECKPOINT")
+                actions.append("CHECKPOINT")
+            if vacuum:
+                conn.execute("VACUUM")
+                actions.append("VACUUM")
+        finally:
+            conn.close()
+        return {
+            "actions": actions,
+            "at": datetime.now(tz=timezone.utc).isoformat(),
+            "db_path": str(self.db_path),
+        }
 
     def save_universe_snapshot(
         self,

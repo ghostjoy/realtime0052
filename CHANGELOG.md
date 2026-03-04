@@ -102,8 +102,18 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, di.py, scripts/duckdb_housekeeping.py, ... (+4) [id:4b01ffd10e]
 - Auto: updated app.py, scripts/backup_duckdb_snapshot.py, scripts/restore_duckdb_snapshot.py, services/market_data_service.py, storage/duck_store.py, ui/pages/live.py [id:0af5307290]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, di.py, scripts/backup_duckdb_snapshot.py, ... (+7) [id:f2be7b4f75]
+- DuckDB-only 執行路徑收斂：
+  - `app.py` 移除 SQLite 分支與相關文案，`資料庫檢視` 改為僅 DuckDB。
+  - `ui/pages/live.py` 本地補K函式命名改為本地快取語義（不再出現 SQLite fallback 命名）。
+  - `di.py` 建立 `DuckHistoryStore` 時不再傳入 legacy SQLite 遷移參數（預設不觸發 SQLite 路徑）。
+- 新增 DuckDB 維護入口：
+  - `DuckHistoryStore` 新增 `get_market_snapshot_stats`、`run_market_snapshot_housekeeping`、`run_duckdb_maintenance`。
+  - `資料庫檢視` 分頁新增 market snapshot 統計、保留天數清理與 `CHECKPOINT/VACUUM` 操作。
+  - 新增 `scripts/duckdb_housekeeping.py` 可從 CLI 執行快照清理與維護。
+- `TWSE ETF AUM` 資料流改為 DuckDB 快照優先：`_load_tw_etf_aum_billion_map` 先讀 `market_snapshots`，成功抓取後回寫快照，網路失敗時可回退最近本地快照。
 - DuckDB-only 儲存技術線落地：
   - `di.create_history_store(...)` 改為固定回傳 `DuckHistoryStore`，不再走 SQLite backend 分支。
   - `storage/__init__.py` 對外 `HistoryStore` 直接映射 DuckDB store，文件同步改為 DuckDB only 描述。
