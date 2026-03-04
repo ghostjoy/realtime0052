@@ -257,6 +257,7 @@ BACKTEST_DRILL_CODE_COLUMNS = {
 BACKTEST_DRILL_MARKET_COLUMNS = {"市場", "market", "Market", "交易所", "exchange", "Exchange"}
 BACKTEST_DRILL_QUERY_KEYS = ("bt_symbol", "bt_market", "bt_label", "bt_autorun", "bt_src")
 BACKTEST_AUTORUN_PENDING_KEY = "bt_autorun_pending"
+TABLE_DRILLDOWN_SESSION_KEY = "ui_enable_table_drilldown"
 HEATMAP_DRILL_QUERY_KEYS = ("hm_etf", "hm_name", "hm_label", "hm_open", "hm_src")
 HEATMAP_HUB_SESSION_ACTIVE_KEY = "heatmap_hub_active_etf"
 HEATMAP_DYNAMIC_CARD_PREFIX = "ETF熱力圖:"
@@ -394,6 +395,29 @@ def _decorate_dataframe_backtest_links(df: pd.DataFrame) -> tuple[pd.DataFrame, 
 _ORIGINAL_ST_DATAFRAME = st.dataframe
 
 
+def _table_drilldown_enabled() -> bool:
+    try:
+        raw = st.session_state.get(TABLE_DRILLDOWN_SESSION_KEY, True)
+    except Exception:
+        return True
+    return bool(raw)
+
+
+def _render_table_drilldown_toggle() -> None:
+    if TABLE_DRILLDOWN_SESSION_KEY not in st.session_state:
+        st.session_state[TABLE_DRILLDOWN_SESSION_KEY] = True
+    with st.sidebar:
+        st.checkbox(
+            "表格點擊導流",
+            key=TABLE_DRILLDOWN_SESSION_KEY,
+            help=(
+                "開啟：表格可點擊導向回測/熱力圖。關閉：表格只顯示純資料，適合直接下載到 Excel。"
+            ),
+        )
+        if st.session_state.get(TABLE_DRILLDOWN_SESSION_KEY, True):
+            st.caption("若要匯出乾淨表格，先關閉此開關再下載。")
+
+
 def _tw_etf_precision_column_config(frame: pd.DataFrame) -> dict[str, object]:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return {}
@@ -457,7 +481,7 @@ def _format_tw_code_columns_for_display(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _dataframe_with_backtest_drilldown(data: Any = None, *args, **kwargs):
     opts = dict(kwargs)
-    enable_drilldown = bool(opts.pop("enable_backtest_drilldown", False))
+    enable_drilldown = bool(opts.pop("enable_backtest_drilldown", _table_drilldown_enabled()))
     disable_drilldown = bool(opts.pop("disable_backtest_drilldown", False))
     frame = data
     if isinstance(frame, pd.DataFrame):
@@ -6326,13 +6350,26 @@ def _render_tw_etf_all_types_view():
             except Exception as exc:
                 st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
 
+        table_display = table_df
+        merged_link_config: dict[str, object] = {}
+        if _table_drilldown_enabled():
+            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(table_df)
+            table_display, code_link_config = _decorate_dataframe_backtest_links(table_display)
+            if isinstance(code_link_config, dict):
+                merged_link_config.update(code_link_config)
+            if isinstance(table_link_config, dict):
+                merged_link_config.update(table_link_config)
         visible_rows = 30
         scroll_height = 40 + visible_rows * 36
+        if merged_link_config:
+            st.caption("可直接點擊 `ETF` 中文名稱，在新分頁開啟對應熱力圖（內容同 00935 熱力圖）。")
         st.dataframe(
-            _style_tw_today_move_table(table_df),
+            _style_tw_today_move_table(table_display),
             width="stretch",
             hide_index=True,
             height=scroll_height,
+            column_config=merged_link_config if merged_link_config else None,
+            disable_backtest_drilldown=True,
         )
         st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
 
@@ -6345,6 +6382,10 @@ def _render_tw_etf_all_types_view():
             start_date=aum_track_anchor_date,
             max_date_cols=10,
         )
+        history_display = history_wide
+        history_link_config: dict[str, object] = {}
+        if _table_drilldown_enabled():
+            history_display, history_link_config = _decorate_tw_etf_aum_history_links(history_wide)
         st.markdown("#### 基金規模追蹤（最近 10 交易日）")
         st.caption("欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以粉紅標示。")
         st.caption(
@@ -6354,12 +6395,18 @@ def _render_tw_etf_all_types_view():
             st.info("尚無規模追蹤資料，請按「更新規模追蹤」。")
         else:
             st.dataframe(
-                _style_tw_etf_aum_history_table(history_wide),
+                _style_tw_etf_aum_history_table(history_display),
                 width="stretch",
                 hide_index=True,
                 height=scroll_height,
+                column_config=history_link_config if history_link_config else None,
+                disable_backtest_drilldown=True,
             )
             st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
+            if history_link_config:
+                st.caption(
+                    "可點擊 `台股代號` 開啟回測；可點擊 `ETF名稱` 開啟該檔 ETF 成分股熱力圖。"
+                )
 
         hub_col1, hub_col2 = st.columns([2, 1])
         with hub_col1:
@@ -6768,7 +6815,19 @@ def _render_top10_etf_2026_ytd_view(
             f"`{compare_col_label}` 採對照區間內首個可交易日計算；若空白代表該檔對照區間無可用日K。"
         )
         st.caption(f"報酬計算：`大盤超額(%) = {performance_col_label} - 大盤報酬`。")
-        styled_table_df = _style_tw_today_move_table(table_df)
+        table_display = table_df
+        merged_link_config: dict[str, object] = {}
+        if _table_drilldown_enabled():
+            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(
+                table_df,
+                src=f"{page_key_prefix}_rank_table",
+            )
+            table_display, code_link_config = _decorate_dataframe_backtest_links(table_display)
+            if isinstance(code_link_config, dict):
+                merged_link_config.update(code_link_config)
+            if isinstance(table_link_config, dict):
+                merged_link_config.update(table_link_config)
+        styled_table_df = _style_tw_today_move_table(table_display)
         if page_key_prefix in {"top10_etf_ytd", "top10_dividend_etf_ytd"}:
             # 固定顯示完整 11 列（台股大盤 + 前10），方便一次截圖。
             table_height = min(640, 42 + max(1, int(len(table_df))) * 36)
@@ -6777,12 +6836,16 @@ def _render_top10_etf_2026_ytd_view(
                 width="stretch",
                 hide_index=True,
                 height=table_height,
+                column_config=merged_link_config if merged_link_config else None,
+                disable_backtest_drilldown=True,
             )
         else:
             st.dataframe(
                 styled_table_df,
                 width="stretch",
                 hide_index=True,
+                column_config=merged_link_config if merged_link_config else None,
+                disable_backtest_drilldown=True,
             )
 
         with st.expander("分類說明", expanded=False):
@@ -10918,6 +10981,7 @@ def main():
     _auto_run_daily_incremental_refresh(_history_store())
     st.title("即時走勢 / 多來源資料 / 回測平台")
     st.caption(_runtime_stack_caption())
+    _render_table_drilldown_toggle()
     _render_design_toolbox()
     active_page = _render_page_cards_nav()
     page_renderers = {

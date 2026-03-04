@@ -204,7 +204,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertTrue(str(out.iloc[2]["代碼"]).startswith("?bt_symbol=AAPL&bt_market=US"))
         self.assertTrue(pd.isna(out.iloc[3]["代碼"]))
 
-    def test_dataframe_with_backtest_drilldown_defaults_to_plain_values(self):
+    def test_dataframe_with_backtest_drilldown_defaults_to_links(self):
         source = pd.DataFrame([{"代碼": "0050", "市場": "TW"}])
         captured: dict[str, object] = {}
 
@@ -219,10 +219,9 @@ class ActiveEtfPageTests(unittest.TestCase):
         frame = captured.get("frame")
         self.assertIsInstance(frame, pd.DataFrame)
         assert isinstance(frame, pd.DataFrame)
-        self.assertNotIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
-        self.assertNotIn("hm_etf=", str(frame.iloc[0]["代碼"]))
+        self.assertIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
 
-    def test_dataframe_with_backtest_drilldown_can_enable_links(self):
+    def test_dataframe_with_backtest_drilldown_can_disable_links_with_switch(self):
         source = pd.DataFrame([{"代碼": "0050", "市場": "TW"}])
         captured: dict[str, object] = {}
 
@@ -231,13 +230,17 @@ class ActiveEtfPageTests(unittest.TestCase):
             captured["kwargs"] = kwargs
             return frame
 
-        with patch("app._ORIGINAL_ST_DATAFRAME", side_effect=_fake_dataframe):
-            _dataframe_with_backtest_drilldown(source, enable_backtest_drilldown=True)
+        with (
+            patch("app._ORIGINAL_ST_DATAFRAME", side_effect=_fake_dataframe),
+            patch.dict("app.st.session_state", {"ui_enable_table_drilldown": False}, clear=False),
+        ):
+            _dataframe_with_backtest_drilldown(source)
 
         frame = captured.get("frame")
         self.assertIsInstance(frame, pd.DataFrame)
         assert isinstance(frame, pd.DataFrame)
-        self.assertIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
+        self.assertNotIn("bt_symbol=", str(frame.iloc[0]["代碼"]))
+        self.assertNotIn("hm_etf=", str(frame.iloc[0]["代碼"]))
 
     def testnormalize_heatmap_etf_code(self):
         self.assertEqual(normalize_heatmap_etf_code("00935"), "00935")
