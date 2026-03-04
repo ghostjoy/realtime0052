@@ -65,6 +65,7 @@ def _serialize_live_frame(frame: pd.DataFrame, *, limit: int) -> list[dict[str, 
     safe = safe.reset_index()
     ts_col = str(safe.columns[0])
     safe = safe.rename(columns={ts_col: "ts"})
+
     def _to_float(value: object) -> float:
         num = pd.to_numeric(value, errors="coerce")
         if pd.isna(num):
@@ -188,6 +189,7 @@ def _load_tw_live_context_snapshot(*, store, symbol: str) -> LiveContext | None:
     quote_payload = payload.get("quote")
     if not isinstance(quote_payload, dict):
         return None
+
     def _to_optional_float(value: object) -> float | None:
         num = pd.to_numeric(value, errors="coerce")
         if pd.isna(num):
@@ -222,9 +224,7 @@ def _load_tw_live_context_snapshot(*, store, symbol: str) -> LiveContext | None:
         currency=str(quote_payload.get("currency") or "TWD"),
         exchange=str(quote_payload.get("exchange") or "TWSE"),
         extra=(
-            dict(quote_payload.get("extra"))
-            if isinstance(quote_payload.get("extra"), dict)
-            else {}
+            dict(quote_payload.get("extra")) if isinstance(quote_payload.get("extra"), dict) else {}
         ),
     )
     intraday = _deserialize_live_frame(payload.get("intraday"))

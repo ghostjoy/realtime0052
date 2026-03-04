@@ -648,7 +648,8 @@ class MarketDataService:
                     0,
                     int(
                         (
-                            datetime.now(tz=timezone.utc) - (daily_snap.asof or daily_snap.fetched_at)
+                            datetime.now(tz=timezone.utc)
+                            - (daily_snap.asof or daily_snap.fetched_at)
                         ).total_seconds()
                     ),
                 ),

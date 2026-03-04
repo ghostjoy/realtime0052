@@ -15,7 +15,9 @@ from storage.duck_store import DuckHistoryStore
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Restore DuckDB + Parquet snapshot")
-    parser.add_argument("snapshot_dir", help="Snapshot directory created by backup_duckdb_snapshot.py")
+    parser.add_argument(
+        "snapshot_dir", help="Snapshot directory created by backup_duckdb_snapshot.py"
+    )
     parser.add_argument("--db-path", default="", help="Restore target DuckDB path (optional)")
     parser.add_argument("--parquet-root", default="", help="Restore target parquet root (optional)")
     parser.add_argument(
@@ -54,7 +56,9 @@ def main() -> int:
         raise SystemExit(f"Snapshot parquet directory not found: {snapshot_parquet}")
 
     target_db = DuckHistoryStore.resolve_history_db_path(args.db_path or None)
-    target_parquet = DuckHistoryStore.resolve_parquet_root(args.parquet_root or None, db_path=target_db)
+    target_parquet = DuckHistoryStore.resolve_parquet_root(
+        args.parquet_root or None, db_path=target_db
+    )
 
     if target_db.exists() and not args.force:
         raise SystemExit(f"Target DuckDB exists (use --force): {target_db}")

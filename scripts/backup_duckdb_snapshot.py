@@ -54,9 +54,7 @@ def main() -> int:
     args = parser.parse_args()
 
     db_path = DuckHistoryStore.resolve_history_db_path(args.db_path or None)
-    parquet_root = DuckHistoryStore.resolve_parquet_root(
-        args.parquet_root or None, db_path=db_path
-    )
+    parquet_root = DuckHistoryStore.resolve_parquet_root(args.parquet_root or None, db_path=db_path)
     backup_root = (
         Path(args.backup_root).expanduser()
         if str(args.backup_root).strip()
@@ -94,7 +92,9 @@ def main() -> int:
         },
         "sizes": {
             "db_bytes": db_target.stat().st_size,
-            "parquet_bytes": sum(p.stat().st_size for p in parquet_target.rglob("*") if p.is_file()),
+            "parquet_bytes": sum(
+                p.stat().st_size for p in parquet_target.rglob("*") if p.is_file()
+            ),
             "parquet_files": sum(1 for p in parquet_target.rglob("*") if p.is_file()),
         },
     }

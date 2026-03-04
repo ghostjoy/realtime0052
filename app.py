@@ -3584,8 +3584,10 @@ def _is_twse_trading_day(target_yyyymmdd: str) -> bool:
         if isinstance(cached, dict):
             asof = cached.get("asof")
             payload = cached.get("payload")
-            if isinstance(asof, datetime) and asof.strftime("%Y%m%d") == token and isinstance(
-                payload, dict
+            if (
+                isinstance(asof, datetime)
+                and asof.strftime("%Y%m%d") == token
+                and isinstance(payload, dict)
             ):
                 cached_flag = payload.get("is_trading")
                 if isinstance(cached_flag, bool):

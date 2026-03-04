@@ -2361,7 +2361,9 @@ class DuckHistoryStore:
             if asof_text:
                 if re.fullmatch(r"\d{8}", asof_text):
                     try:
-                        asof_dt = datetime.strptime(asof_text, "%Y%m%d").replace(tzinfo=timezone.utc)
+                        asof_dt = datetime.strptime(asof_text, "%Y%m%d").replace(
+                            tzinfo=timezone.utc
+                        )
                     except Exception:
                         asof_dt = None
                 else:
@@ -2459,7 +2461,9 @@ class DuckHistoryStore:
                 return None
             if re.fullmatch(r"\d{8}", text):
                 try:
-                    return datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
+                    return (
+                        datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
+                    )
                 except Exception:
                     return None
             dt = self._parse_iso_datetime(text)

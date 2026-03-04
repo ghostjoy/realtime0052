@@ -102,6 +102,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- Auto: updated app.py, scripts/backup_duckdb_snapshot.py, scripts/restore_duckdb_snapshot.py, services/market_data_service.py, storage/duck_store.py, ui/pages/live.py [id:0af5307290]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, di.py, scripts/backup_duckdb_snapshot.py, ... (+7) [id:f2be7b4f75]
 - DuckDB-only 儲存技術線落地：
   - `di.create_history_store(...)` 改為固定回傳 `DuckHistoryStore`，不再走 SQLite backend 分支。
