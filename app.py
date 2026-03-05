@@ -1320,7 +1320,7 @@ def _render_tw_constituent_intro_table(
                 "排名": idx,
                 "代號": code,
                 "名稱": name,
-                "權重(%)": weight_map.get(code, "—"),
+                "權重(%)": weight_map.get(code, np.nan),
                 "產業": industry_name or ("其他" if industry_code else ""),
                 "市場": "TW",
                 "核心業務": core,

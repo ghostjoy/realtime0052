@@ -314,6 +314,7 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正 `0050` 成分股公司簡介表 `權重(%)` 欄位在缺值時輸出字串 `—` 導致 Streamlit/PyArrow 序列化失敗；改為以數值欄位（缺值 `NaN`）輸出，避免 `Could not convert '—' ... tried to convert to double`。
 - 修正 ETF 今日欄位在快照快取日期越界時可能誤用「同日收盤當昨收」問題：`昨收` 來源改為嚴格限制不可晚於目標日，避免出現 `昨收 = 收盤` 的錯誤顯示。
 - 修正快照落後時「昨收」可能跳到更舊交易日問題：當目標日快照尚未在本地可用，會同步補抓較新快照並以前一個可用快照日計算 `昨收/今日漲幅`。
 - 修正 `台股 ETF 全類型總表` 在顯示 `台股大盤(^TWII)` 基準列時的資料表序列化警告：
