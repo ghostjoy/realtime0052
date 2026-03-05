@@ -74,11 +74,15 @@ class ActiveEtfPageTests(unittest.TestCase):
         fake_rows = [
             {
                 "asof": datetime(2026, 3, 4, tzinfo=timezone.utc),
-                "payload": {"rows": [{"code": "0050", "name": "元大台灣50", "open": 79.0, "close": 80.0}]},
+                "payload": {
+                    "rows": [{"code": "0050", "name": "元大台灣50", "open": 79.0, "close": 80.0}]
+                },
             },
             {
                 "asof": datetime(2026, 3, 3, tzinfo=timezone.utc),
-                "payload": {"rows": [{"code": "0050", "name": "元大台灣50", "open": 78.0, "close": 79.0}]},
+                "payload": {
+                    "rows": [{"code": "0050", "name": "元大台灣50", "open": 78.0, "close": 79.0}]
+                },
             },
         ]
         fake_store = SimpleNamespace(load_market_snapshot_window=lambda **kwargs: fake_rows)
@@ -1731,7 +1735,11 @@ class ActiveEtfPageTests(unittest.TestCase):
             ),
             patch(
                 "app._load_tw_snapshot_price_maps",
-                return_value=("20260214", {"0050": 113.0, "00935": 58.0}, {"0050": 114.0, "00935": 59.0}),
+                return_value=(
+                    "20260214",
+                    {"0050": 113.0, "00935": 58.0},
+                    {"0050": 114.0, "00935": 59.0},
+                ),
             ),
             patch(
                 "app._load_tw_snapshot_close_map",

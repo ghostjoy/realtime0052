@@ -4993,9 +4993,7 @@ def _load_tw_etf_daily_change_map(
     end_token = re.sub(r"\D", "", str(end_used or "").strip()) or str(anchor_yyyymmdd or "").strip()
     if not end_close_map:
         return {}, end_used, ""
-    prev_used, prev_close_map = _find_previous_twse_snapshot_close_map(
-        end_token, max_scan_days=20
-    )
+    prev_used, prev_close_map = _find_previous_twse_snapshot_close_map(end_token, max_scan_days=20)
     if not prev_close_map:
         return {}, end_used, ""
     out: dict[str, float] = {}
