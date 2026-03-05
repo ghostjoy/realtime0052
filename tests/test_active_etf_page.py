@@ -54,6 +54,7 @@ from app import (
     _snapshot_fallback_depth,
     _style_tw_today_move_table,
     _tw_etf_precision_column_config,
+    _with_tw_today_fields,
 )
 from ui.helpers import (
     build_backtest_drill_url,
@@ -1624,12 +1625,12 @@ class ActiveEtfPageTests(unittest.TestCase):
                 return_value=({"0050": 1.5, "00935": 4.2}, "20260214", "20260213"),
             ),
             patch(
-                "app._load_tw_snapshot_open_map",
-                return_value=("20260214", {"0050": 113.0, "00935": 58.0}),
+                "app._load_tw_snapshot_price_maps",
+                return_value=("20260214", {"0050": 113.0, "00935": 58.0}, {"0050": 114.0, "00935": 59.0}),
             ),
             patch(
-                "app._load_tw_market_daily_return",
-                return_value=(0.8, "0050", "20260213", "20260214", []),
+                "app._load_tw_market_intraday_return",
+                return_value=(0.8, "0050", "20260214", []),
             ),
         ):
             out, meta = _build_tw_etf_all_types_performance_table(
@@ -1655,16 +1656,53 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "YTD績效(%)"].iloc[0]), 15.67)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "開盤"].iloc[0]), 113.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 58.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "收盤"].iloc[0]), 114.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "收盤"].iloc[0]), 59.0)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "大盤超額2025(%)"].iloc[0]), 12.33)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "大盤超額YTD(%)"].iloc[0]), 5.11)
-        self.assertEqual(float(out.loc[out["代碼"] == "00935", "今日漲幅"].iloc[0]), 4.2)
-        self.assertEqual(float(out.loc[out["代碼"] == "0050", "今日贏大盤%"].iloc[0]), 0.7)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "今日漲幅"].iloc[0]), 1.72)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "今日贏大盤%"].iloc[0]), 0.08)
         self.assertEqual(str(meta.get("market_2025_symbol", "")), "0050")
         self.assertEqual(str(meta.get("market_ytd_symbol", "")), "0050")
         self.assertEqual(str(meta.get("market_daily_symbol", "")), "0050")
         self.assertEqual(int(top10_build_mock.call_count), 2)
         for call in top10_build_mock.call_args_list:
             self.assertTrue(bool(call.kwargs.get("include_all_etf", False)))
+
+    def test_with_tw_today_fields_only_backfills_missing_open(self):
+        frame = pd.DataFrame(
+            [
+                {"代碼": "00735", "開盤": 64.65, "收盤": 68.80},
+                {"代碼": "00935", "開盤": None, "收盤": 31.25},
+            ]
+        )
+        out = _with_tw_today_fields(
+            frame,
+            daily_change_map={"00735": -2.13, "00935": 1.11},
+            daily_open_map={"00735": 69.2, "00935": 30.5},
+            market_daily_return_pct=0.2,
+        )
+        self.assertEqual(float(out.loc[out["代碼"] == "00735", "開盤"].iloc[0]), 64.65)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 30.5)
+        self.assertEqual(float(out.loc[out["代碼"] == "00735", "今日漲幅"].iloc[0]), -2.13)
+
+    def test_with_tw_today_fields_can_prefer_daily_ohlc(self):
+        frame = pd.DataFrame(
+            [
+                {"代碼": "00735", "開盤": 64.65, "收盤": 68.80},
+            ]
+        )
+        out = _with_tw_today_fields(
+            frame,
+            daily_change_map={"00735": -0.58},
+            daily_open_map={"00735": 69.2},
+            daily_close_map={"00735": 68.8},
+            prefer_daily_ohlc=True,
+            market_daily_return_pct=None,
+        )
+        self.assertEqual(float(out.loc[out["代碼"] == "00735", "開盤"].iloc[0]), 69.2)
+        self.assertEqual(float(out.loc[out["代碼"] == "00735", "收盤"].iloc[0]), 68.8)
+        self.assertEqual(float(out.loc[out["代碼"] == "00735", "今日漲幅"].iloc[0]), -0.58)
 
     def test_tw_etf_precision_column_config_supports_unified_columns(self):
         frame = pd.DataFrame(
