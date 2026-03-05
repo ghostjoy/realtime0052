@@ -3245,6 +3245,9 @@ def _load_cached_twse_snapshot(
         return None
     if not isinstance(rows, list):
         return None
+    target_token = str(target_yyyymmdd or "").strip()
+    if not re.fullmatch(r"\d{8}", target_token):
+        return None
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -3252,6 +3255,9 @@ def _load_cached_twse_snapshot(
         if not isinstance(asof, datetime):
             continue
         token = asof.astimezone(timezone.utc).strftime("%Y%m%d")
+        # Defensive guard: never use future snapshots when resolving a target day.
+        if token > target_token:
+            continue
         frame = _twse_snapshot_from_payload(row.get("payload"))
         if not frame.empty:
             return token, frame
@@ -3366,6 +3372,25 @@ def _fetch_twse_snapshot_with_fallback(
         lookback_days=lookback_days,
     )
     if cached is not None:
+        cached_token, _ = cached
+        if re.fullmatch(r"\d{8}", str(cached_token or "").strip()):
+            try:
+                cached_dt = datetime.strptime(str(cached_token), "%Y%m%d").date()
+            except Exception:
+                cached_dt = target_dt
+            if cached_dt < target_dt:
+                # Cache may lag behind latest trading day; probe a few recent days synchronously
+                # so "昨收" can use fresher snapshots immediately.
+                max_probe_days = min(max(1, int(lookback_days)), 5)
+                lag_days = min((target_dt - cached_dt).days, max_probe_days)
+                for offset in range(0, lag_days + 1):
+                    query_dt = target_dt - pd.Timedelta(days=offset)
+                    query_token = query_dt.strftime("%Y%m%d")
+                    if query_token <= str(cached_token):
+                        break
+                    result = _fetch_twse_snapshot_network_single(query_token)
+                    if result is not None:
+                        return result
         _queue_twse_snapshot_refresh(target_yyyymmdd)
         return cached
 
@@ -4916,6 +4941,31 @@ def _load_tw_snapshot_open_map(target_yyyymmdd: str) -> tuple[str, dict[str, flo
     return used, open_map
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _find_previous_twse_snapshot_close_map(
+    end_token: str,
+    *,
+    max_scan_days: int = 20,
+) -> tuple[str, dict[str, float]]:
+    token = re.sub(r"\D", "", str(end_token or "").strip())
+    if not re.fullmatch(r"\d{8}", token):
+        return "", {}
+    try:
+        end_dt = datetime.strptime(token, "%Y%m%d").date()
+    except Exception:
+        return "", {}
+    for offset in range(1, max(2, int(max_scan_days) + 1)):
+        probe_dt = end_dt - pd.Timedelta(days=offset)
+        probe_token = probe_dt.strftime("%Y%m%d")
+        used, close_map = _load_tw_snapshot_close_map(probe_token)
+        used_token = re.sub(r"\D", "", str(used or "").strip())
+        if not used_token or used_token >= token:
+            continue
+        if isinstance(close_map, dict) and close_map:
+            return used_token, close_map
+    return "", {}
+
+
 def _build_tw_intraday_change_map(
     *,
     open_map: dict[str, float] | None = None,
@@ -4941,11 +4991,13 @@ def _load_tw_etf_daily_change_map(
 ) -> tuple[dict[str, float], str, str]:
     end_used, end_close_map = _load_tw_snapshot_close_map(anchor_yyyymmdd)
     end_token = re.sub(r"\D", "", str(end_used or "").strip()) or str(anchor_yyyymmdd or "").strip()
-    trade_days = _recent_twse_trading_days(anchor_yyyymmdd=end_token, count=2, max_scan_days=20)
-    if len(trade_days) < 2:
+    if not end_close_map:
         return {}, end_used, ""
-    prev_token = trade_days[-2]
-    prev_used, prev_close_map = _load_tw_snapshot_close_map(prev_token)
+    prev_used, prev_close_map = _find_previous_twse_snapshot_close_map(
+        end_token, max_scan_days=20
+    )
+    if not prev_close_map:
+        return {}, end_used, ""
     out: dict[str, float] = {}
     for code, end_close in end_close_map.items():
         prev_close = prev_close_map.get(code)
@@ -4967,11 +5019,13 @@ def _load_tw_market_daily_return(
     token = re.sub(r"\D", "", str(anchor_yyyymmdd or "").strip())
     if not token:
         token = datetime.now().strftime("%Y%m%d")
-    trade_days = _recent_twse_trading_days(anchor_yyyymmdd=token, count=2, max_scan_days=20)
-    if len(trade_days) < 2:
+    end_used, end_close_map = _load_tw_snapshot_close_map(token)
+    end_token = re.sub(r"\D", "", str(end_used or "").strip()) or token
+    if not end_close_map:
         return None, "", "", "", []
-    prev_token = trade_days[-2]
-    end_token = trade_days[-1]
+    prev_token, _ = _find_previous_twse_snapshot_close_map(end_token, max_scan_days=20)
+    if not prev_token:
+        return None, "", "", "", []
     value, symbol, issues = _load_tw_market_return_between(
         start_yyyymmdd=prev_token,
         end_yyyymmdd=end_token,
@@ -5007,6 +5061,7 @@ def _with_tw_today_fields(
     frame: pd.DataFrame,
     *,
     daily_change_map: dict[str, float] | None = None,
+    daily_prev_close_map: dict[str, float] | None = None,
     daily_open_map: dict[str, float] | None = None,
     daily_close_map: dict[str, float] | None = None,
     prefer_daily_ohlc: bool = False,
@@ -5017,6 +5072,7 @@ def _with_tw_today_fields(
     out = frame.copy()
     code_series = out.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
 
+    prev_close_map = daily_prev_close_map if isinstance(daily_prev_close_map, dict) else {}
     open_map = daily_open_map if isinstance(daily_open_map, dict) else {}
     close_map = daily_close_map if isinstance(daily_close_map, dict) else {}
     if bool(prefer_daily_ohlc) and open_map:
@@ -5042,8 +5098,32 @@ def _with_tw_today_fields(
     elif "期末收盤" in out.columns:
         out["收盤"] = pd.to_numeric(out["期末收盤"], errors="coerce").round(2)
 
-    daily_map = daily_change_map or {}
-    out["今日漲幅"] = pd.to_numeric(code_series.map(daily_map), errors="coerce").round(2)
+    if prev_close_map:
+        out["昨收"] = pd.to_numeric(code_series.map(prev_close_map), errors="coerce").round(2)
+    elif "昨收" in out.columns:
+        out["昨收"] = pd.to_numeric(out["昨收"], errors="coerce").round(2)
+    else:
+        out["昨收"] = np.nan
+
+    close_series = pd.to_numeric(out.get("收盤", pd.Series(dtype=float)), errors="coerce")
+    prev_close_series = pd.to_numeric(out.get("昨收", pd.Series(dtype=float)), errors="coerce")
+    today_move = pd.Series(np.nan, index=out.index, dtype=float)
+    valid_mask = prev_close_series.notna() & (prev_close_series > 0) & close_series.notna()
+    today_move.loc[valid_mask] = (
+        close_series.loc[valid_mask] / prev_close_series.loc[valid_mask] - 1.0
+    ) * 100.0
+    out["今日漲幅"] = pd.to_numeric(today_move, errors="coerce").round(2)
+
+    # Backward compatibility: if caller still provides a precomputed daily map, only use it as
+    # a fallback where 昨收/收盤 cannot produce a value.
+    daily_map = daily_change_map if isinstance(daily_change_map, dict) else {}
+    if daily_map:
+        mapped_daily = pd.to_numeric(code_series.map(daily_map), errors="coerce")
+        out["今日漲幅"] = (
+            pd.to_numeric(out["今日漲幅"], errors="coerce")
+            .where(pd.to_numeric(out["今日漲幅"], errors="coerce").notna(), mapped_daily)
+            .round(2)
+        )
 
     market_daily = _safe_float(market_daily_return_pct)
     if market_daily is not None and math.isfinite(float(market_daily)):
@@ -5055,6 +5135,18 @@ def _with_tw_today_fields(
         out.loc[benchmark_mask, "今日贏大盤%"] = 0.0
     else:
         out["今日贏大盤%"] = np.nan
+
+    if "昨收" in out.columns:
+        columns = list(out.columns)
+        columns.remove("昨收")
+        if "開盤" in columns:
+            insert_at = columns.index("開盤")
+        elif "收盤" in columns:
+            insert_at = columns.index("收盤")
+        else:
+            insert_at = len(columns)
+        columns.insert(insert_at, "昨收")
+        out = out[columns]
 
     drop_cols = [
         "期初收盤",
@@ -5127,7 +5219,7 @@ def _style_tw_today_move_table(frame: pd.DataFrame):
     for col in ("今日漲幅", "今日贏大盤%"):
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce")
-    for col in ("開盤", "收盤"):
+    for col in ("開盤", "昨收", "收盤"):
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce")
 
@@ -5160,6 +5252,8 @@ def _style_tw_today_move_table(frame: pd.DataFrame):
         formatters["今日贏大盤%"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}%"
     if "開盤" in work.columns:
         formatters["開盤"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
+    if "昨收" in work.columns:
+        formatters["昨收"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
     if "收盤" in work.columns:
         formatters["收盤"] = lambda v: "—" if pd.isna(v) else f"{float(v):.2f}"
     if "管理費(%)" in work.columns:
@@ -5333,22 +5427,16 @@ def _build_tw_etf_all_types_performance_table(
     daily_price_used, daily_open_map, daily_close_map = _load_tw_snapshot_price_maps(
         daily_end_used or ytd_end_used
     )
-    daily_change_map = _build_tw_intraday_change_map(
-        open_map=daily_open_map,
-        close_map=daily_close_map,
-    )
-    market_daily_return, market_daily_symbol, market_daily_used, market_daily_issues = (
-        _load_tw_market_intraday_return(daily_price_used or ytd_end_used)
-    )
-    if market_daily_return is None:
-        fallback_market_daily, fallback_market_symbol, _, _, fallback_market_issues = (
-            _load_tw_market_daily_return(ytd_end_used, force_sync=False)
-        )
-        if fallback_market_daily is not None:
-            market_daily_return = fallback_market_daily
-            market_daily_symbol = fallback_market_symbol
-            market_daily_used = daily_end_used or ytd_end_used
-        market_daily_issues.extend(fallback_market_issues)
+    daily_prev_close_map: dict[str, float] = {}
+    if daily_prev_used:
+        _, daily_prev_close_map = _load_tw_snapshot_close_map(daily_prev_used)
+    (
+        market_daily_return,
+        market_daily_symbol,
+        market_daily_prev_used,
+        market_daily_end_used,
+        market_daily_issues,
+    ) = _load_tw_market_daily_return(daily_price_used or ytd_end_used, force_sync=False)
 
     table_df = ytd_df.rename(columns={"區間報酬(%)": "YTD績效(%)"}).copy()
     code_series = table_df.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
@@ -5370,7 +5458,7 @@ def _build_tw_etf_all_types_performance_table(
 
     table_df = _with_tw_today_fields(
         table_df,
-        daily_change_map=daily_change_map,
+        daily_prev_close_map=daily_prev_close_map,
         daily_open_map=daily_open_map,
         daily_close_map=daily_close_map,
         prefer_daily_ohlc=True,
@@ -5392,6 +5480,7 @@ def _build_tw_etf_all_types_performance_table(
         "大盤超額2025(%)",
         "YTD績效(%)",
         "大盤超額YTD(%)",
+        "昨收",
         "開盤",
         "收盤",
         "今日漲幅",
@@ -5402,7 +5491,9 @@ def _build_tw_etf_all_types_performance_table(
         "ytd_start_used": ytd_start_used,
         "ytd_end_used": ytd_end_used,
         "daily_prev_used": daily_prev_used,
-        "daily_end_used": market_daily_used or daily_price_used or daily_end_used,
+        "daily_end_used": daily_price_used or daily_end_used,
+        "market_daily_prev_used": market_daily_prev_used,
+        "market_daily_end_used": market_daily_end_used,
         "compare_start_used": compare_start_used,
         "compare_end_used": compare_end_used,
         "universe_count": int(universe_count),
@@ -6189,29 +6280,23 @@ def _render_tw_etf_top10_page(
         if top10.empty:
             st.warning(empty_warning_text)
             return
-        _, daily_end_used, _ = _load_tw_etf_daily_change_map(end_used)
+        _, daily_end_used, daily_prev_used = _load_tw_etf_daily_change_map(end_used)
         daily_price_used, daily_open_map, daily_close_map = _load_tw_snapshot_price_maps(
             daily_end_used or end_used
         )
-        daily_change_map = _build_tw_intraday_change_map(
-            open_map=daily_open_map,
-            close_map=daily_close_map,
-        )
-        market_daily_return, market_daily_symbol, market_daily_used, market_daily_issues = (
-            _load_tw_market_intraday_return(daily_price_used or end_used)
-        )
-        if market_daily_return is None:
-            fallback_market_daily, fallback_market_symbol, _, _, fallback_market_issues = (
-                _load_tw_market_daily_return(end_used, force_sync=False)
-            )
-            if fallback_market_daily is not None:
-                market_daily_return = fallback_market_daily
-                market_daily_symbol = fallback_market_symbol
-                market_daily_used = daily_end_used or end_used
-            market_daily_issues.extend(fallback_market_issues)
+        daily_prev_close_map: dict[str, float] = {}
+        if daily_prev_used:
+            _, daily_prev_close_map = _load_tw_snapshot_close_map(daily_prev_used)
+        (
+            market_daily_return,
+            market_daily_symbol,
+            market_daily_prev_used,
+            market_daily_used,
+            market_daily_issues,
+        ) = _load_tw_market_daily_return(daily_price_used or end_used, force_sync=False)
         top10_display = _with_tw_today_fields(
             top10,
-            daily_change_map=daily_change_map,
+            daily_prev_close_map=daily_prev_close_map,
             daily_open_map=daily_open_map,
             daily_close_map=daily_close_map,
             prefer_daily_ohlc=True,
@@ -6236,17 +6321,20 @@ def _render_tw_etf_top10_page(
         st.caption(f"計算區間（實際交易日）：{start_used} -> {end_used}")
         _render_data_health_caption("快照資料健康度", snapshot_health)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
-        st.caption("欄位定義：`開盤/收盤` 為最近交易日的同日價格；`今日漲幅 = (收盤/開盤 - 1)`。")
+        st.caption(
+            "欄位定義：`開盤/收盤` 為最近交易日同日價格，`昨收` 為前一交易日收盤；`今日漲幅 = (收盤/昨收 - 1)`。"
+        )
         if daily_price_used or daily_end_used:
             st.caption(f"同日價格基準日：{daily_price_used or daily_end_used}")
         st.caption("母體檔數採起訖快照交集（經股票型 ETF 過濾）。")
         if (
             market_daily_return is not None
             and market_daily_symbol
-            and (market_daily_used or daily_price_used or daily_end_used)
+            and market_daily_prev_used
+            and market_daily_used
         ):
             st.caption(
-                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{market_daily_used or daily_price_used or daily_end_used} 開盤 -> 收盤）"
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{market_daily_prev_used} 昨收 -> {market_daily_used} 收盤）"
             )
         if market_daily_issues:
             _render_sync_issues(
@@ -6374,14 +6462,17 @@ def _render_tw_etf_all_types_view():
             st.caption("2026 YTD 台股大盤：目前無法取得，`大盤超額YTD(%)` 先顯示空白。")
         market_daily_return = _safe_float(meta.get("market_daily_return"))
         market_daily_symbol = str(meta.get("market_daily_symbol", "")).strip()
+        market_daily_prev_used = str(meta.get("market_daily_prev_used", "")).strip()
+        market_daily_end_used = str(meta.get("market_daily_end_used", "")).strip()
         daily_end_used = str(meta.get("daily_end_used", "")).strip()
         if (
             market_daily_return is not None
             and market_daily_symbol
-            and daily_end_used
+            and market_daily_prev_used
+            and market_daily_end_used
         ):
             st.caption(
-                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{daily_end_used} 開盤 -> 收盤）"
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{market_daily_prev_used} 昨收 -> {market_daily_end_used} 收盤）"
             )
         else:
             st.caption("今日大盤漲幅：目前無法取得，`今日贏大盤%` 先顯示空白。")
@@ -6392,7 +6483,9 @@ def _render_tw_etf_all_types_view():
                 "大盤資料同步有部分錯誤，已盡量使用本地可用資料", issues, preview_limit=2
             )
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已納入所有 ETF 類型。")
-        st.caption("欄位定義：`開盤/收盤` 為最近交易日的同日價格；`今日漲幅 = (收盤/開盤 - 1)`。")
+        st.caption(
+            "欄位定義：`開盤/收盤` 為最近交易日同日價格，`昨收` 為前一交易日收盤；`今日漲幅 = (收盤/昨收 - 1)`。"
+        )
         if daily_end_used:
             st.caption(f"同日價格基準日：{daily_end_used}")
         st.caption("排序規則：先依 ETF 類型，再依 `YTD績效(%)` 由高到低。")
@@ -6467,6 +6560,7 @@ def _render_tw_etf_all_types_view():
             else np.nan,
             "大盤超額YTD(%)": 0.0 if market_ytd_return is not None else np.nan,
             "開盤": np.nan,
+            "昨收": np.nan,
             "收盤": np.nan,
             "今日漲幅": _truncate_value(market_daily_return, digits=2)
             if market_daily_return is not None
@@ -6800,22 +6894,16 @@ def _render_top10_etf_2026_ytd_view(
         daily_price_used, daily_open_map, daily_close_map = _load_tw_snapshot_price_maps(
             daily_end_used or end_used
         )
-        daily_change_map = _build_tw_intraday_change_map(
-            open_map=daily_open_map,
-            close_map=daily_close_map,
-        )
-        market_daily_return, market_daily_symbol, market_daily_used, market_daily_issues = (
-            _load_tw_market_intraday_return(daily_price_used or end_used)
-        )
-        if market_daily_return is None:
-            fallback_market_daily, fallback_market_symbol, _, _, fallback_market_issues = (
-                _load_tw_market_daily_return(end_used, force_sync=False)
-            )
-            if fallback_market_daily is not None:
-                market_daily_return = fallback_market_daily
-                market_daily_symbol = fallback_market_symbol
-                market_daily_used = daily_end_used or end_used
-            market_daily_issues.extend(fallback_market_issues)
+        daily_prev_close_map: dict[str, float] = {}
+        if daily_prev_used:
+            _, daily_prev_close_map = _load_tw_snapshot_close_map(daily_prev_used)
+        (
+            market_daily_return,
+            market_daily_symbol,
+            market_daily_prev_used,
+            market_daily_used,
+            market_daily_issues,
+        ) = _load_tw_market_daily_return(daily_price_used or end_used, force_sync=False)
         market_issues.extend(market_daily_issues)
         previous_rank_map: dict[str, int] = {}
         if daily_prev_used and daily_prev_used != end_used:
@@ -6888,7 +6976,7 @@ def _render_top10_etf_2026_ytd_view(
         )
         table_df = _with_tw_today_fields(
             table_df,
-            daily_change_map=daily_change_map,
+            daily_prev_close_map=daily_prev_close_map,
             daily_open_map=daily_open_map,
             daily_close_map=daily_close_map,
             prefer_daily_ohlc=True,
@@ -6896,7 +6984,7 @@ def _render_top10_etf_2026_ytd_view(
         )
         top10_today_df = _with_tw_today_fields(
             top10_etf_df,
-            daily_change_map=daily_change_map,
+            daily_prev_close_map=daily_prev_close_map,
             daily_open_map=daily_open_map,
             daily_close_map=daily_close_map,
             prefer_daily_ohlc=True,
@@ -6937,10 +7025,11 @@ def _render_top10_etf_2026_ytd_view(
         if (
             market_daily_return is not None
             and market_daily_symbol
-            and (market_daily_used or daily_price_used or daily_end_used)
+            and market_daily_prev_used
+            and market_daily_used
         ):
             st.caption(
-                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{market_daily_used or daily_price_used or daily_end_used} 開盤 -> 收盤）"
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{market_daily_prev_used} 昨收 -> {market_daily_used} 收盤）"
             )
         else:
             st.caption("今日大盤漲幅：目前無法取得，`今日贏大盤%` 先顯示空白。")
@@ -6956,7 +7045,9 @@ def _render_top10_etf_2026_ytd_view(
         if market_issues:
             _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已排除槓反/期貨/海外與債券商品。")
-        st.caption("欄位定義：`開盤/收盤` 為最近交易日的同日價格；`今日漲幅 = (收盤/開盤 - 1)`。")
+        st.caption(
+            "欄位定義：`開盤/收盤` 為最近交易日同日價格，`昨收` 為前一交易日收盤；`今日漲幅 = (收盤/昨收 - 1)`。"
+        )
         if daily_price_used or daily_end_used:
             st.caption(f"同日價格基準日：{daily_price_used or daily_end_used}")
         if etf_type_filter_text:
@@ -7699,6 +7790,7 @@ def _render_active_etf_2026_ytd_view():
             "代碼": "^TWII",
             "ETF": "台股大盤",
             "開盤": np.nan,
+            "昨收": np.nan,
             "收盤": np.nan,
             "績效起算日": "—",
             "績效終點日": end_used,
@@ -7717,26 +7809,20 @@ def _render_active_etf_2026_ytd_view():
         daily_price_used, daily_open_map, daily_close_map = _load_tw_snapshot_price_maps(
             daily_end_used or end_used
         )
-        daily_change_map = _build_tw_intraday_change_map(
-            open_map=daily_open_map,
-            close_map=daily_close_map,
-        )
-        market_daily_return, market_daily_symbol, market_daily_used, market_daily_issues = (
-            _load_tw_market_intraday_return(daily_price_used or end_used)
-        )
-        if market_daily_return is None:
-            fallback_market_daily, fallback_market_symbol, _, _, fallback_market_issues = (
-                _load_tw_market_daily_return(end_used, force_sync=False)
-            )
-            if fallback_market_daily is not None:
-                market_daily_return = fallback_market_daily
-                market_daily_symbol = fallback_market_symbol
-                market_daily_used = daily_end_used or end_used
-            market_daily_issues.extend(fallback_market_issues)
+        daily_prev_close_map: dict[str, float] = {}
+        if daily_prev_used:
+            _, daily_prev_close_map = _load_tw_snapshot_close_map(daily_prev_used)
+        (
+            market_daily_return,
+            market_daily_symbol,
+            market_daily_prev_used,
+            market_daily_used,
+            market_daily_issues,
+        ) = _load_tw_market_daily_return(daily_price_used or end_used, force_sync=False)
         market_issues.extend(market_daily_issues)
         table_df = _with_tw_today_fields(
             table_df,
-            daily_change_map=daily_change_map,
+            daily_prev_close_map=daily_prev_close_map,
             daily_open_map=daily_open_map,
             daily_close_map=daily_close_map,
             prefer_daily_ohlc=True,
@@ -7744,7 +7830,7 @@ def _render_active_etf_2026_ytd_view():
         )
         etf_today_df = _with_tw_today_fields(
             etf_df,
-            daily_change_map=daily_change_map,
+            daily_prev_close_map=daily_prev_close_map,
             daily_open_map=daily_open_map,
             daily_close_map=daily_close_map,
             prefer_daily_ohlc=True,
@@ -7759,6 +7845,7 @@ def _render_active_etf_2026_ytd_view():
             "ETF",
             "管理費(%)",
             "ETF規模(億)",
+            "昨收",
             "開盤",
             "收盤",
             "績效起算日",
@@ -7793,10 +7880,11 @@ def _render_active_etf_2026_ytd_view():
         if (
             market_daily_return is not None
             and market_daily_symbol
-            and (market_daily_used or daily_price_used or daily_end_used)
+            and market_daily_prev_used
+            and market_daily_used
         ):
             st.caption(
-                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{market_daily_used or daily_price_used or daily_end_used} 開盤 -> 收盤）"
+                f"今日大盤漲幅：{market_daily_symbol} {market_daily_return:.2f}%（{market_daily_prev_used} 昨收 -> {market_daily_used} 收盤）"
             )
         else:
             st.caption("今日大盤漲幅：目前無法取得，`今日贏大盤%` 先顯示空白。")
@@ -7805,7 +7893,9 @@ def _render_active_etf_2026_ytd_view():
         st.caption(
             "資料來源：TWSE MI_INDEX（上市全市場快照）。主動式規則：代碼結尾 A 且名稱含「主動」。"
         )
-        st.caption("欄位定義：`開盤/收盤` 為最近交易日的同日價格；`今日漲幅 = (收盤/開盤 - 1)`。")
+        st.caption(
+            "欄位定義：`開盤/收盤` 為最近交易日同日價格，`昨收` 為前一交易日收盤；`今日漲幅 = (收盤/昨收 - 1)`。"
+        )
         if daily_price_used or daily_end_used:
             st.caption(f"同日價格基準日：{daily_price_used or daily_end_used}")
         st.caption(

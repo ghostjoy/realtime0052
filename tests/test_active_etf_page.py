@@ -46,7 +46,10 @@ from app import (
     _infer_market_target_from_symbols,
     _is_tw_active_etf,
     _load_cached_backtest_payload,
+    _load_cached_twse_snapshot,
     _load_tw_benchmark_bars,
+    _load_tw_etf_daily_change_map,
+    _load_tw_market_daily_return,
     _load_tw_market_return_between,
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
@@ -67,6 +70,28 @@ from ui.helpers import (
 
 
 class ActiveEtfPageTests(unittest.TestCase):
+    def test_load_cached_twse_snapshot_skips_future_rows(self):
+        fake_rows = [
+            {
+                "asof": datetime(2026, 3, 4, tzinfo=timezone.utc),
+                "payload": {"rows": [{"code": "0050", "name": "元大台灣50", "open": 79.0, "close": 80.0}]},
+            },
+            {
+                "asof": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                "payload": {"rows": [{"code": "0050", "name": "元大台灣50", "open": 78.0, "close": 79.0}]},
+            },
+        ]
+        fake_store = SimpleNamespace(load_market_snapshot_window=lambda **kwargs: fake_rows)
+        with patch("app._history_store", return_value=fake_store):
+            out = _load_cached_twse_snapshot(target_yyyymmdd="20260303", lookback_days=14)
+
+        self.assertIsNotNone(out)
+        assert out is not None
+        used, frame = out
+        self.assertEqual(used, "20260303")
+        self.assertEqual(str(frame.iloc[0]["code"]), "0050")
+        self.assertEqual(float(frame.iloc[0]["close"]), 79.0)
+
     def test_fetch_twse_snapshot_prefers_duckdb_cache(self):
         _fetch_twse_snapshot_with_fallback.clear()
         fake_store = SimpleNamespace(
@@ -91,13 +116,45 @@ class ActiveEtfPageTests(unittest.TestCase):
             patch("app._queue_twse_snapshot_refresh") as queue_mock,
             patch("app._fetch_twse_snapshot_network_single") as network_mock,
         ):
-            used, frame = _fetch_twse_snapshot_with_fallback("20260304", lookback_days=14)
+            used, frame = _fetch_twse_snapshot_with_fallback("20260303", lookback_days=14)
 
         self.assertEqual(used, "20260303")
         self.assertFalse(frame.empty)
         self.assertEqual(str(frame.iloc[0]["code"]), "0050")
-        queue_mock.assert_called_once_with("20260304")
+        queue_mock.assert_called_once_with("20260303")
         network_mock.assert_not_called()
+
+    def test_fetch_twse_snapshot_probes_newer_day_when_cache_is_stale(self):
+        _fetch_twse_snapshot_with_fallback.clear()
+        stale_store = SimpleNamespace(
+            load_market_snapshot_window=lambda **kwargs: [
+                {
+                    "asof": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                    "payload": {
+                        "rows": [
+                            {"code": "0050", "name": "元大台灣50", "open": 80.05, "close": 78.75}
+                        ]
+                    },
+                }
+            ]
+        )
+        fresh_frame = pd.DataFrame(
+            [{"code": "0050", "name": "元大台灣50", "open": 77.8, "close": 75.6}]
+        )
+        with (
+            patch("app._history_store", return_value=stale_store),
+            patch("app._queue_twse_snapshot_refresh") as queue_mock,
+            patch(
+                "app._fetch_twse_snapshot_network_single",
+                side_effect=[("20260305", fresh_frame)],
+            ) as network_mock,
+        ):
+            used, frame = _fetch_twse_snapshot_with_fallback("20260305", lookback_days=14)
+
+        self.assertEqual(used, "20260305")
+        self.assertEqual(float(frame.iloc[0]["close"]), 75.6)
+        network_mock.assert_called_once_with("20260305")
+        queue_mock.assert_not_called()
 
     def test_attach_rank_movement_columns(self):
         frame = pd.DataFrame(
@@ -643,6 +700,54 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertAlmostEqual(float(ret), 10.0, places=6)
         self.assertEqual(symbol, "0050")
         self.assertTrue(any("TWSE:^TWII" in str(item) for item in issues))
+
+    def test_load_tw_etf_daily_change_map_uses_previous_available_snapshot(self):
+        _load_tw_etf_daily_change_map.clear()
+
+        def _mock_close_map(token: str):
+            if token == "20260305":
+                return "20260305", {"0050": 77.4, "00735": 68.8}
+            if token == "20260304":
+                return "20260304", {"0050": 75.6, "00735": 64.65}
+            return token, {}
+
+        with patch("app._load_tw_snapshot_close_map", side_effect=_mock_close_map):
+            out, end_used, prev_used = _load_tw_etf_daily_change_map("20260305")
+
+        self.assertEqual(end_used, "20260305")
+        self.assertEqual(prev_used, "20260304")
+        self.assertAlmostEqual(float(out["0050"]), (77.4 / 75.6 - 1.0) * 100.0, places=6)
+        self.assertAlmostEqual(float(out["00735"]), (68.8 / 64.65 - 1.0) * 100.0, places=6)
+
+    def test_load_tw_market_daily_return_uses_previous_available_snapshot(self):
+        _load_tw_market_daily_return.clear()
+
+        def _mock_close_map(token: str):
+            if token == "20260305":
+                return "20260305", {"0050": 77.4}
+            if token == "20260304":
+                return "20260304", {"0050": 75.6}
+            return token, {}
+
+        with (
+            patch("app._load_tw_snapshot_close_map", side_effect=_mock_close_map),
+            patch(
+                "app._load_tw_market_return_between",
+                return_value=(2.38, "^TWII", []),
+            ) as market_return_mock,
+        ):
+            value, symbol, prev_token, end_token, issues = _load_tw_market_daily_return("20260305")
+
+        self.assertEqual(value, 2.38)
+        self.assertEqual(symbol, "^TWII")
+        self.assertEqual(prev_token, "20260304")
+        self.assertEqual(end_token, "20260305")
+        self.assertEqual(issues, [])
+        market_return_mock.assert_called_once_with(
+            start_yyyymmdd="20260304",
+            end_yyyymmdd="20260305",
+            force_sync=False,
+        )
 
     def test_classify_issue_level(self):
         self.assertEqual(_classify_issue_level("無法建立 ETF 排行：資料缺失"), "error")
@@ -1629,8 +1734,12 @@ class ActiveEtfPageTests(unittest.TestCase):
                 return_value=("20260214", {"0050": 113.0, "00935": 58.0}, {"0050": 114.0, "00935": 59.0}),
             ),
             patch(
-                "app._load_tw_market_intraday_return",
-                return_value=(0.8, "0050", "20260214", []),
+                "app._load_tw_snapshot_close_map",
+                return_value=("20260213", {"0050": 113.0, "00935": 58.0}),
+            ),
+            patch(
+                "app._load_tw_market_daily_return",
+                return_value=(0.8, "0050", "20260213", "20260214", []),
             ),
         ):
             out, meta = _build_tw_etf_all_types_performance_table(
@@ -1649,6 +1758,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("大盤超額YTD(%)", out.columns)
         self.assertIn("管理費(%)", out.columns)
         self.assertIn("開盤", out.columns)
+        self.assertIn("昨收", out.columns)
         self.assertIn("收盤", out.columns)
         self.assertIn("今日漲幅", out.columns)
         self.assertIn("今日贏大盤%", out.columns)
@@ -1656,6 +1766,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "YTD績效(%)"].iloc[0]), 15.67)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "開盤"].iloc[0]), 113.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 58.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "昨收"].iloc[0]), 113.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "昨收"].iloc[0]), 58.0)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "收盤"].iloc[0]), 114.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "收盤"].iloc[0]), 59.0)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "大盤超額2025(%)"].iloc[0]), 12.33)
@@ -1678,13 +1790,15 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         out = _with_tw_today_fields(
             frame,
-            daily_change_map={"00735": -2.13, "00935": 1.11},
+            daily_prev_close_map={"00735": 70.3, "00935": 30.9},
             daily_open_map={"00735": 69.2, "00935": 30.5},
             market_daily_return_pct=0.2,
         )
         self.assertEqual(float(out.loc[out["代碼"] == "00735", "開盤"].iloc[0]), 64.65)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 30.5)
+        self.assertEqual(float(out.loc[out["代碼"] == "00735", "昨收"].iloc[0]), 70.3)
         self.assertEqual(float(out.loc[out["代碼"] == "00735", "今日漲幅"].iloc[0]), -2.13)
+        self.assertLess(out.columns.get_loc("昨收"), out.columns.get_loc("開盤"))
 
     def test_with_tw_today_fields_can_prefer_daily_ohlc(self):
         frame = pd.DataFrame(
@@ -1694,15 +1808,17 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         out = _with_tw_today_fields(
             frame,
-            daily_change_map={"00735": -0.58},
+            daily_prev_close_map={"00735": 69.2},
             daily_open_map={"00735": 69.2},
             daily_close_map={"00735": 68.8},
             prefer_daily_ohlc=True,
             market_daily_return_pct=None,
         )
         self.assertEqual(float(out.loc[out["代碼"] == "00735", "開盤"].iloc[0]), 69.2)
+        self.assertEqual(float(out.loc[out["代碼"] == "00735", "昨收"].iloc[0]), 69.2)
         self.assertEqual(float(out.loc[out["代碼"] == "00735", "收盤"].iloc[0]), 68.8)
         self.assertEqual(float(out.loc[out["代碼"] == "00735", "今日漲幅"].iloc[0]), -0.58)
+        self.assertLess(out.columns.get_loc("昨收"), out.columns.get_loc("開盤"))
 
     def test_tw_etf_precision_column_config_supports_unified_columns(self):
         frame = pd.DataFrame(

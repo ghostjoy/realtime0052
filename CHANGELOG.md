@@ -102,6 +102,7 @@
   - 可識別海外市場代碼（如 `.US/.JP/.KS`），供 00910 全球分組熱力圖與公司簡介使用
 
 ### Changed
+- ETF 相關排行表（Top10/全類型/主動式）新增 `昨收` 欄位，`今日漲幅` 統一改為 `收盤/昨收 - 1`；`今日贏大盤%` 同步改用昨收到收盤口徑，並更新表格欄位定義文案。
 - Auto: updated README.md, docs/duckdb_housekeeping.md [id:c8076e291f]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, di.py, scripts/duckdb_housekeeping.py, ... (+4) [id:4b01ffd10e]
 - Auto: updated app.py, scripts/backup_duckdb_snapshot.py, scripts/restore_duckdb_snapshot.py, services/market_data_service.py, storage/duck_store.py, ui/pages/live.py [id:0af5307290]
@@ -312,6 +313,8 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 修正 ETF 今日欄位在快照快取日期越界時可能誤用「同日收盤當昨收」問題：`昨收` 來源改為嚴格限制不可晚於目標日，避免出現 `昨收 = 收盤` 的錯誤顯示。
+- 修正快照落後時「昨收」可能跳到更舊交易日問題：當目標日快照尚未在本地可用，會同步補抓較新快照並以前一個可用快照日計算 `昨收/今日漲幅`。
 - 修正 `台股 ETF 全類型總表` 在顯示 `台股大盤(^TWII)` 基準列時的資料表序列化警告：
   - 避免 `pd.concat` 於全 NA 欄位觸發 `FutureWarning`。
   - 統一 `編號` 欄位輸出為字串，排除 Streamlit/PyArrow `ArrowTypeError: Expected bytes, got int`。
