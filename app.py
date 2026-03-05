@@ -5055,6 +5055,143 @@ def _load_tw_market_intraday_return(
     return None, "", "", ["intraday benchmark snapshot unavailable"]
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_twii_twse_day_open_close(
+    target_yyyymmdd: str,
+) -> tuple[float | None, float | None, list[str]]:
+    import requests
+
+    token = re.sub(r"\D", "", str(target_yyyymmdd or "").strip())
+    if not re.fullmatch(r"\d{8}", token):
+        return None, None, [f"invalid date: {target_yyyymmdd}"]
+    query_token = f"{token[:6]}01"
+    try:
+        resp = requests.get(
+            "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST",
+            params={"response": "json", "date": query_token},
+            timeout=18,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        return None, None, [f"{query_token}: {exc}"]
+
+    stat = str(payload.get("stat", "")).strip().upper()
+    if stat != "OK":
+        return None, None, [f"{query_token}: {payload.get('stat', 'not ok')}"]
+    fields = payload.get("fields", [])
+    rows = payload.get("data", [])
+    if not isinstance(fields, list) or not isinstance(rows, list):
+        return None, None, [f"{query_token}: malformed payload"]
+    required = {"日期", "開盤指數", "收盤指數"}
+    if not required.issubset(set(fields)):
+        return None, None, [f"{query_token}: fields missing"]
+    idx_date = fields.index("日期")
+    idx_open = fields.index("開盤指數")
+    idx_close = fields.index("收盤指數")
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        if max(idx_date, idx_open, idx_close) >= len(row):
+            continue
+        roc_date = str(row[idx_date] or "").strip()
+        m = re.fullmatch(r"(\d{2,3})[/-](\d{1,2})[/-](\d{1,2})", roc_date)
+        if not m:
+            continue
+        try:
+            date_token = datetime(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3))).strftime(
+                "%Y%m%d"
+            )
+        except Exception:
+            continue
+        if date_token != token:
+            continue
+        open_raw = str(row[idx_open] or "").strip().replace(",", "")
+        close_raw = str(row[idx_close] or "").strip().replace(",", "")
+        open_val = _safe_float(open_raw)
+        close_val = _safe_float(close_raw)
+        open_out = (
+            float(open_val) if open_val is not None and math.isfinite(float(open_val)) and float(open_val) > 0 else None
+        )
+        close_out = (
+            float(close_val)
+            if close_val is not None and math.isfinite(float(close_val)) and float(close_val) > 0
+            else None
+        )
+        return open_out, close_out, []
+    return None, None, [f"{token}: row_not_found"]
+
+
+def _resolve_market_row_price_values(
+    *,
+    market_symbol: str,
+    prev_token: str,
+    end_token: str,
+) -> tuple[float | None, float | None, float | None]:
+    symbol = str(market_symbol or "").strip().upper()
+    prev_used = re.sub(r"\D", "", str(prev_token or "").strip())
+    end_used = re.sub(r"\D", "", str(end_token or "").strip())
+    prev_close: float | None = None
+    open_price: float | None = None
+    close_price: float | None = None
+
+    # Prefer TWII points for the benchmark row; fallback to proxy ETFs only when unavailable.
+    if prev_used:
+        _, prev_close, _ = _load_twii_twse_day_open_close(prev_used)
+        if prev_close is None:
+            month_close_map, _ = _load_twii_twse_month_close_map(prev_used)
+            prev_close = _safe_float(month_close_map.get(prev_used))
+    if end_used:
+        open_price, close_price, _ = _load_twii_twse_day_open_close(end_used)
+        if close_price is None:
+            month_close_map, _ = _load_twii_twse_month_close_map(end_used)
+            close_price = _safe_float(month_close_map.get(end_used))
+    if (
+        (prev_close is not None and math.isfinite(float(prev_close)))
+        or (open_price is not None and math.isfinite(float(open_price)))
+        or (close_price is not None and math.isfinite(float(close_price)))
+    ):
+        return prev_close, open_price, close_price
+
+    if prev_used and symbol:
+        _, prev_close_map = _load_tw_snapshot_close_map(prev_used)
+        prev_close = _safe_float(prev_close_map.get(symbol))
+    if end_used and symbol:
+        _, end_open_map, end_close_map = _load_tw_snapshot_price_maps(end_used)
+        open_price = _safe_float(end_open_map.get(symbol))
+        close_price = _safe_float(end_close_map.get(symbol))
+    return prev_close, open_price, close_price
+
+
+def _fill_market_row_price_columns(
+    frame: pd.DataFrame,
+    *,
+    prev_close: float | None,
+    open_price: float | None,
+    close_price: float | None,
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "代碼" not in frame.columns:
+        return frame
+    out = frame.copy()
+    code_series = out["代碼"].astype(str).str.strip().str.upper()
+    benchmark_mask = code_series.str.startswith("^")
+    if not bool(benchmark_mask.any()):
+        return out
+
+    def _norm(v: float | None) -> float:
+        if v is None or (not math.isfinite(float(v))):
+            return np.nan
+        return round(float(v), 2)
+
+    if "昨收" in out.columns:
+        out.loc[benchmark_mask, "昨收"] = _norm(prev_close)
+    if "開盤" in out.columns:
+        out.loc[benchmark_mask, "開盤"] = _norm(open_price)
+    if "收盤" in out.columns:
+        out.loc[benchmark_mask, "收盤"] = _norm(close_price)
+    return out
+
+
 def _with_tw_today_fields(
     frame: pd.DataFrame,
     *,
@@ -5435,6 +5572,11 @@ def _build_tw_etf_all_types_performance_table(
         market_daily_end_used,
         market_daily_issues,
     ) = _load_tw_market_daily_return(daily_price_used or ytd_end_used, force_sync=False)
+    market_prev_close, market_open, market_close = _resolve_market_row_price_values(
+        market_symbol=market_daily_symbol,
+        prev_token=market_daily_prev_used,
+        end_token=market_daily_end_used,
+    )
 
     table_df = ytd_df.rename(columns={"區間報酬(%)": "YTD績效(%)"}).copy()
     code_series = table_df.get("代碼", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
@@ -5501,6 +5643,9 @@ def _build_tw_etf_all_types_performance_table(
         "market_2025_symbol": market_2025_symbol,
         "market_daily_return": market_daily_return,
         "market_daily_symbol": market_daily_symbol,
+        "market_daily_prev_close": market_prev_close,
+        "market_daily_open": market_open,
+        "market_daily_close": market_close,
         "issues": [*market_ytd_issues, *market_2025_issues, *market_daily_issues],
     }
 
@@ -6462,6 +6607,9 @@ def _render_tw_etf_all_types_view():
         market_daily_symbol = str(meta.get("market_daily_symbol", "")).strip()
         market_daily_prev_used = str(meta.get("market_daily_prev_used", "")).strip()
         market_daily_end_used = str(meta.get("market_daily_end_used", "")).strip()
+        market_daily_prev_close = _safe_float(meta.get("market_daily_prev_close"))
+        market_daily_open = _safe_float(meta.get("market_daily_open"))
+        market_daily_close = _safe_float(meta.get("market_daily_close"))
         daily_end_used = str(meta.get("daily_end_used", "")).strip()
         if (
             market_daily_return is not None
@@ -6557,9 +6705,15 @@ def _render_tw_etf_all_types_view():
             if market_ytd_return is not None
             else np.nan,
             "大盤超額YTD(%)": 0.0 if market_ytd_return is not None else np.nan,
-            "開盤": np.nan,
-            "昨收": np.nan,
-            "收盤": np.nan,
+            "昨收": _truncate_value(market_daily_prev_close, digits=2)
+            if market_daily_prev_close is not None
+            else np.nan,
+            "開盤": _truncate_value(market_daily_open, digits=2)
+            if market_daily_open is not None
+            else np.nan,
+            "收盤": _truncate_value(market_daily_close, digits=2)
+            if market_daily_close is not None
+            else np.nan,
             "今日漲幅": _truncate_value(market_daily_return, digits=2)
             if market_daily_return is not None
             else np.nan,
@@ -6987,6 +7141,22 @@ def _render_top10_etf_2026_ytd_view(
             daily_close_map=daily_close_map,
             prefer_daily_ohlc=True,
             market_daily_return_pct=market_daily_return,
+        )
+        market_price_symbol = (
+            str(market_daily_symbol or "").strip()
+            or str(market_symbol_used or "").strip()
+            or str(market_compare_symbol_used or "").strip()
+        )
+        market_prev_close, market_open, market_close = _resolve_market_row_price_values(
+            market_symbol=market_price_symbol,
+            prev_token=market_daily_prev_used or daily_prev_used,
+            end_token=market_daily_used or daily_price_used or daily_end_used,
+        )
+        table_df = _fill_market_row_price_columns(
+            table_df,
+            prev_close=market_prev_close,
+            open_price=market_open,
+            close_price=market_close,
         )
 
         top10_ratio_text = (
@@ -7833,6 +8003,18 @@ def _render_active_etf_2026_ytd_view():
             daily_close_map=daily_close_map,
             prefer_daily_ohlc=True,
             market_daily_return_pct=market_daily_return,
+        )
+        market_price_symbol = str(market_daily_symbol or "").strip() or str(market_symbol_used or "").strip()
+        market_prev_close, market_open, market_close = _resolve_market_row_price_values(
+            market_symbol=market_price_symbol,
+            prev_token=market_daily_prev_used or daily_prev_used,
+            end_token=market_daily_used or daily_price_used or daily_end_used,
+        )
+        table_df = _fill_market_row_price_columns(
+            table_df,
+            prev_close=market_prev_close,
+            open_price=market_open,
+            close_price=market_close,
         )
         table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
         if "排名" in table_df.columns:

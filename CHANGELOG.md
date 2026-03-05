@@ -103,6 +103,7 @@
 
 ### Changed
 - ETF 相關排行表（Top10/全類型/主動式）新增 `昨收` 欄位，`今日漲幅` 統一改為 `收盤/昨收 - 1`；`今日贏大盤%` 同步改用昨收到收盤口徑，並更新表格欄位定義文案。
+- ETF 各排行表的 `台股大盤` 基準列補齊 `昨收/開盤/收盤` 欄位；優先顯示 TWII 指數點位，TWII 取值失敗時才回退代理標的價格。
 - Auto: updated README.md, docs/duckdb_housekeeping.md [id:c8076e291f]
 - Auto: updated AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, di.py, scripts/duckdb_housekeeping.py, ... (+4) [id:4b01ffd10e]
 - Auto: updated app.py, scripts/backup_duckdb_snapshot.py, scripts/restore_duckdb_snapshot.py, services/market_data_service.py, storage/duck_store.py, ui/pages/live.py [id:0af5307290]
