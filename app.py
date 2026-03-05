@@ -5099,9 +5099,9 @@ def _load_twii_twse_day_open_close(
         if not m:
             continue
         try:
-            date_token = datetime(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3))).strftime(
-                "%Y%m%d"
-            )
+            date_token = datetime(
+                int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3))
+            ).strftime("%Y%m%d")
         except Exception:
             continue
         if date_token != token:
@@ -5111,7 +5111,9 @@ def _load_twii_twse_day_open_close(
         open_val = _safe_float(open_raw)
         close_val = _safe_float(close_raw)
         open_out = (
-            float(open_val) if open_val is not None and math.isfinite(float(open_val)) and float(open_val) > 0 else None
+            float(open_val)
+            if open_val is not None and math.isfinite(float(open_val)) and float(open_val) > 0
+            else None
         )
         close_out = (
             float(close_val)
@@ -8004,7 +8006,9 @@ def _render_active_etf_2026_ytd_view():
             prefer_daily_ohlc=True,
             market_daily_return_pct=market_daily_return,
         )
-        market_price_symbol = str(market_daily_symbol or "").strip() or str(market_symbol_used or "").strip()
+        market_price_symbol = (
+            str(market_daily_symbol or "").strip() or str(market_symbol_used or "").strip()
+        )
         market_prev_close, market_open, market_close = _resolve_market_row_price_values(
             market_symbol=market_price_symbol,
             prev_token=market_daily_prev_used or daily_prev_used,
