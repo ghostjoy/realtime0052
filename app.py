@@ -6386,9 +6386,7 @@ def _render_tw_etf_all_types_view():
         )
         if "編號" in table_view_df.columns:
             serial_numbers = pd.to_numeric(table_view_df["編號"], errors="coerce")
-            table_view_df["編號"] = serial_numbers.map(
-                lambda v: "—" if pd.isna(v) else f"{int(v)}"
-            )
+            table_view_df["編號"] = serial_numbers.map(lambda v: "—" if pd.isna(v) else f"{int(v)}")
         table_display = table_view_df
         merged_link_config: dict[str, object] = {}
         if table_drilldown_enabled:
