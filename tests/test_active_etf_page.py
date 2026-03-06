@@ -17,6 +17,7 @@ from app import (
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
     _benchmark_candidates_tw,
+    _blend_hex_color,
     _build_consensus_representative_between,
     _build_data_health,
     _build_rank_exit_table,
@@ -32,6 +33,7 @@ from app import (
     _classify_tw_etf,
     _compute_jaccard_pct,
     _compute_tw_equal_weight_compare_payload,
+    _compute_tw_etf_aum_alert_fill_color,
     _compute_tw_etf_aum_alert_mask,
     _consensus_threshold_candidates,
     _consume_heatmap_drilldown_query,
@@ -591,14 +593,64 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "台股代號": "0050",
                     "ETF名稱": "元大台灣50",
                     "2026-01-02(億)": 100.0,
-                    "2026-01-03(億)": 111.0,
-                    "2026-01-04(億)": 95.0,
+                    "2026-01-03(億)": 120.0,
+                    "2026-01-04(億)": 96.0,
+                    "2026-01-05(億)": 105.0,
                 }
             ]
         )
-        out = _compute_tw_etf_aum_alert_mask(frame, up_threshold=0.10)
-        self.assertEqual(out.get((0, "2026-01-03(億)")), "#ffd1dc")
-        self.assertNotIn((0, "2026-01-04(億)"), out)
+        out = _compute_tw_etf_aum_alert_mask(
+            frame,
+            up_threshold=0.10,
+            down_threshold=-0.10,
+            up_cap=0.30,
+            down_cap=-0.30,
+        )
+        up_pct = (120.0 - 100.0) / 100.0
+        down_pct = (96.0 - 120.0) / 120.0
+        self.assertEqual(
+            out.get((0, "2026-01-03(億)")),
+            _compute_tw_etf_aum_alert_fill_color(
+                up_pct,
+                up_threshold=0.10,
+                down_threshold=-0.10,
+                up_cap=0.30,
+                down_cap=-0.30,
+            ),
+        )
+        self.assertEqual(
+            out.get((0, "2026-01-04(億)")),
+            _compute_tw_etf_aum_alert_fill_color(
+                down_pct,
+                up_threshold=0.10,
+                down_threshold=-0.10,
+                up_cap=0.30,
+                down_cap=-0.30,
+            ),
+        )
+        self.assertNotIn((0, "2026-01-05(億)"), out)
+
+    def test_compute_tw_etf_aum_alert_fill_color_caps_at_gradient_end(self):
+        self.assertEqual(
+            _compute_tw_etf_aum_alert_fill_color(
+                0.45,
+                up_threshold=0.10,
+                down_threshold=-0.10,
+                up_cap=0.30,
+                down_cap=-0.30,
+            ),
+            "#1f7a1f",
+        )
+        self.assertEqual(
+            _compute_tw_etf_aum_alert_fill_color(
+                -0.45,
+                up_threshold=0.10,
+                down_threshold=-0.10,
+                up_cap=0.30,
+                down_cap=-0.30,
+            ),
+            "#b42318",
+        )
 
     def test_decorate_tw_etf_aum_history_links(self):
         source = pd.DataFrame(

@@ -4013,11 +4013,54 @@ def _aum_history_date_columns(frame: pd.DataFrame) -> list[str]:
     return [col for _, col in cols]
 
 
+def _blend_hex_color(start_color: str, end_color: str, ratio: float) -> str:
+    def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+        text = str(color or "").strip().lstrip("#")
+        if len(text) != 6:
+            raise ValueError(f"Invalid hex color: {color}")
+        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+
+    t = max(0.0, min(1.0, float(ratio)))
+    start_rgb = _hex_to_rgb(start_color)
+    end_rgb = _hex_to_rgb(end_color)
+    blended = tuple(int(round(s + (e - s) * t)) for s, e in zip(start_rgb, end_rgb, strict=True))
+    return "#{:02x}{:02x}{:02x}".format(*blended)
+
+
+def _compute_tw_etf_aum_alert_fill_color(
+    pct: float,
+    *,
+    up_threshold: float = 0.10,
+    down_threshold: float | None = -0.10,
+    up_cap: float = 0.30,
+    down_cap: float = -0.30,
+) -> str | None:
+    if pct > float(up_threshold):
+        upper_bound = max(float(up_cap), float(up_threshold))
+        if upper_bound <= float(up_threshold):
+            ratio = 1.0
+        else:
+            ratio = (float(pct) - float(up_threshold)) / (upper_bound - float(up_threshold))
+        return _blend_hex_color("#e8f7e8", "#1f7a1f", ratio)
+    if (down_threshold is not None) and (pct < float(down_threshold)):
+        lower_bound = min(float(down_cap), float(down_threshold))
+        if lower_bound >= float(down_threshold):
+            ratio = 1.0
+        else:
+            ratio = (abs(float(pct)) - abs(float(down_threshold))) / (
+                abs(lower_bound) - abs(float(down_threshold))
+            )
+        return _blend_hex_color("#fdecec", "#b42318", ratio)
+    return None
+
+
 def _compute_tw_etf_aum_alert_mask(
     frame: pd.DataFrame,
     *,
     up_threshold: float = 0.10,
-    down_threshold: float | None = None,
+    down_threshold: float | None = -0.10,
+    up_cap: float = 0.30,
+    down_cap: float = -0.30,
 ) -> dict[tuple[int, str], str]:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return {}
@@ -4039,10 +4082,15 @@ def _compute_tw_etf_aum_alert_mask(
             if prev_val <= 0:
                 continue
             pct = (curr_val - prev_val) / prev_val
-            if pct > float(up_threshold):
-                out[(row_idx, curr_col)] = "#ffd1dc"
-            elif (down_threshold is not None) and (pct < float(down_threshold)):
-                out[(row_idx, curr_col)] = "#d8ecff"
+            color = _compute_tw_etf_aum_alert_fill_color(
+                pct,
+                up_threshold=up_threshold,
+                down_threshold=down_threshold,
+                up_cap=up_cap,
+                down_cap=down_cap,
+            )
+            if color:
+                out[(row_idx, curr_col)] = color
     return out
 
 
@@ -4053,7 +4101,13 @@ def _style_tw_etf_aum_history_table(frame: pd.DataFrame):
     date_cols = _aum_history_date_columns(work)
     for col in date_cols:
         work[col] = pd.to_numeric(work[col], errors="coerce")
-    alert_mask = _compute_tw_etf_aum_alert_mask(work, up_threshold=0.10, down_threshold=None)
+    alert_mask = _compute_tw_etf_aum_alert_mask(
+        work,
+        up_threshold=0.10,
+        down_threshold=-0.10,
+        up_cap=0.30,
+        down_cap=-0.30,
+    )
 
     def _apply_row(row: pd.Series) -> list[str]:
         ridx = int(row.name)
@@ -6801,7 +6855,9 @@ def _render_tw_etf_all_types_view():
         if history_drilldown_enabled:
             history_display, history_link_config = _decorate_tw_etf_aum_history_links(history_wide)
         st.markdown("#### 基金規模追蹤（最近 10 交易日）")
-        st.caption("欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以粉紅標示。")
+        st.caption(
+            "欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以綠色漸層、日減幅 < -10% 以紅色漸層，幅度越大顏色越深。"
+        )
         st.caption(
             f"起算日：{aum_track_anchor_date}；資料庫採累積保存（不覆蓋），畫面僅顯示最近 10 個交易日。"
         )

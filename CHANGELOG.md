@@ -58,6 +58,11 @@
 - Fugle API key 讀取新增 key file fallback：
   - 預設讀取 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/fuglekey`
   - 可用 `FUGLE_MARKETDATA_API_KEY_FILE` / `FUGLE_API_KEY_FILE` 覆蓋。
+
+### Changed
+- `台股 ETF 全類型總表` 的「基金規模追蹤」色塊規則升級為雙向漸層：
+  - 日增幅 `> +10%` 改用綠色漸層、日減幅 `< -10%` 改用紅色漸層，與美股漲跌語意一致。
+  - 顏色深淺會依單日規模變動幅度放大，避免不同強度的異常變動看起來完全相同。
 - 新增台股歷史 provider：`tw_fugle_rest`（Fugle Historical Candles 日K），支援長區間分段拉取後合併。
 - 回測工作台新增 `回測前自動補資料缺口（推薦）`：
   - 先檢查本地區間覆蓋度
