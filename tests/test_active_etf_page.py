@@ -17,6 +17,7 @@ from app import (
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
     _benchmark_candidates_tw,
+    _build_rank_exit_table,
     _build_consensus_representative_between,
     _build_data_health,
     _build_replay_source_hash,
@@ -172,9 +173,37 @@ class ActiveEtfPageTests(unittest.TestCase):
             frame,
             previous_rank_map={"0050": 2, "0056": 1, "00878": 3},
         )
-        self.assertEqual(list(out["排名"]), ["1  (↑1)", "2  (↓1)", "3  (新進榜)"])
+        self.assertEqual(list(out["排名"]), ["1  (↑1)", "2  (↓1)", "3  (★)"])
         self.assertNotIn("前次排名", out.columns)
         self.assertNotIn("排名異動", out.columns)
+
+    def test_attach_rank_movement_columns_shows_tie_as_dash(self):
+        frame = pd.DataFrame([{"排名": 2, "代碼": "0056", "ETF": "元大高股息"}])
+        out = _attach_rank_movement_columns(frame, previous_rank_map={"0056": 2})
+        self.assertEqual(str(out.iloc[0]["排名"]), "2  (-)")
+
+    def test_build_rank_exit_table(self):
+        current_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "0056", "ETF": "元大高股息"},
+            ]
+        )
+        previous_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "00878", "ETF": "國泰永續高股息"},
+                {"代碼": "00919", "ETF": "群益台灣精選高息"},
+            ]
+        )
+        out = _build_rank_exit_table(
+            current_frame=current_df,
+            previous_frame=previous_df,
+            end_used="20260214",
+        )
+        self.assertEqual(list(out["代碼"]), ["00878", "00919"])
+        self.assertEqual(list(out["ETF"]), ["國泰永續高股息", "群益台灣精選高息"])
+        self.assertTrue((out["離開日期"] == "20260214").all())
 
     def test_resolve_tw_symbol_names_uses_full_rows_fallback(self):
         class _FakeService:

@@ -5334,7 +5334,7 @@ def _attach_rank_movement_columns(
         if not prev_rank_lookup:
             movement = "—"
         elif pd.isna(previous_rank_raw):
-            movement = "新進榜"
+            movement = "★"
         else:
             prev_rank = int(float(previous_rank_raw))
             diff = prev_rank - current_rank
@@ -5343,10 +5343,40 @@ def _attach_rank_movement_columns(
             elif diff < 0:
                 movement = f"↓{abs(diff)}"
             else:
-                movement = "持平"
+                movement = "-"
         rank_display.append(f"{current_rank}  ({movement})")
     out[rank_col] = rank_display
     return out
+
+
+def _build_rank_exit_table(
+    *,
+    current_frame: pd.DataFrame,
+    previous_frame: pd.DataFrame,
+    end_used: str,
+    code_col: str = "代碼",
+    name_col: str = "ETF",
+) -> pd.DataFrame:
+    if not isinstance(current_frame, pd.DataFrame) or not isinstance(previous_frame, pd.DataFrame):
+        return pd.DataFrame(columns=[code_col, name_col, "離開日期"])
+    if current_frame.empty or previous_frame.empty:
+        return pd.DataFrame(columns=[code_col, name_col, "離開日期"])
+
+    current_codes = {
+        str(code).strip().upper()
+        for code in current_frame.get(code_col, pd.Series(dtype=str)).astype(str).tolist()
+        if str(code).strip()
+    }
+    rows: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    for _, row in previous_frame.iterrows():
+        code = str(row.get(code_col, "")).strip().upper()
+        if not code or code in current_codes or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        name_text = str(row.get(name_col, "")).strip() or code
+        rows.append({code_col: code, name_col: name_text, "離開日期": str(end_used).strip()})
+    return pd.DataFrame(rows, columns=[code_col, name_col, "離開日期"])
 
 
 def _style_tw_today_move_table(frame: pd.DataFrame):
@@ -6487,16 +6517,16 @@ def _render_tw_etf_top10_page(
             )
         st.dataframe(top10_display, width="stretch", hide_index=True)
 
-        with st.expander("分類說明", expanded=False):
-            st.markdown(
-                "\n".join(
-                    [
-                        "- `代碼白名單`：優先以 ETF 代碼套用穩定分類（市值/股利/科技/金融/ESG/主題/海外/平衡/收益/主動）。",
-                        "- `名稱關鍵字`：若未命中白名單，再以名稱關鍵字補判（高股息/科技/ESG/金融/主動等）。",
-                        "- `其他`：未命中上述關鍵字分類。",
-                    ]
-                )
+        st.caption("分類說明：")
+        st.markdown(
+            "\n".join(
+                [
+                    "- `代碼白名單`：優先以 ETF 代碼套用穩定分類（市值/股利/科技/金融/ESG/主題/海外/平衡/收益/主動）。",
+                    "- `名稱關鍵字`：若未命中白名單，再以名稱關鍵字補判（高股息/科技/ESG/金融/主動等）。",
+                    "- `其他`：未命中上述關鍵字分類。",
+                ]
             )
+        )
 
 
 def _render_top10_etf_2025_view():
@@ -7060,6 +7090,7 @@ def _render_top10_etf_2026_ytd_view(
         ) = _load_tw_market_daily_return(daily_price_used or end_used, force_sync=False)
         market_issues.extend(market_daily_issues)
         previous_rank_map: dict[str, int] = {}
+        previous_rank_df = pd.DataFrame()
         if daily_prev_used and daily_prev_used != end_used:
             try:
                 prev_fetch_n = 99999 if rank_by_underperform else display_n
@@ -7206,7 +7237,7 @@ def _render_top10_etf_2026_ytd_view(
         if daily_prev_used:
             if previous_rank_map:
                 st.caption(
-                    f"排名異動：已併入 `排名` 欄位（例：`1  (持平)`、`10  (新進榜)`），比較基準為 {daily_prev_used}。"
+                    f"排名異動：已併入 `排名` 欄位（例：`1  (-)`、`10  (★)`），比較基準為 {daily_prev_used}。"
                 )
             else:
                 st.caption("排名異動：暫無可比較的前一交易日榜單，`排名` 會顯示為 `N  (—)`。")
@@ -7272,17 +7303,46 @@ def _render_top10_etf_2026_ytd_view(
                 column_config=merged_link_config if merged_link_config else None,
                 disable_backtest_drilldown=True,
             )
-
-        with st.expander("分類說明", expanded=False):
-            st.markdown(
-                "\n".join(
-                    [
-                        "- `代碼白名單`：優先以 ETF 代碼套用穩定分類（市值/股利/科技/金融/ESG/主題/海外/平衡/收益/主動）。",
-                        "- `名稱關鍵字`：若未命中白名單，再以名稱關鍵字補判（高股息/科技/ESG/金融/主動等）。",
-                        "- `其他`：未命中上述關鍵字分類。",
-                    ]
-                )
+        if daily_prev_used and not previous_rank_df.empty:
+            exit_df = _build_rank_exit_table(
+                current_frame=top10_etf_df,
+                previous_frame=previous_rank_df,
+                end_used=end_used,
             )
+            if not exit_df.empty:
+                exit_items: list[str] = []
+                for _, row in exit_df.iterrows():
+                    code_text = str(row.get("代碼", "")).strip()
+                    name_text = str(row.get("ETF", "")).strip() or code_text
+                    date_text = str(row.get("離開日期", "")).strip() or str(end_used).strip()
+                    if code_text:
+                        exit_items.append(f"`{code_text}` {name_text}（離開日期：{date_text}）")
+                if exit_items:
+                    st.caption(f"離開排行（{daily_prev_used} -> {end_used}）：")
+                    st.markdown("\n".join([f"- {item}" for item in exit_items]))
+                else:
+                    st.caption("離開排行：本期無離榜 ETF。")
+            else:
+                st.caption("離開排行：本期無離榜 ETF。")
+        elif daily_prev_used:
+            st.caption(f"離開排行：{daily_prev_used} 榜單資料不可用，暫無法比對。")
+        else:
+            st.caption("離開排行：目前無前一交易日可比較。")
+
+        st.markdown(
+            "<hr style='border: 0; border-top: 1px dashed #9aa0a6; margin: 0.4rem 0 0.6rem 0;'>",
+            unsafe_allow_html=True,
+        )
+        st.caption("分類說明：")
+        st.markdown(
+            "\n".join(
+                [
+                    "- `代碼白名單`：優先以 ETF 代碼套用穩定分類（市值/股利/科技/金融/ESG/主題/海外/平衡/收益/主動）。",
+                    "- `名稱關鍵字`：若未命中白名單，再以名稱關鍵字補判（高股息/科技/ESG/金融/主動等）。",
+                    "- `其他`：未命中上述關鍵字分類。",
+                ]
+            )
+        )
 
     symbols = [
         str(x).strip().upper() for x in top10_etf_df["代碼"].astype(str).tolist() if str(x).strip()
