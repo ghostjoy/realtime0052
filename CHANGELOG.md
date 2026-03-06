@@ -61,6 +61,7 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- Auto: updated scripts/backfill_daily_vwap.py, storage/history_store.py [id:108c512679]
 - Auto: updated scripts/backfill_daily_vwap.py, storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_history_store.py [id:4949963950]
 - `台股 ETF 全類型總表` 的「基金規模追蹤」色塊規則升級為雙向漸層：
   - 日增幅 `> +10%` 改用綠色漸層、日減幅 `< -10%` 改用紅色漸層，與美股漲跌語意一致。

@@ -983,7 +983,9 @@ class HistoryStore:
                         float(row["low"]),
                         float(row["close"]),
                         float(row.get("volume", 0.0)),
-                        float(row["vwap"]) if "vwap" in df.columns and pd.notna(row["vwap"]) else None,
+                        float(row["vwap"])
+                        if "vwap" in df.columns and pd.notna(row["vwap"])
+                        else None,
                         float(row["adj_close"])
                         if "adj_close" in df.columns and pd.notna(row["adj_close"])
                         else None,

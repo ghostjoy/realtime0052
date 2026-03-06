@@ -94,7 +94,9 @@ def _load_duck_raw_frame(store: DuckHistoryStore, *, symbol: str, market: str) -
         return pd.DataFrame(columns=expected)
     raw["fetched_ts"] = pd.to_datetime(raw.get("fetched_at"), utc=True, errors="coerce")
     raw = raw.sort_values(["date", "fetched_ts", "fetched_at"], ascending=[True, True, True])
-    raw = raw.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+    raw = (
+        raw.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+    )
     return raw[expected]
 
 
@@ -118,9 +120,9 @@ def _materialize_duck_bars(store: DuckHistoryStore, raw: pd.DataFrame) -> pd.Dat
     if "fetched_at" not in normalized.columns:
         normalized["fetched_at"] = datetime.now(tz=timezone.utc).isoformat()
     else:
-        normalized["fetched_at"] = normalized["fetched_at"].fillna(
-            datetime.now(tz=timezone.utc).isoformat()
-        ).astype(str)
+        normalized["fetched_at"] = (
+            normalized["fetched_at"].fillna(datetime.now(tz=timezone.utc).isoformat()).astype(str)
+        )
     if "asof" in normalized.columns:
         normalized["asof"] = pd.to_datetime(normalized["asof"], utc=True, errors="coerce")
         normalized["asof"] = normalized["asof"].where(
@@ -143,7 +145,9 @@ def _materialize_duck_bars(store: DuckHistoryStore, raw: pd.DataFrame) -> pd.Dat
     return normalized
 
 
-def _write_duck_delta(store: DuckHistoryStore, *, symbol: str, market: str, bars: pd.DataFrame) -> int:
+def _write_duck_delta(
+    store: DuckHistoryStore, *, symbol: str, market: str, bars: pd.DataFrame
+) -> int:
     if bars.empty:
         return 0
     payload = pd.DataFrame(
@@ -176,7 +180,11 @@ def _write_duck_delta(store: DuckHistoryStore, *, symbol: str, market: str, bars
     payload = payload.dropna(subset=["date", "open", "high", "low", "close"])
     if payload.empty:
         return 0
-    payload = payload.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+    payload = (
+        payload.drop_duplicates(subset=["date"], keep="last")
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
     delta_dir = store._daily_delta_dir(symbol, market)  # noqa: SLF001
     delta_dir.mkdir(parents=True, exist_ok=True)
     delta_path = store._next_delta_parquet_path(delta_dir, prefix="bars_delta")  # noqa: SLF001
@@ -236,7 +244,9 @@ def _backfill_duckdb(
             if len(missing_dates) > 0:
                 aligned = bars.reindex(missing_dates)
                 if "vwap" in aligned.columns:
-                    fillable_missing_count = int(pd.to_numeric(aligned["vwap"], errors="coerce").notna().sum())
+                    fillable_missing_count = int(
+                        pd.to_numeric(aligned["vwap"], errors="coerce").notna().sum()
+                    )
             if fillable_missing_count <= 0:
                 continue
         stats["rows_missing"] += int(fillable_missing_count)
@@ -324,7 +334,11 @@ def _backfill_sqlite(
             bars = bars.dropna(subset=["date"]).set_index("date").sort_index()
             computed = _compute_daily_vwap_series(bars)
             existing = pd.to_numeric(bars.get("vwap"), errors="coerce")
-            missing_mask = existing.isna() if isinstance(existing, pd.Series) else pd.Series(True, index=bars.index)
+            missing_mask = (
+                existing.isna()
+                if isinstance(existing, pd.Series)
+                else pd.Series(True, index=bars.index)
+            )
             stats["rows_missing"] += int(missing_mask.sum())
             if rewrite_all:
                 update_mask = computed.notna()
