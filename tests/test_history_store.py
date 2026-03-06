@@ -138,8 +138,9 @@ class HistoryStoreTests(unittest.TestCase):
             bars = store.load_daily_bars("TSLA", "US")
             self.assertFalse(bars.empty)
             self.assertTrue(
-                {"open", "high", "low", "close", "volume", "source"}.issubset(bars.columns)
+                {"open", "high", "low", "close", "volume", "vwap", "source"}.issubset(bars.columns)
             )
+            self.assertAlmostEqual(float(bars["vwap"].iloc[0]), 100.1666666667, places=6)
 
             second = store.sync_symbol_history(symbol="TSLA", market="US")
             self.assertEqual(second.rows_upserted, 0)

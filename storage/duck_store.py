@@ -42,6 +42,39 @@ DEFAULT_LEGACY_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_LEGACY_S
 class DuckHistoryStore:
     backend_name = "duckdb"
 
+    @staticmethod
+    def _compute_daily_vwap_series(frame: pd.DataFrame) -> pd.Series:
+        if frame is None or not isinstance(frame, pd.DataFrame):
+            return pd.Series(dtype=float)
+        if frame.empty:
+            return pd.Series(index=frame.index, dtype=float)
+
+        def _numeric_col(name: str) -> pd.Series:
+            if name not in frame.columns:
+                return pd.Series(index=frame.index, dtype=float)
+            return pd.to_numeric(frame[name], errors="coerce")
+
+        high = _numeric_col("high")
+        low = _numeric_col("low")
+        close = _numeric_col("close")
+        volume = _numeric_col("volume").fillna(0.0)
+        typical = (high + low + close) / 3.0
+        cum_volume = volume.cumsum().replace(0, float("nan"))
+        return (typical * volume).cumsum() / cum_volume
+
+    @classmethod
+    def _ensure_daily_vwap_column(cls, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+            return frame
+        out = frame.copy()
+        computed = cls._compute_daily_vwap_series(out)
+        if "vwap" in out.columns:
+            existing = pd.to_numeric(out["vwap"], errors="coerce")
+            out["vwap"] = existing.where(existing.notna(), computed)
+        else:
+            out["vwap"] = computed
+        return out
+
     def __init__(
         self,
         db_path: str | None = None,
@@ -678,7 +711,7 @@ class DuckHistoryStore:
 
     @staticmethod
     def _normalize_daily_bars_frame(df: pd.DataFrame) -> pd.DataFrame:
-        base_cols = ["open", "high", "low", "close", "volume"]
+        base_cols = ["open", "high", "low", "close", "volume", "vwap"]
         if df is None or not isinstance(df, pd.DataFrame) or df.empty:
             return pd.DataFrame(columns=base_cols)
 
@@ -733,6 +766,12 @@ class DuckHistoryStore:
             norm[col] = series.fillna(close)
         volume = _extract_numeric_col("volume")
         norm["volume"] = volume.fillna(0.0)
+        computed_vwap = DuckHistoryStore._compute_daily_vwap_series(norm)
+        if "vwap" in out.columns:
+            supplied_vwap = _extract_numeric_col("vwap")
+            norm["vwap"] = supplied_vwap.where(supplied_vwap.notna(), computed_vwap)
+        else:
+            norm["vwap"] = computed_vwap
         if "adj_close" in out.columns:
             norm["adj_close"] = _extract_numeric_col("adj_close")
         if "asof" in out.columns:
@@ -753,6 +792,7 @@ class DuckHistoryStore:
                 "low",
                 "close",
                 "volume",
+                "vwap",
                 "adj_close",
                 "asof",
                 "quality_score",
@@ -783,6 +823,7 @@ class DuckHistoryStore:
             "low",
             "close",
             "volume",
+            "vwap",
             "adj_close",
             "source",
             "fetched_at",
@@ -813,6 +854,7 @@ class DuckHistoryStore:
                     TRY_CAST(low AS DOUBLE) AS low,
                     TRY_CAST(close AS DOUBLE) AS close,
                     TRY_CAST(volume AS DOUBLE) AS volume,
+                    TRY_CAST(vwap AS DOUBLE) AS vwap,
                     TRY_CAST(adj_close AS DOUBLE) AS adj_close,
                     NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
                     CAST(fetched_at AS VARCHAR) AS fetched_at_text,
@@ -824,7 +866,7 @@ class DuckHistoryStore:
             ),
             ranked AS (
                 SELECT
-                    d, open, high, low, close, volume, adj_close,
+                    d, open, high, low, close, volume, vwap, adj_close,
                     COALESCE(source, 'unknown') AS source,
                     fetched_at_text,
                     asof_text,
@@ -839,7 +881,7 @@ class DuckHistoryStore:
             )
             SELECT
                 STRFTIME(d, '%Y-%m-%d') AS date,
-                open, high, low, close, volume, adj_close, source,
+                open, high, low, close, volume, vwap, adj_close, source,
                 COALESCE(fetched_at_text, '') AS fetched_at,
                 COALESCE(asof_text, fetched_at_text, '') AS asof,
                 quality_score,
@@ -877,7 +919,7 @@ class DuckHistoryStore:
             )
             SELECT
                 STRFTIME(d, '%Y-%m-%d') AS date,
-                open, high, low, close, volume, adj_close, source,
+                open, high, low, close, volume, CAST(NULL AS DOUBLE) AS vwap, adj_close, source,
                 COALESCE(fetched_at_text, '') AS fetched_at,
                 COALESCE(fetched_at_text, '') AS asof,
                 CAST(NULL AS DOUBLE) AS quality_score,
@@ -912,6 +954,7 @@ class DuckHistoryStore:
         frame = frame[~frame.index.isna()]
         if frame.empty:
             return 0
+        frame = self._ensure_daily_vwap_column(frame)
 
         payload = pd.DataFrame(
             {
@@ -921,6 +964,7 @@ class DuckHistoryStore:
                 "low": pd.to_numeric(frame["low"], errors="coerce"),
                 "close": pd.to_numeric(frame["close"], errors="coerce"),
                 "volume": pd.to_numeric(frame.get("volume", 0.0), errors="coerce").fillna(0.0),
+                "vwap": pd.to_numeric(frame.get("vwap"), errors="coerce"),
                 "adj_close": pd.to_numeric(frame.get("adj_close"), errors="coerce")
                 if "adj_close" in frame.columns
                 else None,
@@ -983,6 +1027,7 @@ class DuckHistoryStore:
                     TRY_CAST(low AS DOUBLE) AS low,
                     TRY_CAST(close AS DOUBLE) AS close,
                     TRY_CAST(volume AS DOUBLE) AS volume,
+                    TRY_CAST(vwap AS DOUBLE) AS vwap,
                     TRY_CAST(adj_close AS DOUBLE) AS adj_close,
                     NULLIF(TRIM(CAST(source AS VARCHAR)), '') AS source,
                     CAST(fetched_at AS VARCHAR) AS fetched_at_text,
@@ -994,7 +1039,7 @@ class DuckHistoryStore:
             ),
             ranked AS (
                 SELECT
-                    d, open, high, low, close, volume, adj_close,
+                    d, open, high, low, close, volume, vwap, adj_close,
                     COALESCE(source, 'unknown') AS source,
                     fetched_at_text,
                     asof_text,
@@ -1009,7 +1054,7 @@ class DuckHistoryStore:
             )
             SELECT
                 STRFTIME(d, '%Y-%m-%d') AS date,
-                open, high, low, close, volume, adj_close, source,
+                open, high, low, close, volume, vwap, adj_close, source,
                 COALESCE(fetched_at_text, '') AS fetched_at,
                 COALESCE(asof_text, fetched_at_text, '') AS asof,
                 quality_score,
@@ -1047,7 +1092,7 @@ class DuckHistoryStore:
             )
             SELECT
                 STRFTIME(d, '%Y-%m-%d') AS date,
-                open, high, low, close, volume, adj_close, source,
+                open, high, low, close, volume, CAST(NULL AS DOUBLE) AS vwap, adj_close, source,
                 COALESCE(fetched_at_text, '') AS fetched_at,
                 COALESCE(fetched_at_text, '') AS asof,
                 CAST(NULL AS DOUBLE) AS quality_score,
@@ -1076,6 +1121,10 @@ class DuckHistoryStore:
             except Exception:
                 pass
         else:
+            compacted["date"] = pd.to_datetime(compacted["date"], utc=True, errors="coerce")
+            compacted = compacted.dropna(subset=["date"]).sort_values("date")
+            compacted = self._ensure_daily_vwap_column(compacted.set_index("date")).reset_index()
+            compacted["date"] = compacted["date"].dt.strftime("%Y-%m-%d")
             compacted.to_parquet(tmp_path, index=False)
             tmp_path.replace(out_path)
         for delta in delta_files:
@@ -1853,6 +1902,7 @@ class DuckHistoryStore:
                     "low",
                     "close",
                     "volume",
+                    "vwap",
                     "adj_close",
                     "source",
                     "asof",
@@ -1862,9 +1912,10 @@ class DuckHistoryStore:
             )
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         df = df.dropna(subset=["date"]).set_index("date").sort_index()
-        for col in ["open", "high", "low", "close", "volume", "adj_close"]:
+        for col in ["open", "high", "low", "close", "volume", "vwap", "adj_close"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = self._ensure_daily_vwap_column(df)
         if "source" not in df.columns:
             df["source"] = "unknown"
         if "asof" in df.columns:
@@ -1888,6 +1939,7 @@ class DuckHistoryStore:
                     "low",
                     "close",
                     "volume",
+                    "vwap",
                     "adj_close",
                     "source",
                     "asof",

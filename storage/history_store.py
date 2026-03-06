@@ -24,6 +24,26 @@ ICLOUD_DOCS_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~Clo
 DEFAULT_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_DB_FILENAME
 
 
+def _compute_daily_vwap_series(frame: pd.DataFrame) -> pd.Series:
+    if frame is None or not isinstance(frame, pd.DataFrame):
+        return pd.Series(dtype=float)
+    if frame.empty:
+        return pd.Series(index=frame.index, dtype=float)
+
+    def _numeric_col(name: str) -> pd.Series:
+        if name not in frame.columns:
+            return pd.Series(index=frame.index, dtype=float)
+        return pd.to_numeric(frame[name], errors="coerce")
+
+    high = _numeric_col("high")
+    low = _numeric_col("low")
+    close = _numeric_col("close")
+    volume = _numeric_col("volume").fillna(0.0)
+    typical = (high + low + close) / 3.0
+    cum_volume = volume.cumsum().replace(0, float("nan"))
+    return (typical * volume).cumsum() / cum_volume
+
+
 def resolve_history_db_path(db_path: str | None = None) -> Path:
     if db_path:
         return Path(db_path).expanduser()
@@ -213,6 +233,7 @@ class HistoryStore:
                     low REAL NOT NULL,
                     close REAL NOT NULL,
                     volume REAL NOT NULL,
+                    vwap REAL,
                     adj_close REAL,
                     source TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
@@ -364,6 +385,12 @@ class HistoryStore:
                     ON tw_etf_aum_history(etf_code, trade_date DESC);
                 """
             )
+            cols = {
+                str(row[1]).strip().lower()
+                for row in conn.execute("PRAGMA table_info(daily_bars)").fetchall()
+            }
+            if "vwap" not in cols:
+                conn.execute("ALTER TABLE daily_bars ADD COLUMN vwap REAL")
 
     @staticmethod
     def _parse_iso_datetime(value: object) -> datetime | None:
@@ -634,7 +661,7 @@ class HistoryStore:
 
     @staticmethod
     def _normalize_daily_bars_frame(df: pd.DataFrame) -> pd.DataFrame:
-        base_cols = ["open", "high", "low", "close", "volume"]
+        base_cols = ["open", "high", "low", "close", "volume", "vwap"]
         if df is None or not isinstance(df, pd.DataFrame) or df.empty:
             return pd.DataFrame(columns=base_cols)
 
@@ -690,6 +717,12 @@ class HistoryStore:
             norm[col] = series.fillna(close)
         volume = _extract_numeric_col("volume")
         norm["volume"] = volume.fillna(0.0)
+        computed_vwap = _compute_daily_vwap_series(norm)
+        if "vwap" in out.columns:
+            supplied_vwap = _extract_numeric_col("vwap")
+            norm["vwap"] = supplied_vwap.where(supplied_vwap.notna(), computed_vwap)
+        else:
+            norm["vwap"] = computed_vwap
         if "adj_close" in out.columns:
             norm["adj_close"] = _extract_numeric_col("adj_close")
 
@@ -697,7 +730,9 @@ class HistoryStore:
         norm.index = idx
         norm = norm[~norm.index.isna()]
         keep_cols = [
-            c for c in ["open", "high", "low", "close", "volume", "adj_close"] if c in norm.columns
+            c
+            for c in ["open", "high", "low", "close", "volume", "vwap", "adj_close"]
+            if c in norm.columns
         ]
         norm = norm[keep_cols]
         norm = norm.dropna(subset=["open", "high", "low", "close"], how="any").sort_index()
@@ -925,14 +960,17 @@ class HistoryStore:
             for dt, row in df.iterrows():
                 conn.execute(
                     """
-                    INSERT INTO daily_bars(instrument_id, date, open, high, low, close, volume, adj_close, source, fetched_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO daily_bars(
+                        instrument_id, date, open, high, low, close, volume, vwap, adj_close, source, fetched_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(instrument_id, date) DO UPDATE SET
                         open=excluded.open,
                         high=excluded.high,
                         low=excluded.low,
                         close=excluded.close,
                         volume=excluded.volume,
+                        vwap=COALESCE(excluded.vwap, daily_bars.vwap),
                         adj_close=COALESCE(excluded.adj_close, daily_bars.adj_close),
                         source=excluded.source,
                         fetched_at=excluded.fetched_at
@@ -945,6 +983,7 @@ class HistoryStore:
                         float(row["low"]),
                         float(row["close"]),
                         float(row.get("volume", 0.0)),
+                        float(row["vwap"]) if "vwap" in df.columns and pd.notna(row["vwap"]) else None,
                         float(row["adj_close"])
                         if "adj_close" in df.columns and pd.notna(row["adj_close"])
                         else None,
@@ -985,7 +1024,7 @@ class HistoryStore:
             params.append(end.date().isoformat())
 
         sql = f"""
-            SELECT date, open, high, low, close, volume, adj_close, source
+            SELECT date, open, high, low, close, volume, vwap, adj_close, source
             FROM daily_bars
             WHERE {" AND ".join(where)}
             ORDER BY date ASC
@@ -994,10 +1033,19 @@ class HistoryStore:
             df = pd.read_sql_query(sql, conn, params=params)
         if df.empty:
             return pd.DataFrame(
-                columns=["open", "high", "low", "close", "volume", "adj_close", "source"]
+                columns=["open", "high", "low", "close", "volume", "vwap", "adj_close", "source"]
             )
         df["date"] = pd.to_datetime(df["date"], utc=True)
         df = df.set_index("date")
+        for col in ["open", "high", "low", "close", "volume", "vwap", "adj_close"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "vwap" not in df.columns or df["vwap"].isna().any():
+            computed_vwap = _compute_daily_vwap_series(df)
+            if "vwap" in df.columns:
+                df["vwap"] = df["vwap"].where(df["vwap"].notna(), computed_vwap)
+            else:
+                df["vwap"] = computed_vwap
         return df
 
     def load_daily_coverage(

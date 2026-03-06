@@ -156,6 +156,8 @@ class DuckStoreTests(unittest.TestCase):
             self.assertEqual(len(bars), 2)
             self.assertEqual(bars.index[0].strftime("%Y-%m-%d"), "2024-01-02")
             self.assertEqual(bars.index[-1].strftime("%Y-%m-%d"), "2024-01-03")
+            self.assertIn("vwap", bars.columns)
+            self.assertAlmostEqual(float(bars["vwap"].iloc[0]), 100.1666666667, places=6)
             self.assertEqual(store.list_symbols("TW"), ["2330"])
 
     def test_intraday_ticks_roundtrip(self):
@@ -208,7 +210,16 @@ class DuckStoreTests(unittest.TestCase):
             )
 
             idx = pd.date_range("2025-01-01", periods=3, freq="B", tz="UTC")
-            frame = pd.DataFrame({"close": [100.0, 101.0, 102.5]}, index=idx)
+            frame = pd.DataFrame(
+                {
+                    "open": [99.0, 100.0, 101.0],
+                    "high": [101.0, 102.0, 103.0],
+                    "low": [98.0, 99.0, 100.0],
+                    "close": [100.0, 101.0, 102.5],
+                    "volume": [10.0, 20.0, 30.0],
+                },
+                index=idx,
+            )
             queued = store.queue_daily_bars_writeback(
                 symbol="^GSPC", market="US", bars=frame, source="yfinance"
             )
@@ -219,6 +230,8 @@ class DuckStoreTests(unittest.TestCase):
             self.assertEqual(len(bars), 3)
             self.assertTrue((bars["source"] == "yfinance").all())
             self.assertAlmostEqual(float(bars["close"].iloc[-1]), 102.5, places=6)
+            self.assertIn("vwap", bars.columns)
+            self.assertAlmostEqual(float(bars["vwap"].iloc[0]), 99.6666666667, places=6)
 
     def test_queue_daily_bars_writeback_coalesces_same_key(self):
         with tempfile.TemporaryDirectory() as tmp:
