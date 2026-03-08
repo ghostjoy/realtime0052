@@ -21,6 +21,7 @@ from services.backtest_runner import (
 from services.bootstrap_loader import run_market_data_bootstrap
 from services.sync_orchestrator import normalize_symbols, sync_symbols_if_needed
 from services.tw_etf_daily_sync import sync_twse_etf_daily_market
+from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
 
 
 def _resolve_store():
@@ -164,6 +165,41 @@ def sync_twse_etf_daily(
     click.echo(
         "twse_etf_daily "
         f"start={summary.get('start_date')} end={summary.get('end_date')} "
+        f"latest={summary.get('latest_date') or 'n/a'}"
+    )
+    click.echo(
+        f"requested_days={int(summary.get('requested_days') or 0)} "
+        f"synced_days={int(summary.get('synced_days') or 0)} "
+        f"skipped_days={int(summary.get('skipped_days') or 0)} "
+        f"empty_days={int(summary.get('empty_days') or 0)} "
+        f"saved_rows={int(summary.get('saved_rows') or 0)}"
+    )
+    issues = summary.get("issues") if isinstance(summary, dict) else []
+    if isinstance(issues, list):
+        for issue in issues[:10]:
+            click.echo(f"! {issue}")
+
+
+@cli.command()
+@click.option("--start", help="Start date (YYYY-MM-DD)")
+@click.option("--end", help="End date (YYYY-MM-DD)")
+@click.option("--force", is_flag=True, default=False, help="Re-fetch covered latest date")
+def sync_twse_etf_mis(
+    start: str | None,
+    end: str | None,
+    force: bool,
+) -> None:
+    """Sync TWSE MIS ETF indicator snapshot."""
+    store = _resolve_store()
+    summary = sync_twse_etf_mis_daily(
+        store=store,
+        start=start,
+        end=end,
+        force=bool(force),
+    )
+    click.echo(
+        "twse_etf_mis "
+        f"start={summary.get('start_date') or 'n/a'} end={summary.get('end_date') or 'n/a'} "
         f"latest={summary.get('latest_date') or 'n/a'}"
     )
     click.echo(

@@ -158,6 +158,46 @@ class TwEtfDailySyncTests(unittest.TestCase):
         self.assertEqual(int(summary["saved_rows"]), 1)
         self.assertIn("2026-03-07", store.saved)
 
+    @patch("services.tw_etf_daily_sync.fetch_twse_etf_daily_report")
+    def test_sync_twse_etf_daily_market_without_coverage_defaults_to_lookback_window(
+        self,
+        fetch_mock,
+    ):
+        store = _FakeStore()
+        fetch_mock.return_value = (
+            "2026-03-08",
+            pd.DataFrame(
+                [
+                    {
+                        "trade_date": "2026-03-08",
+                        "etf_code": "0050",
+                        "etf_name": "元大台灣50",
+                        "trade_value": 2.0,
+                        "trade_volume": 3.0,
+                        "trade_count": 4,
+                        "open": 5.0,
+                        "high": 6.0,
+                        "low": 4.0,
+                        "close": 5.5,
+                        "change": 0.1,
+                        "source": "twse_etf_daily",
+                    }
+                ]
+            ),
+            {"row_count": 1},
+        )
+
+        summary = sync_twse_etf_daily_market(
+            store=store,
+            end="2026-03-08",
+            lookback_days=2,
+            force=True,
+        )
+
+        self.assertEqual(summary["start_date"], "2026-03-06")
+        self.assertEqual(summary["end_date"], "2026-03-08")
+        self.assertEqual(int(summary["requested_days"]), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,9 +15,16 @@
   - 新增 `services/tw_etf_daily_sync.py`，可同步 TWSE 上市 ETF 官方日級交易資料
   - 新增 `tw_etf_daily_market` 持久化表（DuckDB / SQLite），保存 `成交金額 / 成交股數 / 成交筆數 / OHLC / 漲跌價差`
   - 新增 CLI 指令 `realtime0052 sync-twse-etf-daily`
+- 新增 TWSE MIS ETF 指標資料流：
+  - 新增 `services/tw_etf_mis_sync.py`，可同步 TWSE MIS `all_etf.txt` + `getCategory.jsp?ex=tse&i=B0`
+  - 新增 `tw_etf_mis_daily` 持久化表（DuckDB / SQLite），保存 `已發行單位 / 與前日差異 / 市價 / 預估NAV / 折溢價% / 前一營業日NAV`
+  - 新增 CLI 指令 `realtime0052 sync-twse-etf-mis`
 - `台股 ETF 全類型總表` 新增「官方 ETF 日成交總表」區塊：
   - 顯示最近交易日的 `成交金額(億) / 成交股數 / 成交筆數 / 20日均成交金額 / 20日波動率 / 量能異常`
   - 沿用既有 ETF 名稱熱力圖導流與代碼回測導流
+- `台股 ETF 全類型總表` 新增「官方 ETF MIS 指標總表」區塊：
+  - 顯示 `市價 / 預估NAV / 折溢價% / 前一營業日NAV / 已發行單位 / 申贖差額`
+  - 維持手動同步，不在開頁時自動打官網
 - 新增測試：
   - `tests/test_tw_etf_daily_sync.py`
   - `tests/test_history_store.py`、`tests/test_duck_store.py`：TWSE ETF 日成交表讀寫
@@ -72,6 +79,10 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- `bootstrap` 預載流程納入台股 ETF 官方資料：
+  - TW scope 會額外同步 `tw_etf_daily_market`
+  - TW scope 會額外同步 `tw_etf_mis_daily`
+  - 任務摘要新增 ETF 官方資料同步結果與 issue 統計
 - Auto: updated scripts/backfill_daily_vwap.py, storage/history_store.py [id:108c512679]
 - Auto: updated scripts/backfill_daily_vwap.py, storage/duck_store.py, storage/history_store.py, tests/test_duck_store.py, tests/test_history_store.py [id:4949963950]
 - `台股 ETF 全類型總表` 的「基金規模追蹤」色塊規則升級為雙向漸層：

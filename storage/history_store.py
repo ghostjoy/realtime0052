@@ -368,6 +368,23 @@ class HistoryStore:
                     PRIMARY KEY(etf_code, trade_date)
                 );
 
+                CREATE TABLE IF NOT EXISTS tw_etf_mis_daily (
+                    trade_date TEXT NOT NULL,
+                    etf_code TEXT NOT NULL,
+                    etf_name TEXT NOT NULL,
+                    issued_units REAL,
+                    creation_redemption_diff REAL,
+                    market_price REAL,
+                    estimated_nav REAL,
+                    premium_discount_pct REAL,
+                    previous_nav REAL,
+                    reference_url TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY(etf_code, trade_date)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
@@ -406,6 +423,12 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_tw_etf_daily_market_code_date
                     ON tw_etf_daily_market(etf_code, trade_date DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_mis_daily_trade_date
+                    ON tw_etf_mis_daily(trade_date DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_mis_daily_code_date
+                    ON tw_etf_mis_daily(etf_code, trade_date DESC);
                 """
             )
             cols = {
@@ -1677,6 +1700,242 @@ class HistoryStore:
                 SELECT COUNT(*), MIN(trade_date), MAX(trade_date),
                        COUNT(DISTINCT trade_date), COUNT(DISTINCT etf_code)
                 FROM tw_etf_daily_market
+                {where_sql}
+                """,
+                params,
+            ).fetchone()
+        if row is None:
+            return {
+                "row_count": 0,
+                "first_date": None,
+                "last_date": None,
+                "trade_date_count": 0,
+                "symbol_count": 0,
+            }
+        first = self._parse_iso_datetime(row[1])
+        last = self._parse_iso_datetime(row[2])
+        return {
+            "row_count": max(0, int(row[0] or 0)),
+            "first_date": first,
+            "last_date": last,
+            "trade_date_count": max(0, int(row[3] or 0)),
+            "symbol_count": max(0, int(row[4] or 0)),
+        }
+
+    def save_tw_etf_mis_daily(
+        self,
+        *,
+        rows: list[dict[str, object]],
+        trade_date: str,
+        source: str = "twse_mis_etf_indicator",
+    ) -> int:
+        try:
+            trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
+        except Exception:
+            return 0
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        source_token = self._normalize_text(source) or "twse_mis_etf_indicator"
+
+        dedup: dict[
+            str,
+            tuple[
+                str,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                str,
+                str,
+                str,
+            ],
+        ] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = self._normalize_symbol_token(
+                row.get("etf_code") or row.get("code") or row.get("symbol")
+            )
+            if not code:
+                continue
+            name = self._normalize_text(row.get("etf_name") or row.get("name")) or code
+            issued_units = pd.to_numeric(row.get("issued_units"), errors="coerce")
+            creation_redemption_diff = pd.to_numeric(
+                row.get("creation_redemption_diff"), errors="coerce"
+            )
+            market_price = pd.to_numeric(row.get("market_price"), errors="coerce")
+            estimated_nav = pd.to_numeric(row.get("estimated_nav"), errors="coerce")
+            premium_discount_pct = pd.to_numeric(row.get("premium_discount_pct"), errors="coerce")
+            previous_nav = pd.to_numeric(row.get("previous_nav"), errors="coerce")
+            reference_url = self._normalize_text(row.get("reference_url"))
+            updated_at = self._normalize_text(row.get("updated_at")) or now_iso
+            row_source = self._normalize_text(row.get("source")) or source_token
+            dedup[code] = (
+                name,
+                float(issued_units) if pd.notna(issued_units) else None,
+                float(creation_redemption_diff) if pd.notna(creation_redemption_diff) else None,
+                float(market_price) if pd.notna(market_price) else None,
+                float(estimated_nav) if pd.notna(estimated_nav) else None,
+                float(premium_discount_pct) if pd.notna(premium_discount_pct) else None,
+                float(previous_nav) if pd.notna(previous_nav) else None,
+                reference_url,
+                updated_at,
+                row_source,
+            )
+
+        if not dedup:
+            return 0
+
+        with self._connect_ctx() as conn:
+            for code, values in dedup.items():
+                conn.execute(
+                    """
+                    INSERT INTO tw_etf_mis_daily(
+                        trade_date, etf_code, etf_name, issued_units, creation_redemption_diff,
+                        market_price, estimated_nav, premium_discount_pct, previous_nav,
+                        reference_url, updated_at, source, fetched_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(etf_code, trade_date) DO UPDATE SET
+                        etf_name=excluded.etf_name,
+                        issued_units=excluded.issued_units,
+                        creation_redemption_diff=excluded.creation_redemption_diff,
+                        market_price=excluded.market_price,
+                        estimated_nav=excluded.estimated_nav,
+                        premium_discount_pct=excluded.premium_discount_pct,
+                        previous_nav=excluded.previous_nav,
+                        reference_url=excluded.reference_url,
+                        updated_at=excluded.updated_at,
+                        source=excluded.source,
+                        fetched_at=excluded.fetched_at
+                    """,
+                    (
+                        trade_date_iso,
+                        code,
+                        values[0],
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values[5],
+                        values[6],
+                        values[7],
+                        values[8],
+                        values[9],
+                        now_iso,
+                    ),
+                )
+        return len(dedup)
+
+    def load_tw_etf_mis_daily(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> pd.DataFrame:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self._connect_ctx() as conn:
+            df = pd.read_sql_query(
+                f"""
+                SELECT trade_date, etf_code, etf_name, issued_units, creation_redemption_diff,
+                       market_price, estimated_nav, premium_discount_pct, previous_nav,
+                       reference_url, updated_at, source, fetched_at
+                FROM tw_etf_mis_daily
+                {where_sql}
+                ORDER BY trade_date ASC, etf_code ASC
+                """,
+                conn,
+                params=params,
+            )
+        if df.empty:
+            return pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "etf_code",
+                    "etf_name",
+                    "issued_units",
+                    "creation_redemption_diff",
+                    "market_price",
+                    "estimated_nav",
+                    "premium_discount_pct",
+                    "previous_nav",
+                    "reference_url",
+                    "updated_at",
+                    "source",
+                    "fetched_at",
+                ]
+            )
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.astype(str)
+        for column in [
+            "issued_units",
+            "creation_redemption_diff",
+            "market_price",
+            "estimated_nav",
+            "premium_discount_pct",
+            "previous_nav",
+        ]:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df
+
+    def load_tw_etf_mis_daily_coverage(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> dict[str, object]:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*), MIN(trade_date), MAX(trade_date),
+                       COUNT(DISTINCT trade_date), COUNT(DISTINCT etf_code)
+                FROM tw_etf_mis_daily
                 {where_sql}
                 """,
                 params,

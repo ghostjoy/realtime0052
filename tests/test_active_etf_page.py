@@ -9,6 +9,7 @@ from urllib.parse import parse_qs
 import pandas as pd
 import plotly.graph_objects as go
 
+import app
 from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
@@ -16,6 +17,7 @@ from app import (
     _attach_rank_movement_columns,
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
+    _auto_run_daily_incremental_refresh,
     _benchmark_candidates_tw,
     _blend_hex_color,
     _build_consensus_representative_between,
@@ -28,6 +30,7 @@ from app import (
     _build_tw_etf_all_types_performance_table,
     _build_tw_etf_aum_history_wide,
     _build_tw_etf_daily_market_overview,
+    _build_tw_etf_mis_overview,
     _build_tw_etf_top10_between,
     _build_two_etf_aggressive_picks,
     _classify_issue_level,
@@ -74,6 +77,97 @@ from ui.helpers import (
 
 
 class ActiveEtfPageTests(unittest.TestCase):
+    def test_auto_run_daily_incremental_refresh_schedules_background_future(self):
+        today_token = datetime.now(tz=timezone.utc).date().isoformat()
+        session_key = f"daily_incremental_done:{today_token}"
+        status_key = f"daily_incremental_status:{today_token}"
+
+        class _PendingFuture:
+            def done(self):
+                return False
+
+        fake_store = SimpleNamespace(
+            load_latest_bootstrap_run=lambda: None,
+            list_symbols=lambda market, limit=1: ["0050"] if market == "TW" else [],
+        )
+        old_done = app.st.session_state.get(session_key)
+        old_status = app.st.session_state.get(status_key)
+        old_futures = dict(app._AUTO_INCREMENTAL_FUTURES)
+        try:
+            app.st.session_state.pop(session_key, None)
+            app.st.session_state.pop(status_key, None)
+            app._AUTO_INCREMENTAL_FUTURES.clear()
+            with (
+                patch("app.cfg_or_env_bool", return_value=True),
+                patch("app._submit_daily_incremental_refresh", return_value=_PendingFuture()) as submit_mock,
+            ):
+                _auto_run_daily_incremental_refresh(fake_store)
+
+            self.assertEqual(app.st.session_state.get(status_key), "running")
+            self.assertIsNone(app.st.session_state.get(session_key))
+            submit_mock.assert_called_once_with(fake_store)
+            self.assertIn(today_token, app._AUTO_INCREMENTAL_FUTURES)
+        finally:
+            app._AUTO_INCREMENTAL_FUTURES.clear()
+            app._AUTO_INCREMENTAL_FUTURES.update(old_futures)
+            if old_done is not None:
+                app.st.session_state[session_key] = old_done
+            else:
+                app.st.session_state.pop(session_key, None)
+            if old_status is not None:
+                app.st.session_state[status_key] = old_status
+            else:
+                app.st.session_state.pop(status_key, None)
+
+    def test_auto_run_daily_incremental_refresh_consumes_completed_future(self):
+        today_token = datetime.now(tz=timezone.utc).date().isoformat()
+        session_key = f"daily_incremental_done:{today_token}"
+        status_key = f"daily_incremental_status:{today_token}"
+
+        class _DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return {"status": "completed", "total_symbols": 5}
+
+        fake_store = SimpleNamespace(
+            load_latest_bootstrap_run=lambda: None,
+            list_symbols=lambda market, limit=1: [],
+        )
+        old_done = app.st.session_state.get(session_key)
+        old_status = app.st.session_state.get(status_key)
+        old_summary = app.st.session_state.get("daily_incremental_summary")
+        old_futures = dict(app._AUTO_INCREMENTAL_FUTURES)
+        try:
+            app.st.session_state.pop(session_key, None)
+            app.st.session_state.pop(status_key, None)
+            app.st.session_state.pop("daily_incremental_summary", None)
+            app._AUTO_INCREMENTAL_FUTURES.clear()
+            app._AUTO_INCREMENTAL_FUTURES[today_token] = _DoneFuture()
+            with patch("app.cfg_or_env_bool", return_value=True):
+                _auto_run_daily_incremental_refresh(fake_store)
+
+            self.assertTrue(bool(app.st.session_state.get(session_key)))
+            self.assertEqual(app.st.session_state.get(status_key), "completed")
+            self.assertEqual(app.st.session_state.get("daily_incremental_summary", {}).get("status"), "completed")
+            self.assertNotIn(today_token, app._AUTO_INCREMENTAL_FUTURES)
+        finally:
+            app._AUTO_INCREMENTAL_FUTURES.clear()
+            app._AUTO_INCREMENTAL_FUTURES.update(old_futures)
+            if old_done is not None:
+                app.st.session_state[session_key] = old_done
+            else:
+                app.st.session_state.pop(session_key, None)
+            if old_status is not None:
+                app.st.session_state[status_key] = old_status
+            else:
+                app.st.session_state.pop(status_key, None)
+            if old_summary is not None:
+                app.st.session_state["daily_incremental_summary"] = old_summary
+            else:
+                app.st.session_state.pop("daily_incremental_summary", None)
+
     def test_load_cached_twse_snapshot_skips_future_rows(self):
         fake_rows = [
             {
@@ -536,7 +630,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         with patch(
             "app._get_tw_etf_management_fee_whitelist",
             return_value={"0050": "0.4567%"},
-        ):
+        ), patch("app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64}):
             out = _attach_tw_etf_management_fee_column(source)
         self.assertIn("管理費(%)", out.columns)
         self.assertIn("ETF規模(億)", out.columns)
@@ -1831,6 +1925,11 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "app._load_tw_market_daily_return",
                 return_value=(0.8, "0050", "20260213", "20260214", []),
             ),
+            patch("app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64, "00935": 321.0}),
+            patch(
+                "app._load_twii_twse_day_open_close",
+                side_effect=[(None, 113.0, []), (114.0, 114.0, [])],
+            ),
         ):
             out, meta = _build_tw_etf_all_types_performance_table(
                 ytd_start_yyyymmdd="20251231",
@@ -1952,6 +2051,59 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(list(out["代碼"]), ["0050", "0056"])
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "收盤"].iloc[0]), 76.5)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "日報酬(%)"].iloc[0]), 1.32)
+        self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
+
+    def test_build_tw_etf_mis_overview(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-03-06",
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "issued_units": 1350000000.0,
+                    "creation_redemption_diff": 1000000.0,
+                    "market_price": 182.1,
+                    "estimated_nav": 181.62,
+                    "premium_discount_pct": 0.26,
+                    "previous_nav": 180.55,
+                    "reference_url": "https://example.com/nav",
+                    "updated_at": "2026-03-06T14:30:00+08:00",
+                    "source": "twse_mis_etf_indicator",
+                    "fetched_at": "2026-03-06T06:30:00+00:00",
+                },
+                {
+                    "trade_date": "2026-03-06",
+                    "etf_code": "0056",
+                    "etf_name": "元大高股息",
+                    "issued_units": 2460000000.0,
+                    "creation_redemption_diff": -500000.0,
+                    "market_price": 40.2,
+                    "estimated_nav": 40.05,
+                    "premium_discount_pct": 0.37,
+                    "previous_nav": 39.88,
+                    "reference_url": "https://example.com/nav2",
+                    "updated_at": "2026-03-06T14:30:00+08:00",
+                    "source": "twse_mis_etf_indicator",
+                    "fetched_at": "2026-03-06T06:30:00+00:00",
+                },
+            ]
+        )
+        fake_store = SimpleNamespace(
+            load_tw_etf_mis_daily_coverage=lambda **kwargs: {
+                "row_count": len(frame),
+                "first_date": pd.Timestamp("2026-03-06").to_pydatetime(),
+                "last_date": pd.Timestamp("2026-03-06").to_pydatetime(),
+                "trade_date_count": 1,
+                "symbol_count": 2,
+            },
+            load_tw_etf_mis_daily=lambda **kwargs: frame.copy(),
+        )
+        with patch("app._history_store", return_value=fake_store):
+            out, meta = _build_tw_etf_mis_overview(top_n=0)
+
+        self.assertEqual(list(out["代碼"]), ["0056", "0050"])
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "預估NAV"].iloc[0]), 181.62)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "已發行單位(萬)"].iloc[0]), 135000.0)
         self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
 
     def test_with_tw_today_fields_only_backfills_missing_open(self):

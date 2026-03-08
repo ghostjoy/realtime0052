@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from services.sync_orchestrator import normalize_symbols, sync_symbols_if_needed
+from services.tw_etf_daily_sync import sync_twse_etf_daily_market
+from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
 
 if TYPE_CHECKING:
     from storage import HistoryStore
@@ -247,6 +249,7 @@ def run_market_data_bootstrap(
     synced_success = 0
     failed_symbols = 0
     skipped_symbols = 0
+    official_sync_failures = 0
 
     try:
         row_threshold = max(120, years_token * 180) if min_rows is None else max(1, int(min_rows))
@@ -282,13 +285,53 @@ def run_market_data_bootstrap(
         if use_us:
             _sync_market("US", us_symbols_final)
 
+        official_syncs: dict[str, dict[str, object]] = {}
+
+        def _run_official_sync(name: str, fn, **kwargs):
+            nonlocal official_sync_failures
+            try:
+                summary = fn(store=store, **kwargs)
+            except Exception as exc:
+                official_sync_failures += 1
+                issue = f"{name}: {exc}"
+                issues.append(issue)
+                summary = {
+                    "source": name,
+                    "synced_days": 0,
+                    "saved_rows": 0,
+                    "issues": [str(exc)],
+                }
+            else:
+                summary_issues = summary.get("issues", []) if isinstance(summary, dict) else []
+                if isinstance(summary_issues, list) and summary_issues:
+                    official_sync_failures += 1
+                    issues.extend([f"{name}:{item}" for item in summary_issues])
+            official_syncs[name] = summary
+
+        if use_tw:
+            _run_official_sync(
+                "tw_etf_daily_market",
+                sync_twse_etf_daily_market,
+                start=start.date(),
+                end=end.date(),
+                lookback_days=14,
+                force=False,
+            )
+            _run_official_sync(
+                "tw_etf_mis_daily",
+                sync_twse_etf_mis_daily,
+                end=end.date(),
+                force=False,
+            )
+
         status = "completed"
-        if failed_symbols > 0:
-            status = "partial_failed" if synced_success > 0 else "failed"
+        if failed_symbols > 0 or official_sync_failures > 0:
+            status = "partial_failed" if synced_success > 0 or skipped_symbols > 0 else "failed"
 
         summary = {
             "run_id": run_id,
             "scope": scope_token,
+            "years": years_token,
             "start": start.isoformat(),
             "end": end.isoformat(),
             "tw_symbols": len(tw_symbols),
@@ -298,7 +341,12 @@ def run_market_data_bootstrap(
             "skipped_symbols": skipped_symbols,
             "failed_symbols": failed_symbols,
             "metadata_rows_upserted": upsert_count,
+            "metadata_upserted": upsert_count,
+            "official_sync_failures": official_sync_failures,
+            "tw_etf_daily_market": official_syncs.get("tw_etf_daily_market", {}),
+            "tw_etf_mis_daily": official_syncs.get("tw_etf_mis_daily", {}),
             "issues": issues,
+            "issue_count": len(issues),
         }
         store.finish_bootstrap_run(
             run_id,
@@ -323,6 +371,7 @@ def run_market_data_bootstrap(
                 "run_id": run_id,
                 "scope": scope_token,
                 "issues": issues,
+                "issue_count": len(issues),
             },
             error=error_text,
         )

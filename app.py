@@ -101,6 +101,7 @@ from services.sync_orchestrator import (
 )
 from services.sync_orchestrator import sync_symbols_if_needed
 from services.tw_etf_daily_sync import TWSE_ETF_DAILY_SOURCE, sync_twse_etf_daily_market
+from services.tw_etf_mis_sync import TWSE_MIS_ETF_SOURCE, sync_twse_etf_mis_daily
 from state_keys import BT_KEYS
 from storage import HistoryStore
 from ui.charts import (
@@ -149,6 +150,25 @@ def _history_store() -> HistoryStore:
     return di_get_history_store()
 
 
+_AUTO_INCREMENTAL_LOCK = threading.Lock()
+_AUTO_INCREMENTAL_FUTURES: dict[str, object] = {}
+
+
+def _submit_daily_incremental_refresh(store: HistoryStore):
+    return _TWSE_BG_EXECUTOR.submit(
+        run_incremental_refresh,
+        store=store,
+        years=int(cfg_or_env("sync.years", "REALTIME0052_SYNC_YEARS", default=5, cast=int) or 5),
+        parallel=True,
+        max_workers=int(
+            cfg_or_env("sync.parallel_workers", "REALTIME0052_SYNC_WORKERS", default=4, cast=int)
+            or 4
+        ),
+        tw_limit=120,
+        us_limit=50,
+    )
+
+
 def _auto_run_daily_incremental_refresh(store: HistoryStore):
     auto_enabled = cfg_or_env_bool(
         "sync.auto_incremental_on_startup",
@@ -159,6 +179,27 @@ def _auto_run_daily_incremental_refresh(store: HistoryStore):
         return
     today_token = date.today().isoformat()
     session_key = f"daily_incremental_done:{today_token}"
+    status_key = f"daily_incremental_status:{today_token}"
+
+    future = None
+    with _AUTO_INCREMENTAL_LOCK:
+        future = _AUTO_INCREMENTAL_FUTURES.get(today_token)
+    if future is not None:
+        if future.done():
+            with _AUTO_INCREMENTAL_LOCK:
+                _AUTO_INCREMENTAL_FUTURES.pop(today_token, None)
+            try:
+                summary = future.result()
+            except Exception as exc:
+                st.session_state["daily_incremental_error"] = str(exc)
+                st.session_state[status_key] = "failed"
+            else:
+                st.session_state["daily_incremental_summary"] = summary
+                st.session_state[status_key] = "completed"
+            st.session_state[session_key] = True
+        else:
+            st.session_state.setdefault(status_key, "running")
+        return
     if st.session_state.get(session_key):
         return
     latest = store.load_latest_bootstrap_run()
@@ -166,29 +207,14 @@ def _auto_run_daily_incremental_refresh(store: HistoryStore):
         latest_date = latest.started_at.astimezone(timezone.utc).date()
         if latest.scope == "daily_incremental" and latest_date == date.today():
             st.session_state[session_key] = True
+            st.session_state[status_key] = "completed"
             return
     if not store.list_symbols("TW", limit=1) and not store.list_symbols("US", limit=1):
         return
-    st.session_state[session_key] = True
-    try:
-        summary = run_incremental_refresh(
-            store=store,
-            years=int(
-                cfg_or_env("sync.years", "REALTIME0052_SYNC_YEARS", default=5, cast=int) or 5
-            ),
-            parallel=True,
-            max_workers=int(
-                cfg_or_env(
-                    "sync.parallel_workers", "REALTIME0052_SYNC_WORKERS", default=4, cast=int
-                )
-                or 4
-            ),
-            tw_limit=120,
-            us_limit=50,
-        )
-        st.session_state["daily_incremental_summary"] = summary
-    except Exception as exc:
-        st.session_state["daily_incremental_error"] = str(exc)
+    with _AUTO_INCREMENTAL_LOCK:
+        if today_token not in _AUTO_INCREMENTAL_FUTURES:
+            _AUTO_INCREMENTAL_FUTURES[today_token] = _submit_daily_incremental_refresh(store)
+    st.session_state[status_key] = "running"
 
 
 def _renderer_choice(path: str, env_var: str, default: str = "plotly") -> str:
@@ -5877,6 +5903,98 @@ def _build_tw_etf_daily_market_overview(
     }
 
 
+def _build_tw_etf_mis_overview(
+    *,
+    top_n: int = 60,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    store = _history_store()
+    coverage = store.load_tw_etf_mis_daily_coverage()
+    last_date_raw = coverage.get("last_date") if isinstance(coverage, dict) else None
+    if last_date_raw is None:
+        return pd.DataFrame(), {
+            "last_trade_date": "",
+            "row_count": 0,
+            "trade_date_count": 0,
+            "symbol_count": 0,
+        }
+
+    last_trade_date = pd.Timestamp(last_date_raw).date()
+    raw = store.load_tw_etf_mis_daily(start=last_trade_date, end=last_trade_date)
+    if raw.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": last_trade_date.isoformat(),
+            "row_count": 0,
+            "trade_date_count": int(coverage.get("trade_date_count") or 0),
+            "symbol_count": int(coverage.get("symbol_count") or 0),
+        }
+
+    raw = raw.copy()
+    raw["updated_at"] = pd.to_datetime(raw["updated_at"], errors="coerce")
+    raw = raw.sort_values(["trade_date", "etf_code", "updated_at"]).reset_index(drop=True)
+    latest = raw.groupby("etf_code", group_keys=False).tail(1).copy()
+    latest["代碼"] = latest["etf_code"]
+    latest["ETF"] = latest["etf_name"]
+    latest["類型"] = [
+        _classify_tw_etf(name=str(name), code=str(code))
+        for name, code in zip(latest["ETF"], latest["代碼"], strict=False)
+    ]
+    latest["市價"] = latest["market_price"]
+    latest["預估NAV"] = latest["estimated_nav"]
+    latest["折溢價(%)"] = latest["premium_discount_pct"]
+    latest["前一營業日NAV"] = latest["previous_nav"]
+    latest["已發行單位(萬)"] = latest["issued_units"] / 10000.0
+    latest["申贖差額(萬)"] = latest["creation_redemption_diff"] / 10000.0
+    latest["更新時間"] = latest["updated_at"].dt.strftime("%H:%M:%S").fillna("—")
+    latest["折溢價絕對值"] = pd.to_numeric(latest["折溢價(%)"], errors="coerce").abs()
+    latest = latest.sort_values(
+        ["折溢價絕對值", "申贖差額(萬)", "代碼"],
+        ascending=[False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    latest.insert(0, "編號", range(1, len(latest) + 1))
+    if top_n > 0:
+        latest = latest.head(max(1, int(top_n))).copy()
+
+    for column in [
+        "市價",
+        "預估NAV",
+        "折溢價(%)",
+        "前一營業日NAV",
+        "已發行單位(萬)",
+        "申贖差額(萬)",
+    ]:
+        if column in latest.columns:
+            latest[column] = _truncate_series(latest[column], digits=2)
+
+    out = latest[
+        [
+            "編號",
+            "代碼",
+            "ETF",
+            "類型",
+            "市價",
+            "預估NAV",
+            "折溢價(%)",
+            "前一營業日NAV",
+            "已發行單位(萬)",
+            "申贖差額(萬)",
+            "更新時間",
+        ]
+    ].reset_index(drop=True)
+    premium_alert_count = int(
+        (pd.to_numeric(out.get("折溢價(%)"), errors="coerce").abs() >= 0.5).sum()
+    )
+    net_creation_count = int((pd.to_numeric(out.get("申贖差額(萬)"), errors="coerce") > 0).sum())
+    return out, {
+        "last_trade_date": last_trade_date.isoformat(),
+        "row_count": int(coverage.get("row_count") or 0),
+        "trade_date_count": int(coverage.get("trade_date_count") or 0),
+        "symbol_count": int(coverage.get("symbol_count") or 0),
+        "premium_alert_count": premium_alert_count,
+        "net_creation_count": net_creation_count,
+    }
+
+
 def _normalize_constituent_symbol(symbol: object, tw_code: object) -> str:
     code_token = str(tw_code or "").strip().upper()
     if re.fullmatch(r"\d{4,6}[A-Z]?", code_token):
@@ -7077,6 +7195,89 @@ def _render_tw_etf_all_types_view():
             )
             st.caption(
                 "欄位說明：`量能異常(倍) = 今日成交股數 / 20日均成交股數`；`20日波動率(%)` 以日報酬標準差計算。"
+            )
+
+        st.markdown("#### 官方 ETF MIS 指標總表")
+        mis_refresh = st.button(
+            "更新官方 MIS 指標",
+            key="tw_etf_mis_refresh",
+            width="stretch",
+        )
+        mis_sync_summary: dict[str, object] = {}
+        if mis_refresh:
+            try:
+                with st.spinner("同步 TWSE 官方 ETF MIS 指標中..."):
+                    mis_sync_summary = sync_twse_etf_mis_daily(
+                        store=store,
+                        force=bool(mis_refresh),
+                    )
+            except Exception as exc:
+                st.warning(f"同步官方 ETF MIS 指標失敗：{exc}")
+        mis_df, mis_meta = _build_tw_etf_mis_overview(top_n=0)
+        mis_health = _build_data_health(
+            as_of=mis_meta.get("last_trade_date", ""),
+            data_sources=[_store_data_source(store, "tw_etf_mis_daily")],
+            source_chain=[TWSE_MIS_ETF_SOURCE],
+        )
+        _render_data_health_caption("官方 MIS 資料健康度", mis_health)
+        if mis_sync_summary:
+            st.caption(
+                "同步摘要："
+                f" requested_days={int(mis_sync_summary.get('requested_days') or 0)}"
+                f" / synced_days={int(mis_sync_summary.get('synced_days') or 0)}"
+                f" / skipped_days={int(mis_sync_summary.get('skipped_days') or 0)}"
+                f" / empty_days={int(mis_sync_summary.get('empty_days') or 0)}"
+            )
+        mis_issues = mis_sync_summary.get("issues", [])
+        if isinstance(mis_issues, list) and mis_issues:
+            _render_sync_issues(
+                "官方 ETF MIS 指標同步有部分錯誤，已保留既有本地資料",
+                mis_issues,
+                preview_limit=2,
+            )
+        st.caption(
+            "資料來源：TWSE MIS `all_etf.txt` + `getCategory.jsp?ex=tse&i=B0`（上市 ETF 發行單位與預估淨值揭露）。"
+        )
+        mis_last_date = str(mis_meta.get("last_trade_date", "")).strip()
+        if not mis_last_date:
+            st.caption("目前只讀本地快取；尚未建立快取時，請手動按「更新官方 MIS 指標」。")
+        else:
+            st.caption(
+                f"目前顯示本地快取：{mis_last_date}。如需抓最新官方資料，請手動按「更新官方 MIS 指標」。"
+            )
+        if mis_df.empty:
+            st.info("尚無官方 ETF MIS 指標本地快取；按「更新官方 MIS 指標」後才會建立。")
+        else:
+            mm1, mm2, mm3, mm4 = st.columns(4)
+            mm1.metric("當日ETF檔數", str(len(mis_df)))
+            mm2.metric("折溢價>|0.5%|", str(int(mis_meta.get("premium_alert_count") or 0)))
+            mm3.metric("淨申購檔數", str(int(mis_meta.get("net_creation_count") or 0)))
+            mm4.metric("交易日數", str(int(mis_meta.get("trade_date_count") or 0)))
+
+            mis_drilldown_enabled = _render_table_drilldown_toggle_inline(
+                scope="tw_etf_mis_daily",
+                label="官方 MIS 點擊導流",
+                default=True,
+            )
+            mis_display = mis_df
+            mis_link_config: dict[str, object] = {}
+            if mis_drilldown_enabled:
+                mis_display, mis_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(mis_df)
+                mis_display, mis_code_cfg = _decorate_dataframe_backtest_links(mis_display)
+                if isinstance(mis_code_cfg, dict):
+                    mis_link_config.update(mis_code_cfg)
+                if isinstance(mis_heatmap_cfg, dict):
+                    mis_link_config.update(mis_heatmap_cfg)
+            st.dataframe(
+                mis_display,
+                width="stretch",
+                hide_index=True,
+                height=scroll_height,
+                column_config=mis_link_config if mis_link_config else None,
+                disable_backtest_drilldown=True,
+            )
+            st.caption(
+                "欄位說明：`申贖差額(萬)` 為與前日已發行受益單位差異數；`折溢價(%)` 以市價相對預估 NAV 揭露。"
             )
 
         history_df = store.load_tw_etf_aum_history(
@@ -11642,7 +11843,7 @@ def _render_db_browser_view():
 
     a1, a2 = st.columns([1, 1])
     if a1.button("啟動基礎資料預載", type="primary", width="stretch", key="db_run_bootstrap"):
-        with st.spinner("預載中（會同步 metadata 與日線歷史）..."):
+        with st.spinner("預載中（會同步 metadata、日線歷史與 ETF 官方資料）..."):
             summary = run_market_data_bootstrap(
                 store=store,
                 scope=scope_token,

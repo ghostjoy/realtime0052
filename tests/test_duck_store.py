@@ -491,6 +491,62 @@ class DuckStoreTests(unittest.TestCase):
             self.assertEqual(len(frame), 2)
             self.assertEqual(float(frame.loc[frame["etf_code"] == "0050", "close"].iloc[0]), 75.5)
 
+    def test_save_and_load_tw_etf_mis_daily(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            saved = store.save_tw_etf_mis_daily(
+                rows=[
+                    {
+                        "trade_date": "2026-03-06",
+                        "etf_code": "0050",
+                        "etf_name": "元大台灣50",
+                        "issued_units": 1350000000.0,
+                        "creation_redemption_diff": 1000000.0,
+                        "market_price": 182.1,
+                        "estimated_nav": 181.62,
+                        "premium_discount_pct": 0.26,
+                        "previous_nav": 180.55,
+                        "reference_url": "https://example.com/nav",
+                        "updated_at": "2026-03-06T14:30:00+08:00",
+                        "source": "unit_test",
+                    },
+                    {
+                        "trade_date": "2026-03-06",
+                        "etf_code": "0056",
+                        "etf_name": "元大高股息",
+                        "issued_units": 2460000000.0,
+                        "creation_redemption_diff": -500000.0,
+                        "market_price": 40.2,
+                        "estimated_nav": 40.05,
+                        "premium_discount_pct": 0.37,
+                        "previous_nav": 39.88,
+                        "reference_url": "https://example.com/nav2",
+                        "updated_at": "2026-03-06T14:30:00+08:00",
+                        "source": "unit_test",
+                    },
+                ],
+                trade_date="2026-03-06",
+            )
+            self.assertEqual(saved, 2)
+
+            coverage = store.load_tw_etf_mis_daily_coverage()
+            self.assertEqual(int(coverage["row_count"]), 2)
+            self.assertEqual(int(coverage["trade_date_count"]), 1)
+            self.assertEqual(int(coverage["symbol_count"]), 2)
+
+            frame = store.load_tw_etf_mis_daily(start="2026-03-06", end="2026-03-06")
+            self.assertEqual(len(frame), 2)
+            self.assertEqual(
+                float(frame.loc[frame["etf_code"] == "0050", "estimated_nav"].iloc[0]),
+                181.62,
+            )
+
     def test_save_universe_snapshot_can_overwrite_same_universe_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

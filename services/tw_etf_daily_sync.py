@@ -173,7 +173,7 @@ def sync_twse_etf_daily_market(
         elif last_date:
             start_date = _coerce_trade_date(last_date) - timedelta(days=max(0, int(lookback_days)))
         else:
-            start_date = TWSE_ETF_DAILY_START_DATE
+            start_date = end_date - timedelta(days=max(0, int(lookback_days)))
 
     if start_date < TWSE_ETF_DAILY_START_DATE:
         start_date = TWSE_ETF_DAILY_START_DATE

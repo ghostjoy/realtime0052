@@ -20,9 +20,17 @@ class _Report:
 
 
 class BootstrapLoaderTests(unittest.TestCase):
+    @patch("services.bootstrap_loader.sync_twse_etf_mis_daily")
+    @patch("services.bootstrap_loader.sync_twse_etf_daily_market")
     @patch("services.bootstrap_loader.sync_symbols_if_needed")
     @patch("services.bootstrap_loader.fetch_tw_symbol_metadata")
-    def test_run_market_data_bootstrap_records_run(self, mock_fetch_tw, mock_sync):
+    def test_run_market_data_bootstrap_records_run(
+        self,
+        mock_fetch_tw,
+        mock_sync,
+        mock_sync_twse_daily,
+        mock_sync_twse_mis,
+    ):
         mock_fetch_tw.return_value = (
             [
                 {
@@ -49,6 +57,16 @@ class BootstrapLoaderTests(unittest.TestCase):
             return reports, plan
 
         mock_sync.side_effect = _fake_sync
+        mock_sync_twse_daily.return_value = {
+            "synced_days": 1,
+            "saved_rows": 100,
+            "issues": [],
+        }
+        mock_sync_twse_mis.return_value = {
+            "synced_days": 1,
+            "saved_rows": 80,
+            "issues": [],
+        }
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"
@@ -66,6 +84,11 @@ class BootstrapLoaderTests(unittest.TestCase):
             self.assertEqual(summary["tw_symbols"], 1)
             self.assertEqual(summary["us_symbols"], 1)
             self.assertEqual(summary["synced_success"], 2)
+            self.assertEqual(summary["metadata_upserted"], 2)
+            self.assertEqual(int(summary["tw_etf_daily_market"]["saved_rows"]), 100)
+            self.assertEqual(int(summary["tw_etf_mis_daily"]["saved_rows"]), 80)
+            mock_sync_twse_daily.assert_called_once()
+            mock_sync_twse_mis.assert_called_once()
 
             latest = store.load_latest_bootstrap_run()
             self.assertIsNotNone(latest)

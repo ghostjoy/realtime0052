@@ -113,11 +113,12 @@ uv run python scripts/bootstrap_market_data.py --scope both --years 5 --max-work
 uv run realtime0052 info
 uv run realtime0052 sync --market TW --symbols 0050,0052 --days 60
 uv run realtime0052 sync-twse-etf-daily --start 2026-03-01 --end 2026-03-08
+uv run realtime0052 sync-twse-etf-mis
 uv run realtime0052 backtest --symbol 0050 --market TW --strategy buy_hold
 uv run realtime0052 bootstrap --scope both --years 5
 ```
 
-- 預載流程會先建立 `symbol_metadata`，再批次同步 `daily_bars`，最後把任務摘要寫入 `bootstrap_runs`。
+- 預載流程會先建立 `symbol_metadata`，再批次同步 `daily_bars`，接著同步 `tw_etf_daily_market` 與 `tw_etf_mis_daily`，最後把任務摘要寫入 `bootstrap_runs`。
 
 ### 3) 回測（第一版）
 
