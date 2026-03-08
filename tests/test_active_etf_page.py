@@ -13,6 +13,7 @@ import app
 from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
+    DEFAULT_ACTIVE_PAGE,
     _apply_unified_benchmark_hover,
     _attach_rank_movement_columns,
     _attach_tw_etf_aum_column,
@@ -30,6 +31,7 @@ from app import (
     _build_tw_etf_all_types_performance_table,
     _build_tw_etf_aum_history_wide,
     _build_tw_etf_daily_market_overview,
+    _build_tw_etf_heatmap_focus_chart,
     _build_tw_etf_mis_overview,
     _build_tw_etf_top10_between,
     _build_two_etf_aggressive_picks,
@@ -49,6 +51,7 @@ from app import (
     _dynamic_heatmap_page_renderers,
     _fetch_twse_snapshot_with_fallback,
     _fill_unresolved_tw_names,
+    _filter_dataframe_by_keyword,
     _format_weight_pct_label,
     _infer_market_target_from_symbols,
     _is_tw_active_etf,
@@ -77,6 +80,30 @@ from ui.helpers import (
 
 
 class ActiveEtfPageTests(unittest.TestCase):
+    def test_default_active_page_is_tw_etf_summary(self):
+        self.assertEqual(DEFAULT_ACTIVE_PAGE, "台股 ETF 全類型總表")
+
+    def test_filter_dataframe_by_keyword_matches_code_and_name(self):
+        frame = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50", "類型": "市值型"},
+                {"代碼": "0056", "ETF": "元大高股息", "類型": "股利型"},
+            ]
+        )
+
+        out_code = _filter_dataframe_by_keyword(frame, keyword="0050", columns=["代碼", "ETF"])
+        out_name = _filter_dataframe_by_keyword(frame, keyword="高股息", columns=["代碼", "ETF"])
+
+        self.assertEqual(list(out_code["代碼"]), ["0050"])
+        self.assertEqual(list(out_name["代碼"]), ["0056"])
+
+    def test_filter_dataframe_by_keyword_returns_original_when_empty(self):
+        frame = pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}])
+
+        out = _filter_dataframe_by_keyword(frame, keyword="", columns=["代碼", "ETF"])
+
+        self.assertTrue(out.equals(frame))
+
     def test_auto_run_daily_incremental_refresh_schedules_background_future(self):
         today_token = datetime.now(tz=timezone.utc).date().isoformat()
         session_key = f"daily_incremental_done:{today_token}"
@@ -167,6 +194,51 @@ class ActiveEtfPageTests(unittest.TestCase):
                 app.st.session_state["daily_incremental_summary"] = old_summary
             else:
                 app.st.session_state.pop("daily_incremental_summary", None)
+
+    def test_build_tw_etf_heatmap_focus_chart(self):
+        idx = pd.to_datetime(
+            ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"], utc=True
+        )
+        bars = pd.DataFrame(
+            {
+                "open": [100.0, 101.0, 102.0, 101.5, 103.0],
+                "high": [101.0, 102.0, 103.0, 103.2, 104.0],
+                "low": [99.0, 100.5, 101.2, 101.0, 102.5],
+                "close": [100.5, 101.8, 102.4, 103.0, 103.5],
+                "volume": [1000.0, 1200.0, 1100.0, 1300.0, 1400.0],
+            },
+            index=idx,
+        )
+        bench = pd.DataFrame({"close": [200.0, 201.0, 202.0, 203.0, 204.0]}, index=idx)
+        fake_store = SimpleNamespace(
+            load_daily_bars=lambda **kwargs: bars.copy(),
+        )
+        with (
+            patch("app._history_store", return_value=fake_store),
+            patch(
+                "app._load_tw_benchmark_bars",
+                return_value=(bench.copy(), "^TWII", []),
+            ),
+        ):
+            out = _build_tw_etf_heatmap_focus_chart(
+                etf_code="0053",
+                start_dt=idx[0].to_pydatetime(),
+                end_dt=idx[-1].to_pydatetime(),
+                benchmark_choice="twii",
+                strategy="buy_hold",
+                strategy_params={},
+                fee_rate=0.001425,
+                sell_tax=0.003,
+                slippage=0.0005,
+                sync_before_run=False,
+            )
+
+        self.assertEqual(str(out.get("error", "")), "")
+        self.assertEqual(str(out.get("benchmark_symbol", "")), "^TWII")
+        self.assertFalse(out.get("bars").empty)
+        self.assertFalse(out.get("strategy_equity").empty)
+        self.assertFalse(out.get("benchmark_equity").empty)
+        self.assertFalse(out.get("benchmark_overlay").empty)
 
     def test_load_cached_twse_snapshot_skips_future_rows(self):
         fake_rows = [

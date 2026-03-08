@@ -270,6 +270,29 @@ def _store_data_source(store: object, dataset: str) -> str:
     return f"{backend}:{dataset}"
 
 
+def _filter_dataframe_by_keyword(
+    frame: pd.DataFrame,
+    *,
+    keyword: object,
+    columns: list[str] | tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    token = str(keyword or "").strip()
+    if not token:
+        return frame
+    search_cols = [str(col) for col in (columns or []) if str(col) in frame.columns]
+    if not search_cols:
+        search_cols = [str(col) for col in frame.columns]
+    normalized = token.casefold()
+    search_frame = frame[search_cols].copy()
+    mask = search_frame.apply(
+        lambda row: any(normalized in str(value or "").casefold() for value in row),
+        axis=1,
+    )
+    return frame.loc[mask].reset_index(drop=True)
+
+
 BACKTEST_DRILL_CODE_COLUMNS = {
     "代碼",
     "ETF代碼",
@@ -1909,7 +1932,7 @@ PAGE_CARDS = [
     {"key": "資料庫檢視", "desc": "直接查看 DuckDB 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
 ]
-DEFAULT_ACTIVE_PAGE = "回測工作台"
+DEFAULT_ACTIVE_PAGE = "台股 ETF 全類型總表"
 DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
 
@@ -2658,6 +2681,131 @@ def _compute_tw_equal_weight_compare_payload(
         "skipped_symbols": sorted(skipped_symbols),
         "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
         "benchmark_sync_issues": benchmark_sync_issues,
+    }
+
+
+def _build_tw_etf_heatmap_focus_chart(
+    *,
+    etf_code: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    benchmark_choice: str,
+    strategy: str,
+    strategy_params: dict[str, float] | None,
+    fee_rate: float,
+    sell_tax: float,
+    slippage: float,
+    sync_before_run: bool,
+    initial_capital: float = 1_000_000.0,
+) -> dict[str, object]:
+    store = _history_store()
+    symbol = str(etf_code or "").strip().upper()
+    bars = normalize_ohlcv_frame(
+        store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+    )
+    symbol_sync_issues: list[str] = []
+    if len(bars) < 2 and sync_before_run:
+        _, symbol_sync_issues = _sync_symbols_history(
+            store,
+            market="TW",
+            symbols=[symbol],
+            start=start_dt,
+            end=end_dt,
+            parallel=False,
+        )
+        bars = normalize_ohlcv_frame(
+            store.load_daily_bars(symbol=symbol, market="TW", start=start_dt, end=end_dt)
+        )
+    if len(bars) < 2:
+        return {
+            "error": f"{symbol} 本身日K不足，無法顯示 K 線圖。",
+            "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
+            "benchmark_sync_issues": [],
+        }
+
+    bars, _ = apply_split_adjustment(
+        bars=bars,
+        symbol=symbol,
+        market="TW",
+        use_known=True,
+        use_auto_detect=True,
+    )
+    if len(bars) < 2:
+        return {
+            "error": f"{symbol} 調整後日K不足，無法顯示 K 線圖。",
+            "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
+            "benchmark_sync_issues": [],
+        }
+
+    cost_model = CostModel(
+        fee_rate=float(fee_rate),
+        sell_tax_rate=float(sell_tax),
+        slippage_rate=float(slippage),
+    )
+    result = run_backtest(
+        bars=bars,
+        strategy_name=str(strategy or "buy_hold"),
+        strategy_params=dict(strategy_params or {}),
+        cost_model=cost_model,
+        initial_capital=float(initial_capital),
+    )
+    strategy_equity = result.equity_curve.get("equity", pd.Series(dtype=float))
+    if not isinstance(strategy_equity, pd.Series) or strategy_equity.empty:
+        return {
+            "error": f"{symbol} 無法建立策略淨值曲線。",
+            "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
+            "benchmark_sync_issues": [],
+        }
+
+    benchmark_bars, benchmark_symbol, benchmark_sync_issues = _load_tw_benchmark_bars(
+        store=store,
+        choice=benchmark_choice,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        sync_first=sync_before_run,
+        allow_twii_fallback=True,
+        min_rows=2,
+    )
+    benchmark_equity = pd.Series(dtype=float)
+    benchmark_overlay = pd.Series(dtype=float)
+    if not benchmark_bars.empty and "close" in benchmark_bars.columns:
+        bench_close = pd.to_numeric(benchmark_bars["close"], errors="coerce").dropna().sort_index()
+        if not bench_close.empty:
+            aligned_close = bench_close.reindex(strategy_equity.index).ffill().dropna()
+            if len(aligned_close) >= 2:
+                base_val = float(aligned_close.iloc[0])
+                if math.isfinite(base_val) and base_val > 0:
+                    benchmark_equity = (aligned_close / base_val) * float(initial_capital)
+
+            price_close = pd.to_numeric(bars["close"], errors="coerce").dropna().sort_index()
+            common_index = price_close.index.intersection(bench_close.index)
+            if len(common_index) >= 2:
+                focus_close = price_close.reindex(common_index).ffill().dropna()
+                bench_for_overlay = bench_close.reindex(common_index).ffill().dropna()
+                common_index = focus_close.index.intersection(bench_for_overlay.index)
+                if len(common_index) >= 2:
+                    focus_close = focus_close.reindex(common_index).ffill().dropna()
+                    bench_for_overlay = bench_for_overlay.reindex(common_index).ffill().dropna()
+                    focus_base = float(focus_close.iloc[0])
+                    bench_base = float(bench_for_overlay.iloc[0])
+                    if (
+                        math.isfinite(focus_base)
+                        and focus_base > 0
+                        and math.isfinite(bench_base)
+                        and bench_base > 0
+                    ):
+                        benchmark_overlay = ((bench_for_overlay / bench_base) * focus_base).dropna()
+
+    return {
+        "error": "",
+        "bars": bars,
+        "strategy_equity": strategy_equity,
+        "benchmark_equity": benchmark_equity,
+        "benchmark_overlay": benchmark_overlay,
+        "benchmark_symbol": benchmark_symbol,
+        "symbol_sync_issues": _compact_sync_issue_messages(symbol_sync_issues),
+        "benchmark_sync_issues": benchmark_sync_issues,
+        "metrics": result.metrics,
     }
 
 
@@ -7072,15 +7220,30 @@ def _render_tw_etf_all_types_view():
         if "編號" in table_view_df.columns:
             serial_numbers = pd.to_numeric(table_view_df["編號"], errors="coerce")
             table_view_df["編號"] = serial_numbers.map(lambda v: "—" if pd.isna(v) else f"{int(v)}")
+        main_search = st.text_input(
+            "搜尋總表",
+            value="",
+            key="tw_etf_all_types_main_search",
+            placeholder="輸入 ETF 代碼、名稱或類型",
+        )
+        filtered_table_df = _filter_dataframe_by_keyword(
+            table_view_df,
+            keyword=main_search,
+            columns=["代碼", "ETF", "類型"],
+        )
         table_display = table_view_df
         merged_link_config: dict[str, object] = {}
         if table_drilldown_enabled:
-            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(table_view_df)
+            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(filtered_table_df)
             table_display, code_link_config = _decorate_dataframe_backtest_links(table_display)
             if isinstance(code_link_config, dict):
                 merged_link_config.update(code_link_config)
             if isinstance(table_link_config, dict):
                 merged_link_config.update(table_link_config)
+        else:
+            table_display = filtered_table_df
+        if main_search:
+            st.caption(f"搜尋結果：{len(filtered_table_df)} / {len(table_view_df)}")
         visible_rows = 30
         scroll_height = 40 + visible_rows * 36
         if merged_link_config:
@@ -7172,11 +7335,22 @@ def _render_tw_etf_all_types_view():
                 label="官方日成交點擊導流",
                 default=True,
             )
-            daily_market_display = daily_market_df
+            daily_market_search = st.text_input(
+                "搜尋官方日成交",
+                value="",
+                key="tw_etf_daily_market_search",
+                placeholder="輸入 ETF 代碼、名稱或類型",
+            )
+            filtered_daily_market_df = _filter_dataframe_by_keyword(
+                daily_market_df,
+                keyword=daily_market_search,
+                columns=["代碼", "ETF", "類型"],
+            )
+            daily_market_display = filtered_daily_market_df
             daily_market_link_config: dict[str, object] = {}
             if daily_market_drilldown_enabled:
                 daily_market_display, daily_market_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(
-                    daily_market_df
+                    filtered_daily_market_df
                 )
                 daily_market_display, daily_market_code_cfg = _decorate_dataframe_backtest_links(
                     daily_market_display
@@ -7185,6 +7359,8 @@ def _render_tw_etf_all_types_view():
                     daily_market_link_config.update(daily_market_code_cfg)
                 if isinstance(daily_market_heatmap_cfg, dict):
                     daily_market_link_config.update(daily_market_heatmap_cfg)
+            if daily_market_search:
+                st.caption(f"搜尋結果：{len(filtered_daily_market_df)} / {len(daily_market_df)}")
             st.dataframe(
                 daily_market_display,
                 width="stretch",
@@ -7259,15 +7435,28 @@ def _render_tw_etf_all_types_view():
                 label="官方 MIS 點擊導流",
                 default=True,
             )
-            mis_display = mis_df
+            mis_search = st.text_input(
+                "搜尋官方 MIS",
+                value="",
+                key="tw_etf_mis_daily_search",
+                placeholder="輸入 ETF 代碼、名稱或類型",
+            )
+            filtered_mis_df = _filter_dataframe_by_keyword(
+                mis_df,
+                keyword=mis_search,
+                columns=["代碼", "ETF", "類型"],
+            )
+            mis_display = filtered_mis_df
             mis_link_config: dict[str, object] = {}
             if mis_drilldown_enabled:
-                mis_display, mis_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(mis_df)
+                mis_display, mis_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(filtered_mis_df)
                 mis_display, mis_code_cfg = _decorate_dataframe_backtest_links(mis_display)
                 if isinstance(mis_code_cfg, dict):
                     mis_link_config.update(mis_code_cfg)
                 if isinstance(mis_heatmap_cfg, dict):
                     mis_link_config.update(mis_heatmap_cfg)
+            if mis_search:
+                st.caption(f"搜尋結果：{len(filtered_mis_df)} / {len(mis_df)}")
             st.dataframe(
                 mis_display,
                 width="stretch",
@@ -7294,10 +7483,23 @@ def _render_tw_etf_all_types_view():
             label="規模追蹤點擊導流",
             default=True,
         )
-        history_display = history_wide
+        history_search = st.text_input(
+            "搜尋規模追蹤",
+            value="",
+            key="tw_etf_aum_history_search",
+            placeholder="輸入 ETF 代碼或名稱",
+        )
+        filtered_history_wide = _filter_dataframe_by_keyword(
+            history_wide,
+            keyword=history_search,
+            columns=["台股代號", "ETF名稱"],
+        )
+        history_display = filtered_history_wide
         history_link_config: dict[str, object] = {}
         if history_drilldown_enabled:
-            history_display, history_link_config = _decorate_tw_etf_aum_history_links(history_wide)
+            history_display, history_link_config = _decorate_tw_etf_aum_history_links(
+                filtered_history_wide
+            )
         st.markdown("#### 基金規模追蹤（最近 10 交易日）")
         st.caption(
             "欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以綠色漸層、日減幅 < -10% 以紅色漸層，幅度越大顏色越深。"
@@ -7308,6 +7510,8 @@ def _render_tw_etf_all_types_view():
         if history_wide.empty:
             st.info("尚無規模追蹤資料，請按「更新規模追蹤」。")
         else:
+            if history_search:
+                st.caption(f"搜尋結果：{len(filtered_history_wide)} / {len(history_wide)}")
             st.dataframe(
                 _style_tw_etf_aum_history_table(history_display),
                 width="stretch",
@@ -10989,6 +11193,162 @@ def _render_tw_etf_heatmap_view(
     )
 
     palette = _ui_palette()
+    st.markdown(f"#### {etf_text} 本身 K 線")
+    if start_dt is None or end_dt is None:
+        st.info("目前日期區間無效，暫時無法顯示 ETF 本身 K 線。")
+    else:
+        focus_chart = _build_tw_etf_heatmap_focus_chart(
+            etf_code=etf_text,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            benchmark_choice=benchmark_choice,
+            strategy=strategy,
+            strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+            fee_rate=float(fee_rate),
+            sell_tax=float(sell_tax),
+            slippage=float(slippage),
+            sync_before_run=bool(sync_before_run),
+        )
+        _render_sync_issues(
+            "ETF 本身 K 線同步有部分錯誤，已盡量使用本地可用資料",
+            focus_chart.get("symbol_sync_issues", []),
+            preview_limit=2,
+        )
+        _render_sync_issues(
+            "ETF 本身 K 線 Benchmark 同步有部分錯誤，已盡量使用本地可用資料",
+            focus_chart.get("benchmark_sync_issues", []),
+            preview_limit=2,
+        )
+        if str(focus_chart.get("error", "")).strip():
+            st.info(str(focus_chart.get("error", "")).strip())
+        else:
+            benchmark_symbol_for_chart = str(focus_chart.get("benchmark_symbol", "")).strip()
+            benchmark_overlay = focus_chart.get("benchmark_overlay")
+            if not isinstance(benchmark_overlay, pd.Series):
+                benchmark_overlay = pd.Series(dtype=float)
+            price_overlays: list[dict[str, object]] = []
+            if not benchmark_overlay.empty:
+                style = _benchmark_line_style(palette, width=1.0)
+                price_overlays.append(
+                    {
+                        "name": f"{benchmark_symbol_for_chart or 'Benchmark'}（同基準價）",
+                        "series": benchmark_overlay,
+                        "color": _to_rgba(str(style["color"]), 0.42),
+                        "width": 1,
+                        "dash": str(style["dash"]),
+                        "price_line_visible": False,
+                        "last_value_visible": False,
+                    }
+                )
+            bars_focus = focus_chart.get("bars")
+            strategy_equity_focus = focus_chart.get("strategy_equity")
+            benchmark_equity_focus = focus_chart.get("benchmark_equity")
+            if not isinstance(bars_focus, pd.DataFrame):
+                bars_focus = pd.DataFrame()
+            if not isinstance(strategy_equity_focus, pd.Series):
+                strategy_equity_focus = pd.Series(dtype=float)
+            if not isinstance(benchmark_equity_focus, pd.Series):
+                benchmark_equity_focus = pd.Series(dtype=float)
+            rendered_ok = render_lightweight_kline_equity_chart(
+                bars=bars_focus,
+                strategy=strategy_equity_focus,
+                benchmark=benchmark_equity_focus,
+                price_overlays=price_overlays,
+                palette=palette,
+                key=f"{page_key}_focus_kline",
+            )
+            if not rendered_ok:
+                price_up_line = str(palette["price_up_line"])
+                price_up_fill = str(palette["price_up_fill"])
+                price_down_line = str(palette["price_down_line"])
+                price_down_fill = str(palette["price_down_fill"])
+                style = _benchmark_line_style(palette, width=1.2)
+                fig_focus = make_subplots(
+                    rows=2,
+                    cols=1,
+                    shared_xaxes=True,
+                    vertical_spacing=0.02,
+                    row_heights=[0.68, 0.32],
+                )
+                fig_focus.add_trace(
+                    go.Candlestick(
+                        x=bars_focus.index,
+                        open=bars_focus["open"],
+                        high=bars_focus["high"],
+                        low=bars_focus["low"],
+                        close=bars_focus["close"],
+                        name=f"{etf_text} Price",
+                        increasing_line_color=price_up_line,
+                        increasing_fillcolor=price_up_fill,
+                        decreasing_line_color=price_down_line,
+                        decreasing_fillcolor=price_down_fill,
+                        showlegend=False,
+                    ),
+                    row=1,
+                    col=1,
+                )
+                if not benchmark_overlay.empty:
+                    fig_focus.add_trace(
+                        go.Scatter(
+                            x=benchmark_overlay.index,
+                            y=benchmark_overlay.values,
+                            mode="lines",
+                            name=f"{benchmark_symbol_for_chart or 'Benchmark'}（同基準價）",
+                            line={
+                                "color": _to_rgba(str(style["color"]), 0.48),
+                                "width": 1.2,
+                                "dash": str(style["dash"]),
+                            },
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                fig_focus.add_trace(
+                    go.Scatter(
+                        x=strategy_equity_focus.index,
+                        y=strategy_equity_focus.values,
+                        mode="lines",
+                        name="Strategy Equity",
+                        line={"color": str(palette["equity"]), "width": 2.1},
+                    ),
+                    row=2,
+                    col=1,
+                )
+                if not benchmark_equity_focus.empty:
+                    fig_focus.add_trace(
+                        go.Scatter(
+                            x=benchmark_equity_focus.index,
+                            y=benchmark_equity_focus.values,
+                            mode="lines",
+                            name=f"Benchmark Equity（{benchmark_symbol_for_chart or 'Benchmark'}）",
+                            line={
+                                "color": str(style["color"]),
+                                "width": 2.0,
+                                "dash": str(style["dash"]),
+                            },
+                        ),
+                        row=2,
+                        col=1,
+                    )
+                fig_focus.update_layout(
+                    height=760,
+                    margin={"l": 8, "r": 8, "t": 18, "b": 8},
+                    paper_bgcolor=str(palette["paper_bg"]),
+                    plot_bgcolor=str(palette["plot_bg"]),
+                    font={"color": str(palette["text_color"])},
+                    hovermode="x unified",
+                    xaxis_rangeslider_visible=False,
+                    legend={"orientation": "h", "y": 1.02, "x": 0.0},
+                )
+                fig_focus.update_xaxes(showgrid=True, gridcolor=str(palette["grid"]))
+                fig_focus.update_yaxes(showgrid=True, gridcolor=str(palette["grid"]))
+                st.plotly_chart(
+                    fig_focus, use_container_width=True, key=f"{page_key}_focus_plotly"
+                )
+            st.caption("上方為 ETF 本身日 K，並沿用目前頁面的 Benchmark、策略與成本參數計算下方資產曲線。")
+            if not benchmark_overlay.empty:
+                st.caption("價格圖淡灰虛線：Benchmark 同基準價疊加線。")
+
     tiles_per_row = 8
     tile_rows = int(math.ceil(len(rows_df) / tiles_per_row))
     z = np.full((tile_rows, tiles_per_row), np.nan)
