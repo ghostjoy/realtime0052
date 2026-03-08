@@ -32,6 +32,7 @@ from app import (
     _build_tw_etf_aum_history_wide,
     _build_tw_etf_daily_market_overview,
     _build_tw_etf_heatmap_focus_chart,
+    _build_tw_etf_heatmap_focus_plotly_figure,
     _build_tw_etf_mis_overview,
     _build_tw_etf_top10_between,
     _build_two_etf_aggressive_picks,
@@ -105,7 +106,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertTrue(out.equals(frame))
 
     def test_auto_run_daily_incremental_refresh_schedules_background_future(self):
-        today_token = datetime.now(tz=timezone.utc).date().isoformat()
+        today_token = app.date.today().isoformat()
         session_key = f"daily_incremental_done:{today_token}"
         status_key = f"daily_incremental_status:{today_token}"
 
@@ -117,37 +118,28 @@ class ActiveEtfPageTests(unittest.TestCase):
             load_latest_bootstrap_run=lambda: None,
             list_symbols=lambda market, limit=1: ["0050"] if market == "TW" else [],
         )
-        old_done = app.st.session_state.get(session_key)
-        old_status = app.st.session_state.get(status_key)
         old_futures = dict(app._AUTO_INCREMENTAL_FUTURES)
+        state: dict[str, object] = {}
+        fake_st = SimpleNamespace(session_state=state)
         try:
-            app.st.session_state.pop(session_key, None)
-            app.st.session_state.pop(status_key, None)
             app._AUTO_INCREMENTAL_FUTURES.clear()
             with (
+                patch.object(app, "st", fake_st),
                 patch("app.cfg_or_env_bool", return_value=True),
                 patch("app._submit_daily_incremental_refresh", return_value=_PendingFuture()) as submit_mock,
             ):
                 _auto_run_daily_incremental_refresh(fake_store)
 
-            self.assertEqual(app.st.session_state.get(status_key), "running")
-            self.assertIsNone(app.st.session_state.get(session_key))
+            self.assertEqual(state.get(status_key), "running")
+            self.assertIsNone(state.get(session_key))
             submit_mock.assert_called_once_with(fake_store)
             self.assertIn(today_token, app._AUTO_INCREMENTAL_FUTURES)
         finally:
             app._AUTO_INCREMENTAL_FUTURES.clear()
             app._AUTO_INCREMENTAL_FUTURES.update(old_futures)
-            if old_done is not None:
-                app.st.session_state[session_key] = old_done
-            else:
-                app.st.session_state.pop(session_key, None)
-            if old_status is not None:
-                app.st.session_state[status_key] = old_status
-            else:
-                app.st.session_state.pop(status_key, None)
 
     def test_auto_run_daily_incremental_refresh_consumes_completed_future(self):
-        today_token = datetime.now(tz=timezone.utc).date().isoformat()
+        today_token = app.date.today().isoformat()
         session_key = f"daily_incremental_done:{today_token}"
         status_key = f"daily_incremental_status:{today_token}"
 
@@ -162,38 +154,25 @@ class ActiveEtfPageTests(unittest.TestCase):
             load_latest_bootstrap_run=lambda: None,
             list_symbols=lambda market, limit=1: [],
         )
-        old_done = app.st.session_state.get(session_key)
-        old_status = app.st.session_state.get(status_key)
-        old_summary = app.st.session_state.get("daily_incremental_summary")
         old_futures = dict(app._AUTO_INCREMENTAL_FUTURES)
+        state: dict[str, object] = {}
+        fake_st = SimpleNamespace(session_state=state)
         try:
-            app.st.session_state.pop(session_key, None)
-            app.st.session_state.pop(status_key, None)
-            app.st.session_state.pop("daily_incremental_summary", None)
             app._AUTO_INCREMENTAL_FUTURES.clear()
             app._AUTO_INCREMENTAL_FUTURES[today_token] = _DoneFuture()
-            with patch("app.cfg_or_env_bool", return_value=True):
+            with (
+                patch.object(app, "st", fake_st),
+                patch("app.cfg_or_env_bool", return_value=True),
+            ):
                 _auto_run_daily_incremental_refresh(fake_store)
 
-            self.assertTrue(bool(app.st.session_state.get(session_key)))
-            self.assertEqual(app.st.session_state.get(status_key), "completed")
-            self.assertEqual(app.st.session_state.get("daily_incremental_summary", {}).get("status"), "completed")
+            self.assertTrue(bool(state.get(session_key)))
+            self.assertEqual(state.get(status_key), "completed")
+            self.assertEqual(state.get("daily_incremental_summary", {}).get("status"), "completed")
             self.assertNotIn(today_token, app._AUTO_INCREMENTAL_FUTURES)
         finally:
             app._AUTO_INCREMENTAL_FUTURES.clear()
             app._AUTO_INCREMENTAL_FUTURES.update(old_futures)
-            if old_done is not None:
-                app.st.session_state[session_key] = old_done
-            else:
-                app.st.session_state.pop(session_key, None)
-            if old_status is not None:
-                app.st.session_state[status_key] = old_status
-            else:
-                app.st.session_state.pop(status_key, None)
-            if old_summary is not None:
-                app.st.session_state["daily_incremental_summary"] = old_summary
-            else:
-                app.st.session_state.pop("daily_incremental_summary", None)
 
     def test_build_tw_etf_heatmap_focus_chart(self):
         idx = pd.to_datetime(
@@ -239,6 +218,47 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertFalse(out.get("strategy_equity").empty)
         self.assertFalse(out.get("benchmark_equity").empty)
         self.assertFalse(out.get("benchmark_overlay").empty)
+
+    def test_build_tw_etf_heatmap_focus_plotly_figure_uses_unified_hover_and_short_axis(self):
+        idx = pd.to_datetime(
+            ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"], utc=True
+        )
+        bars = pd.DataFrame(
+            {
+                "open": [100.0, 101.0, 102.0, 101.5, 103.0],
+                "high": [101.0, 102.0, 103.0, 103.2, 104.0],
+                "low": [99.0, 100.5, 101.2, 101.0, 102.5],
+                "close": [100.5, 101.8, 102.4, 103.0, 103.5],
+            },
+            index=idx,
+        )
+        strategy = pd.Series([1_000_000.0, 1_050_000.0, 1_120_000.0, 1_480_000.0, 2_000_000.0], index=idx)
+        benchmark = pd.Series([1_000_000.0, 1_010_000.0, 1_030_000.0, 1_200_000.0, 1_500_000.0], index=idx)
+        overlay = pd.Series([100.5, 101.0, 101.4, 102.0, 102.6], index=idx)
+
+        fig = _build_tw_etf_heatmap_focus_plotly_figure(
+            etf_code="0053",
+            bars=bars,
+            strategy_equity=strategy,
+            benchmark_equity=benchmark,
+            benchmark_overlay=overlay,
+            benchmark_symbol="^TWII",
+            palette=app._THEME_PALETTES["灰白專業（Soft Gray）"],
+        )
+
+        self.assertEqual(fig.layout.hovermode, "x unified")
+        self.assertEqual(fig.layout.yaxis.side, "left")
+        self.assertEqual(fig.layout.yaxis3.side, "right")
+        self.assertEqual(fig.layout.yaxis2.side, "right")
+        self.assertEqual(fig.layout.yaxis4.side, "left")
+        self.assertEqual(fig.layout.yaxis2.tickformat, "~s")
+        self.assertEqual(fig.layout.yaxis4.tickformat, "~s")
+        self.assertEqual(fig.data[1].yaxis, "y3")
+        self.assertEqual(fig.data[3].yaxis, "y4")
+        self.assertEqual(fig.data[1].line.color, "#475569")
+        self.assertEqual(fig.data[0].increasing.fillcolor, fig.data[0].increasing.line.color)
+        self.assertIn("同基準價", fig.data[1].name)
+        self.assertFalse(fig.layout.annotations)
 
     def test_load_cached_twse_snapshot_skips_future_rows(self):
         fake_rows = [

@@ -2809,6 +2809,150 @@ def _build_tw_etf_heatmap_focus_chart(
     }
 
 
+def _heatmap_focus_benchmark_color(palette: dict[str, object]) -> str:
+    if bool(palette.get("is_dark", False)):
+        return str(palette.get("benchmark", "#94A3B8"))
+    return "#475569"
+
+def _build_tw_etf_heatmap_focus_plotly_figure(
+    *,
+    etf_code: str,
+    bars: pd.DataFrame,
+    strategy_equity: pd.Series,
+    benchmark_equity: pd.Series,
+    benchmark_overlay: pd.Series,
+    benchmark_symbol: str,
+    palette: dict[str, object],
+) -> go.Figure:
+    price_up_line = str(palette.get("price_up_line", palette.get("price_up", "#5FA783")))
+    price_down_line = str(palette.get("price_down_line", palette.get("price_down", "#D78C95")))
+    benchmark_color = _heatmap_focus_benchmark_color(palette)
+    style = _benchmark_line_style({"benchmark": benchmark_color, "benchmark_dash": "dash"}, width=1.2)
+
+    fig_focus = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.68, 0.32],
+    )
+    fig_focus.add_trace(
+        go.Candlestick(
+            x=bars.index,
+            open=bars["open"],
+            high=bars["high"],
+            low=bars["low"],
+            close=bars["close"],
+            name=f"{etf_code} K線",
+            increasing_line_color=price_up_line,
+            increasing_fillcolor=price_up_line,
+            decreasing_line_color=price_down_line,
+            decreasing_fillcolor=price_down_line,
+            whiskerwidth=0.7,
+            hoverlabel={"namelength": -1},
+        ),
+        row=1,
+        col=1,
+    )
+    if not benchmark_overlay.empty:
+        fig_focus.add_trace(
+            go.Scatter(
+                x=benchmark_overlay.index,
+                y=benchmark_overlay.values,
+                mode="lines",
+                name=f"{benchmark_symbol or 'Benchmark'}（同基準價）",
+                line={
+                    "color": benchmark_color,
+                    "width": 1.6,
+                    "dash": str(style["dash"]),
+                },
+                hovertemplate=(
+                    f"Date=%{{x|%Y-%m-%d}}<br>{benchmark_symbol or 'Benchmark'}（同基準價）=%{{y:,.2f}}<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=1,
+        )
+        fig_focus.data[-1].update(yaxis="y3")
+    fig_focus.add_trace(
+        go.Scatter(
+            x=strategy_equity.index,
+            y=strategy_equity.values,
+            mode="lines",
+            name="Strategy Equity",
+            line={"color": str(palette["equity"]), "width": 2.1},
+            hovertemplate="Date=%{x|%Y-%m-%d}<br>Strategy=%{y:~s}<extra></extra>",
+        ),
+        row=2,
+        col=1,
+    )
+    if not benchmark_equity.empty:
+        fig_focus.add_trace(
+            go.Scatter(
+                x=benchmark_equity.index,
+                y=benchmark_equity.values,
+                mode="lines",
+                name=f"Benchmark Equity（{benchmark_symbol or 'Benchmark'}）",
+                line={
+                    "color": benchmark_color,
+                    "width": 2.0,
+                    "dash": str(style["dash"]),
+                },
+                hovertemplate="Date=%{x|%Y-%m-%d}<br>Benchmark Equity=%{y:~s}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+        fig_focus.data[-1].update(yaxis="y4")
+    fig_focus.update_traces(xhoverformat="%Y-%m-%d")
+    fig_focus.update_layout(
+        height=760,
+        margin={"l": 8, "r": 8, "t": 18, "b": 8},
+        paper_bgcolor=str(palette["paper_bg"]),
+        plot_bgcolor=str(palette["plot_bg"]),
+        font={"color": str(palette["text_color"])},
+        hovermode="x unified",
+        xaxis_rangeslider_visible=False,
+        legend={"orientation": "h", "y": 1.02, "x": 0.0},
+        yaxis3={
+            "overlaying": "y",
+            "side": "right",
+            "matches": "y",
+            "showgrid": False,
+            "showticklabels": True,
+            "ticks": "outside",
+            "tickfont": {"color": str(palette["text_color"])},
+        },
+        yaxis4={
+            "overlaying": "y2",
+            "side": "left",
+            "matches": "y2",
+            "showgrid": False,
+            "tickformat": "~s",
+            "showticklabels": True,
+            "ticks": "outside",
+            "tickfont": {"color": str(palette["text_color"])},
+        },
+    )
+    fig_focus.update_xaxes(showgrid=True, gridcolor=str(palette["grid"]))
+    fig_focus.update_yaxes(
+        showgrid=True,
+        gridcolor=str(palette["grid"]),
+        row=1,
+        col=1,
+        side="left",
+    )
+    fig_focus.update_yaxes(
+        showgrid=True,
+        gridcolor=str(palette["grid"]),
+        tickformat="~s",
+        row=2,
+        col=1,
+        side="right",
+    )
+    return fig_focus
+
+
 def _palette_with(base: dict[str, object], **overrides: object) -> dict[str, object]:
     out = dict(base)
     out.update(overrides)
@@ -11226,20 +11370,6 @@ def _render_tw_etf_heatmap_view(
             benchmark_overlay = focus_chart.get("benchmark_overlay")
             if not isinstance(benchmark_overlay, pd.Series):
                 benchmark_overlay = pd.Series(dtype=float)
-            price_overlays: list[dict[str, object]] = []
-            if not benchmark_overlay.empty:
-                style = _benchmark_line_style(palette, width=1.0)
-                price_overlays.append(
-                    {
-                        "name": f"{benchmark_symbol_for_chart or 'Benchmark'}（同基準價）",
-                        "series": benchmark_overlay,
-                        "color": _to_rgba(str(style["color"]), 0.42),
-                        "width": 1,
-                        "dash": str(style["dash"]),
-                        "price_line_visible": False,
-                        "last_value_visible": False,
-                    }
-                )
             bars_focus = focus_chart.get("bars")
             strategy_equity_focus = focus_chart.get("strategy_equity")
             benchmark_equity_focus = focus_chart.get("benchmark_equity")
@@ -11249,105 +11379,19 @@ def _render_tw_etf_heatmap_view(
                 strategy_equity_focus = pd.Series(dtype=float)
             if not isinstance(benchmark_equity_focus, pd.Series):
                 benchmark_equity_focus = pd.Series(dtype=float)
-            rendered_ok = render_lightweight_kline_equity_chart(
+            fig_focus = _build_tw_etf_heatmap_focus_plotly_figure(
+                etf_code=etf_text,
                 bars=bars_focus,
-                strategy=strategy_equity_focus,
-                benchmark=benchmark_equity_focus,
-                price_overlays=price_overlays,
+                strategy_equity=strategy_equity_focus,
+                benchmark_equity=benchmark_equity_focus,
+                benchmark_overlay=benchmark_overlay,
+                benchmark_symbol=benchmark_symbol_for_chart,
                 palette=palette,
-                key=f"{page_key}_focus_kline",
             )
-            if not rendered_ok:
-                price_up_line = str(palette["price_up_line"])
-                price_up_fill = str(palette["price_up_fill"])
-                price_down_line = str(palette["price_down_line"])
-                price_down_fill = str(palette["price_down_fill"])
-                style = _benchmark_line_style(palette, width=1.2)
-                fig_focus = make_subplots(
-                    rows=2,
-                    cols=1,
-                    shared_xaxes=True,
-                    vertical_spacing=0.02,
-                    row_heights=[0.68, 0.32],
-                )
-                fig_focus.add_trace(
-                    go.Candlestick(
-                        x=bars_focus.index,
-                        open=bars_focus["open"],
-                        high=bars_focus["high"],
-                        low=bars_focus["low"],
-                        close=bars_focus["close"],
-                        name=f"{etf_text} Price",
-                        increasing_line_color=price_up_line,
-                        increasing_fillcolor=price_up_fill,
-                        decreasing_line_color=price_down_line,
-                        decreasing_fillcolor=price_down_fill,
-                        showlegend=False,
-                    ),
-                    row=1,
-                    col=1,
-                )
-                if not benchmark_overlay.empty:
-                    fig_focus.add_trace(
-                        go.Scatter(
-                            x=benchmark_overlay.index,
-                            y=benchmark_overlay.values,
-                            mode="lines",
-                            name=f"{benchmark_symbol_for_chart or 'Benchmark'}（同基準價）",
-                            line={
-                                "color": _to_rgba(str(style["color"]), 0.48),
-                                "width": 1.2,
-                                "dash": str(style["dash"]),
-                            },
-                        ),
-                        row=1,
-                        col=1,
-                    )
-                fig_focus.add_trace(
-                    go.Scatter(
-                        x=strategy_equity_focus.index,
-                        y=strategy_equity_focus.values,
-                        mode="lines",
-                        name="Strategy Equity",
-                        line={"color": str(palette["equity"]), "width": 2.1},
-                    ),
-                    row=2,
-                    col=1,
-                )
-                if not benchmark_equity_focus.empty:
-                    fig_focus.add_trace(
-                        go.Scatter(
-                            x=benchmark_equity_focus.index,
-                            y=benchmark_equity_focus.values,
-                            mode="lines",
-                            name=f"Benchmark Equity（{benchmark_symbol_for_chart or 'Benchmark'}）",
-                            line={
-                                "color": str(style["color"]),
-                                "width": 2.0,
-                                "dash": str(style["dash"]),
-                            },
-                        ),
-                        row=2,
-                        col=1,
-                    )
-                fig_focus.update_layout(
-                    height=760,
-                    margin={"l": 8, "r": 8, "t": 18, "b": 8},
-                    paper_bgcolor=str(palette["paper_bg"]),
-                    plot_bgcolor=str(palette["plot_bg"]),
-                    font={"color": str(palette["text_color"])},
-                    hovermode="x unified",
-                    xaxis_rangeslider_visible=False,
-                    legend={"orientation": "h", "y": 1.02, "x": 0.0},
-                )
-                fig_focus.update_xaxes(showgrid=True, gridcolor=str(palette["grid"]))
-                fig_focus.update_yaxes(showgrid=True, gridcolor=str(palette["grid"]))
-                st.plotly_chart(
-                    fig_focus, use_container_width=True, key=f"{page_key}_focus_plotly"
-                )
+            st.plotly_chart(fig_focus, width="stretch", key=f"{page_key}_focus_plotly")
             st.caption("上方為 ETF 本身日 K，並沿用目前頁面的 Benchmark、策略與成本參數計算下方資產曲線。")
             if not benchmark_overlay.empty:
-                st.caption("價格圖淡灰虛線：Benchmark 同基準價疊加線。")
+                st.caption("價格圖虛線：Benchmark 同基準價疊加線。")
 
     tiles_per_row = 8
     tile_rows = int(math.ceil(len(rows_df) / tiles_per_row))

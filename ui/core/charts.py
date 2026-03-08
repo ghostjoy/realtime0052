@@ -64,6 +64,7 @@ def _render_benchmark_lines_chart(
 
     fig = go.Figure()
     plotted_series: list[tuple[str, pd.Series]] = []
+    secondary_axis_trace_idx: int | None = None
     for line in lines:
         series = line.get("series")
         if not isinstance(series, pd.Series) or series.empty:
@@ -87,7 +88,26 @@ def _render_benchmark_lines_chart(
                 ),
             )
         )
+        if secondary_axis_trace_idx is None and len(plotted_series) >= 1:
+            secondary_axis_trace_idx = len(fig.data) - 1
         plotted_series.append((name, series))
+
+    if secondary_axis_trace_idx is not None:
+        fig.data[secondary_axis_trace_idx].update(yaxis="y2")
+    elif plotted_series:
+        mirror_name, mirror_series = plotted_series[0]
+        fig.add_trace(
+            go.Scatter(
+                x=mirror_series.index,
+                y=mirror_series.values,
+                mode="lines",
+                name=f"{mirror_name} (axis mirror)",
+                line=dict(color="rgba(0,0,0,0)", width=0.1),
+                hoverinfo="skip",
+                showlegend=False,
+                yaxis="y2",
+            )
+        )
 
     if annotate_extrema and plotted_series:
         target_name = str(extrema_series_name or "").strip()
@@ -168,9 +188,30 @@ def _render_benchmark_lines_chart(
             bordercolor=str(palette["grid"]),
             borderwidth=1,
         ),
+        yaxis2=dict(
+            overlaying="y",
+            side="right",
+            matches="y",
+            showgrid=False,
+            showticklabels=True,
+            ticks="outside",
+            tickfont=dict(color=str(palette["text_color"])),
+        ),
     )
     fig.update_xaxes(gridcolor=str(palette["grid"]))
     fig.update_yaxes(gridcolor=str(palette["grid"]))
+    fig.update_layout(
+        yaxis=dict(gridcolor=str(palette["grid"]), side="left"),
+        yaxis2=dict(
+            overlaying="y",
+            side="right",
+            matches="y",
+            showgrid=False,
+            showticklabels=True,
+            ticks="outside",
+            tickfont=dict(color=str(palette["text_color"])),
+        ),
+    )
     _apply_unified_benchmark_hover(fig, palette)
     _enable_plotly_draw_tools(fig)
     if not str(watermark_text).strip():
