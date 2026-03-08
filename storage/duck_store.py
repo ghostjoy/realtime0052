@@ -8,7 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,29 @@ DEFAULT_INTRADAY_DELTA_COMPACT_THRESHOLD = 48
 ICLOUD_DOCS_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
 DEFAULT_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_DB_FILENAME
 DEFAULT_LEGACY_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_LEGACY_SQLITE_FILENAME
+
+
+class _LockedDuckConnection:
+    def __init__(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        lock: threading.RLock,
+    ):
+        self._conn = conn
+        self._lock = lock
+        self._closed = False
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._conn.close()
+        finally:
+            self._lock.release()
 
 
 class DuckHistoryStore:
@@ -90,6 +113,7 @@ class DuckHistoryStore:
         self.parquet_root.mkdir(parents=True, exist_ok=True)
         self.intraday_retain_days = self.resolve_intraday_retain_days(intraday_retain_days)
         self.service = service or MarketDataService()
+        self._duck_conn_lock = threading.RLock()
         self._writeback_lock = threading.Lock()
         self._writeback_inflight: set[tuple[str, str]] = set()
         self._writeback_pending: dict[tuple[str, str], tuple[pd.DataFrame, str]] = {}
@@ -265,9 +289,14 @@ class DuckHistoryStore:
                 self._memory_conn = conn
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
-        conn = duckdb.connect(str(self.db_path))
-        conn.execute("PRAGMA threads=4")
-        return conn
+        self._duck_conn_lock.acquire()
+        try:
+            conn = duckdb.connect(str(self.db_path))
+            conn.execute("PRAGMA threads=4")
+            return _LockedDuckConnection(conn, self._duck_conn_lock)
+        except Exception:
+            self._duck_conn_lock.release()
+            raise
 
     def _next_id(self, conn: duckdb.DuckDBPyConnection, table: str) -> int:
         row = conn.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table}").fetchone()
@@ -422,6 +451,26 @@ class DuckHistoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS tw_etf_daily_market (
+                    trade_date VARCHAR,
+                    etf_code VARCHAR,
+                    etf_name VARCHAR,
+                    trade_value DOUBLE,
+                    trade_volume DOUBLE,
+                    trade_count BIGINT,
+                    open DOUBLE,
+                    high DOUBLE,
+                    low DOUBLE,
+                    close DOUBLE,
+                    change DOUBLE,
+                    source VARCHAR,
+                    fetched_at VARCHAR,
+                    UNIQUE(etf_code, trade_date)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS market_snapshots (
                     id BIGINT,
                     dataset_key VARCHAR,
@@ -488,6 +537,12 @@ class DuckHistoryStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tw_etf_aum_history_code_date ON tw_etf_aum_history(etf_code, trade_date)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tw_etf_daily_market_trade_date ON tw_etf_daily_market(trade_date)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tw_etf_daily_market_code_date ON tw_etf_daily_market(etf_code, trade_date)"
             )
 
     def _default_legacy_sqlite_path(self) -> Path:
@@ -2773,9 +2828,16 @@ class DuckHistoryStore:
         now = datetime.now(tz=timezone.utc).isoformat()
         key = str(universe_id or "").strip().upper()
         with self._connect_ctx() as conn:
-            conn.execute("DELETE FROM universe_snapshots WHERE universe_id=?", (key,))
             conn.execute(
-                "INSERT INTO universe_snapshots(universe_id, symbols_json, source, fetched_at, updated_at) VALUES(?, ?, ?, ?, ?)",
+                """
+                INSERT INTO universe_snapshots(universe_id, symbols_json, source, fetched_at, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(universe_id) DO UPDATE SET
+                    symbols_json=excluded.symbols_json,
+                    source=excluded.source,
+                    fetched_at=excluded.fetched_at,
+                    updated_at=excluded.updated_at
+                """,
                 (key, payload, source, now, now),
             )
 
@@ -2908,6 +2970,222 @@ class DuckHistoryStore:
             drop=True
         )
         return df[["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]]
+
+    def save_tw_etf_daily_market(
+        self,
+        *,
+        rows: list[dict[str, object]],
+        trade_date: str,
+        source: str = "twse_etf_daily",
+    ) -> int:
+        try:
+            trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
+        except Exception:
+            return 0
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        source_token = self._normalize_text(source) or "twse_etf_daily"
+
+        dedup: dict[str, tuple[str, float | None, float | None, int | None, float, float, float, float, float | None, str]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = self._normalize_symbol_token(
+                row.get("etf_code") or row.get("code") or row.get("symbol")
+            )
+            if not code:
+                continue
+            name = self._normalize_text(row.get("etf_name") or row.get("name")) or code
+            trade_value = pd.to_numeric(row.get("trade_value"), errors="coerce")
+            trade_volume = pd.to_numeric(row.get("trade_volume"), errors="coerce")
+            trade_count = pd.to_numeric(row.get("trade_count"), errors="coerce")
+            open_ = pd.to_numeric(row.get("open"), errors="coerce")
+            high = pd.to_numeric(row.get("high"), errors="coerce")
+            low = pd.to_numeric(row.get("low"), errors="coerce")
+            close = pd.to_numeric(row.get("close"), errors="coerce")
+            change = pd.to_numeric(row.get("change"), errors="coerce")
+            if not pd.notna(open_) or not pd.notna(high) or not pd.notna(low) or not pd.notna(close):
+                continue
+            row_source = self._normalize_text(row.get("source")) or source_token
+            dedup[code] = (
+                name,
+                float(trade_value) if pd.notna(trade_value) else None,
+                float(trade_volume) if pd.notna(trade_volume) else None,
+                int(trade_count) if pd.notna(trade_count) else None,
+                float(open_),
+                float(high),
+                float(low),
+                float(close),
+                float(change) if pd.notna(change) else None,
+                row_source,
+            )
+
+        if not dedup:
+            return 0
+
+        with self._connect_ctx() as conn:
+            for code, values in dedup.items():
+                conn.execute(
+                    "DELETE FROM tw_etf_daily_market WHERE etf_code=? AND trade_date=?",
+                    (code, trade_date_iso),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO tw_etf_daily_market(
+                        trade_date, etf_code, etf_name, trade_value, trade_volume, trade_count,
+                        open, high, low, close, change, source, fetched_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        trade_date_iso,
+                        code,
+                        values[0],
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values[5],
+                        values[6],
+                        values[7],
+                        values[8],
+                        values[9],
+                        now_iso,
+                    ),
+                )
+        return len(dedup)
+
+    def load_tw_etf_daily_market(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> pd.DataFrame:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        conn = self._connect()
+        try:
+            df = conn.execute(
+                f"""
+                SELECT trade_date, etf_code, etf_name, trade_value, trade_volume, trade_count,
+                       open, high, low, close, change, source, fetched_at
+                FROM tw_etf_daily_market
+                {where_sql}
+                ORDER BY trade_date ASC, etf_code ASC
+                """,
+                params,
+            ).df()
+        finally:
+            conn.close()
+        if df.empty:
+            return pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "etf_code",
+                    "etf_name",
+                    "trade_value",
+                    "trade_volume",
+                    "trade_count",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "change",
+                    "source",
+                    "fetched_at",
+                ]
+            )
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.astype(str)
+        for column in [
+            "trade_value",
+            "trade_volume",
+            "trade_count",
+            "open",
+            "high",
+            "low",
+            "close",
+            "change",
+        ]:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df
+
+    def load_tw_etf_daily_market_coverage(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> dict[str, object]:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*), MIN(trade_date), MAX(trade_date),
+                       COUNT(DISTINCT trade_date), COUNT(DISTINCT etf_code)
+                FROM tw_etf_daily_market
+                {where_sql}
+                """,
+                params,
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return {
+                "row_count": 0,
+                "first_date": None,
+                "last_date": None,
+                "trade_date_count": 0,
+                "symbol_count": 0,
+            }
+        return {
+            "row_count": max(0, int(row[0] or 0)),
+            "first_date": self._parse_iso_datetime(row[1]),
+            "last_date": self._parse_iso_datetime(row[2]),
+            "trade_date_count": max(0, int(row[3] or 0)),
+            "symbol_count": max(0, int(row[4] or 0)),
+        }
 
     def load_universe_snapshot(self, universe_id: str) -> UniverseSnapshot | None:
         key = str(universe_id or "").strip().upper()

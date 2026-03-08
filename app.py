@@ -100,6 +100,7 @@ from services.sync_orchestrator import (
     sync_symbols_history as orchestrated_sync_symbols_history,
 )
 from services.sync_orchestrator import sync_symbols_if_needed
+from services.tw_etf_daily_sync import TWSE_ETF_DAILY_SOURCE, sync_twse_etf_daily_market
 from state_keys import BT_KEYS
 from storage import HistoryStore
 from ui.charts import (
@@ -5736,6 +5737,146 @@ def _build_tw_etf_all_types_performance_table(
     }
 
 
+def _build_tw_etf_daily_market_overview(
+    *,
+    lookback_days: int = 90,
+    top_n: int = 60,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    store = _history_store()
+    coverage = store.load_tw_etf_daily_market_coverage()
+    last_date_raw = coverage.get("last_date") if isinstance(coverage, dict) else None
+    if last_date_raw is None:
+        return pd.DataFrame(), {
+            "last_trade_date": "",
+            "row_count": 0,
+            "trade_date_count": 0,
+            "symbol_count": 0,
+        }
+    last_trade_date = pd.Timestamp(last_date_raw).date()
+    start_date = last_trade_date - pd.Timedelta(days=max(30, int(lookback_days)))
+    raw = store.load_tw_etf_daily_market(start=start_date, end=last_trade_date)
+    if raw.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": last_trade_date.isoformat(),
+            "row_count": 0,
+            "trade_date_count": int(coverage.get("trade_date_count") or 0),
+            "symbol_count": int(coverage.get("symbol_count") or 0),
+        }
+
+    raw = raw.copy()
+    raw["trade_date"] = pd.to_datetime(raw["trade_date"], errors="coerce")
+    raw = raw.dropna(subset=["trade_date"]).sort_values(["etf_code", "trade_date"]).reset_index(
+        drop=True
+    )
+    if raw.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": last_trade_date.isoformat(),
+            "row_count": 0,
+            "trade_date_count": int(coverage.get("trade_date_count") or 0),
+            "symbol_count": int(coverage.get("symbol_count") or 0),
+        }
+
+    grouped = raw.groupby("etf_code", group_keys=False)
+    raw["prev_close"] = grouped["close"].shift(1)
+    raw["daily_return_pct"] = np.where(
+        raw["prev_close"] > 0,
+        (raw["close"] / raw["prev_close"] - 1.0) * 100.0,
+        np.nan,
+    )
+    raw["intraday_range_pct"] = np.where(
+        raw["close"] > 0,
+        ((raw["high"] - raw["low"]) / raw["close"]) * 100.0,
+        np.nan,
+    )
+    raw["adv20_trade_value_billion"] = grouped["trade_value"].transform(
+        lambda s: s.rolling(20, min_periods=5).mean() / 100000000.0
+    )
+    raw["avg20_trade_count"] = grouped["trade_count"].transform(
+        lambda s: s.rolling(20, min_periods=5).mean()
+    )
+    raw["avg20_trade_volume"] = grouped["trade_volume"].transform(
+        lambda s: s.rolling(20, min_periods=5).mean()
+    )
+    raw["hv20_pct"] = grouped["daily_return_pct"].transform(
+        lambda s: s.rolling(20, min_periods=5).std(ddof=0)
+    )
+    raw["relative_volume_20x"] = raw["trade_volume"] / raw["avg20_trade_volume"]
+
+    latest = grouped.tail(1).copy()
+    latest["代碼"] = latest["etf_code"]
+    latest["ETF"] = latest["etf_name"]
+    latest["類型"] = [
+        _classify_tw_etf(name=str(name), code=str(code))
+        for name, code in zip(latest["ETF"], latest["代碼"], strict=False)
+    ]
+    latest["收盤"] = latest["close"]
+    latest["漲跌價差"] = latest["change"]
+    latest["成交金額(億)"] = latest["trade_value"] / 100000000.0
+    latest["成交股數"] = latest["trade_volume"]
+    latest["成交筆數"] = latest["trade_count"]
+    latest["20日均成交金額(億)"] = latest["adv20_trade_value_billion"]
+    latest["20日均成交筆數"] = latest["avg20_trade_count"]
+    latest["20日波動率(%)"] = latest["hv20_pct"]
+    latest["量能異常(倍)"] = latest["relative_volume_20x"]
+    latest["日振幅(%)"] = latest["intraday_range_pct"]
+    latest["日報酬(%)"] = latest["daily_return_pct"]
+    latest = latest.sort_values(
+        ["成交金額(億)", "成交筆數", "代碼"],
+        ascending=[False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    latest.insert(0, "編號", range(1, len(latest) + 1))
+    if top_n > 0:
+        latest = latest.head(max(1, int(top_n))).copy()
+
+    for column in [
+        "收盤",
+        "漲跌價差",
+        "成交金額(億)",
+        "20日均成交金額(億)",
+        "20日均成交筆數",
+        "20日波動率(%)",
+        "量能異常(倍)",
+        "日振幅(%)",
+        "日報酬(%)",
+    ]:
+        if column in latest.columns:
+            latest[column] = _truncate_series(latest[column], digits=2)
+    latest["成交股數"] = _truncate_integer_series(latest["成交股數"])
+    latest["成交筆數"] = _truncate_integer_series(latest["成交筆數"])
+
+    out = latest[
+        [
+            "編號",
+            "代碼",
+            "ETF",
+            "類型",
+            "收盤",
+            "漲跌價差",
+            "成交金額(億)",
+            "成交股數",
+            "成交筆數",
+            "20日均成交金額(億)",
+            "20日均成交筆數",
+            "20日波動率(%)",
+            "量能異常(倍)",
+            "日振幅(%)",
+            "日報酬(%)",
+        ]
+    ].reset_index(drop=True)
+    spike_count = int((pd.to_numeric(out.get("量能異常(倍)"), errors="coerce") >= 2.0).sum())
+    total_trade_value_billion = float(pd.to_numeric(latest["成交金額(億)"], errors="coerce").sum())
+    return out, {
+        "last_trade_date": last_trade_date.isoformat(),
+        "row_count": int(coverage.get("row_count") or 0),
+        "trade_date_count": int(coverage.get("trade_date_count") or 0),
+        "symbol_count": int(coverage.get("symbol_count") or 0),
+        "total_trade_value_billion": total_trade_value_billion,
+        "spike_count": spike_count,
+        "lookback_start": pd.Timestamp(start_date).date().isoformat(),
+    }
+
+
 def _normalize_constituent_symbol(symbol: object, tw_code: object) -> str:
     code_token = str(tw_code or "").strip().upper()
     if re.fullmatch(r"\d{4,6}[A-Z]?", code_token):
@@ -6835,6 +6976,108 @@ def _render_tw_etf_all_types_view():
             disable_backtest_drilldown=True,
         )
         st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
+
+        st.markdown("#### 官方 ETF 日成交總表")
+        daily_market_refresh = st.button(
+            "更新官方日成交",
+            key="tw_etf_daily_market_refresh",
+            width="stretch",
+        )
+        daily_market_coverage = store.load_tw_etf_daily_market_coverage()
+        daily_market_last_raw = (
+            daily_market_coverage.get("last_date") if isinstance(daily_market_coverage, dict) else None
+        )
+        daily_market_last_date = (
+            pd.Timestamp(daily_market_last_raw).date() if daily_market_last_raw is not None else None
+        )
+        daily_market_sync_summary: dict[str, object] = {}
+        if daily_market_refresh:
+            try:
+                with st.spinner("同步 TWSE 官方 ETF 日成交中..."):
+                    daily_market_sync_summary = sync_twse_etf_daily_market(
+                        store=store,
+                        lookback_days=14,
+                        force=bool(daily_market_refresh),
+                    )
+            except Exception as exc:
+                st.warning(f"同步官方 ETF 日成交失敗：{exc}")
+        daily_market_df, daily_market_meta = _build_tw_etf_daily_market_overview(
+            lookback_days=90,
+            top_n=0,
+        )
+        daily_market_health = _build_data_health(
+            as_of=daily_market_meta.get("last_trade_date", ""),
+            data_sources=[_store_data_source(store, "tw_etf_daily_market")],
+            source_chain=[TWSE_ETF_DAILY_SOURCE],
+        )
+        _render_data_health_caption("官方日成交資料健康度", daily_market_health)
+        if daily_market_sync_summary:
+            st.caption(
+                "同步摘要："
+                f" requested_days={int(daily_market_sync_summary.get('requested_days') or 0)}"
+                f" / synced_days={int(daily_market_sync_summary.get('synced_days') or 0)}"
+                f" / skipped_days={int(daily_market_sync_summary.get('skipped_days') or 0)}"
+                f" / empty_days={int(daily_market_sync_summary.get('empty_days') or 0)}"
+            )
+        daily_market_issues = daily_market_sync_summary.get("issues", [])
+        if isinstance(daily_market_issues, list) and daily_market_issues:
+            _render_sync_issues(
+                "官方 ETF 日成交同步有部分錯誤，已保留既有本地資料",
+                daily_market_issues,
+                preview_limit=2,
+            )
+        st.caption("資料來源：TWSE `ETFReport/ETFDaily` 官方日成交資訊（上市 ETF 全市場日級交易資料）。")
+        if daily_market_last_date is None:
+            st.caption("目前只讀本地快取；尚未建立快取時，請手動按「更新官方日成交」。")
+        else:
+            st.caption(
+                f"目前顯示本地快取：{daily_market_last_date.isoformat()}。如需抓最新官方資料，請手動按「更新官方日成交」。"
+            )
+        if daily_market_meta.get("lookback_start") and daily_market_meta.get("last_trade_date"):
+            st.caption(
+                f"指標觀察窗：{daily_market_meta.get('lookback_start')} -> {daily_market_meta.get('last_trade_date')}"
+            )
+        if daily_market_df.empty:
+            st.info("尚無官方 ETF 日成交本地快取；按「更新官方日成交」後才會建立。")
+        else:
+            dm1, dm2, dm3, dm4 = st.columns(4)
+            dm1.metric("當日ETF檔數", str(len(daily_market_df)))
+            dm2.metric(
+                "成交總金額(億)",
+                f"{float(daily_market_meta.get('total_trade_value_billion') or 0.0):,.0f}",
+            )
+            dm3.metric("量能異常>=2倍", str(int(daily_market_meta.get("spike_count") or 0)))
+            dm4.metric("交易日數", str(int(daily_market_meta.get("trade_date_count") or 0)))
+
+            daily_market_drilldown_enabled = _render_table_drilldown_toggle_inline(
+                scope="tw_etf_daily_market",
+                label="官方日成交點擊導流",
+                default=True,
+            )
+            daily_market_display = daily_market_df
+            daily_market_link_config: dict[str, object] = {}
+            if daily_market_drilldown_enabled:
+                daily_market_display, daily_market_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(
+                    daily_market_df
+                )
+                daily_market_display, daily_market_code_cfg = _decorate_dataframe_backtest_links(
+                    daily_market_display
+                )
+                if isinstance(daily_market_code_cfg, dict):
+                    daily_market_link_config.update(daily_market_code_cfg)
+                if isinstance(daily_market_heatmap_cfg, dict):
+                    daily_market_link_config.update(daily_market_heatmap_cfg)
+            st.dataframe(
+                daily_market_display,
+                width="stretch",
+                hide_index=True,
+                height=scroll_height,
+                column_config=daily_market_link_config if daily_market_link_config else None,
+                disable_backtest_drilldown=True,
+            )
+            st.caption(
+                "欄位說明：`量能異常(倍) = 今日成交股數 / 20日均成交股數`；`20日波動率(%)` 以日報酬標準差計算。"
+            )
 
         history_df = store.load_tw_etf_aum_history(
             etf_codes=table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
@@ -9997,20 +10240,22 @@ def _render_tw_etf_heatmap_view(
         "起始日期", value=date(date.today().year - 5, 1, 1), key=f"{page_key}_start"
     )
     end_date = c2.date_input("結束日期", value=date.today(), key=f"{page_key}_end")
-    benchmark_choice = c3.selectbox(
+    benchmark_choice = c3.radio(
         "Benchmark",
         options=["twii", "0050", "006208"],
         format_func=lambda x: {"twii": "^TWII", "0050": "0050", "006208": "006208"}.get(x, x),
         index=0,
         key=f"{page_key}_benchmark",
+        horizontal=True,
     )
     heatmap_strategy_options = ["buy_hold", "sma_trend_filter", "donchian_breakout", "sma_cross"]
-    strategy = c4.selectbox(
+    strategy = c4.radio(
         "回測策略",
         options=heatmap_strategy_options,
         index=0,
         key=f"{page_key}_strategy",
         format_func=_strategy_label,
+        horizontal=True,
     )
 
     strategy_params: dict[str, float] = {}

@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -351,6 +351,23 @@ class HistoryStore:
                     PRIMARY KEY(etf_code, trade_date)
                 );
 
+                CREATE TABLE IF NOT EXISTS tw_etf_daily_market (
+                    trade_date TEXT NOT NULL,
+                    etf_code TEXT NOT NULL,
+                    etf_name TEXT NOT NULL,
+                    trade_value REAL,
+                    trade_volume REAL,
+                    trade_count INTEGER,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    change REAL,
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY(etf_code, trade_date)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
@@ -383,6 +400,12 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_tw_etf_aum_history_code_date
                     ON tw_etf_aum_history(etf_code, trade_date DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_daily_market_trade_date
+                    ON tw_etf_daily_market(trade_date DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_daily_market_code_date
+                    ON tw_etf_daily_market(etf_code, trade_date DESC);
                 """
             )
             cols = {
@@ -1453,6 +1476,228 @@ class HistoryStore:
             drop=True
         )
         return df[["etf_code", "etf_name", "trade_date", "aum_billion", "updated_at"]]
+
+    def save_tw_etf_daily_market(
+        self,
+        *,
+        rows: list[dict[str, object]],
+        trade_date: str,
+        source: str = "twse_etf_daily",
+    ) -> int:
+        try:
+            trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
+        except Exception:
+            return 0
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        source_token = self._normalize_text(source) or "twse_etf_daily"
+
+        dedup: dict[str, tuple[str, float | None, float | None, int | None, float | None, float | None, float | None, float | None, float | None, str]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = self._normalize_symbol_token(
+                row.get("etf_code") or row.get("code") or row.get("symbol")
+            )
+            if not code:
+                continue
+            name = self._normalize_text(row.get("etf_name") or row.get("name")) or code
+            trade_value = pd.to_numeric(row.get("trade_value"), errors="coerce")
+            trade_volume = pd.to_numeric(row.get("trade_volume"), errors="coerce")
+            trade_count = pd.to_numeric(row.get("trade_count"), errors="coerce")
+            open_ = pd.to_numeric(row.get("open"), errors="coerce")
+            high = pd.to_numeric(row.get("high"), errors="coerce")
+            low = pd.to_numeric(row.get("low"), errors="coerce")
+            close = pd.to_numeric(row.get("close"), errors="coerce")
+            change = pd.to_numeric(row.get("change"), errors="coerce")
+            if not pd.notna(open_) or not pd.notna(high) or not pd.notna(low) or not pd.notna(close):
+                continue
+            row_source = self._normalize_text(row.get("source")) or source_token
+            dedup[code] = (
+                name,
+                float(trade_value) if pd.notna(trade_value) else None,
+                float(trade_volume) if pd.notna(trade_volume) else None,
+                int(trade_count) if pd.notna(trade_count) else None,
+                float(open_),
+                float(high),
+                float(low),
+                float(close),
+                float(change) if pd.notna(change) else None,
+                row_source,
+            )
+
+        if not dedup:
+            return 0
+
+        with self._connect_ctx() as conn:
+            for code, values in dedup.items():
+                conn.execute(
+                    """
+                    INSERT INTO tw_etf_daily_market(
+                        trade_date, etf_code, etf_name, trade_value, trade_volume, trade_count,
+                        open, high, low, close, change, source, fetched_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(etf_code, trade_date) DO UPDATE SET
+                        etf_name=excluded.etf_name,
+                        trade_value=excluded.trade_value,
+                        trade_volume=excluded.trade_volume,
+                        trade_count=excluded.trade_count,
+                        open=excluded.open,
+                        high=excluded.high,
+                        low=excluded.low,
+                        close=excluded.close,
+                        change=excluded.change,
+                        source=excluded.source,
+                        fetched_at=excluded.fetched_at
+                    """,
+                    (
+                        trade_date_iso,
+                        code,
+                        values[0],
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values[5],
+                        values[6],
+                        values[7],
+                        values[8],
+                        values[9],
+                        now_iso,
+                    ),
+                )
+        return len(dedup)
+
+    def load_tw_etf_daily_market(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> pd.DataFrame:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self._connect_ctx() as conn:
+            df = pd.read_sql_query(
+                f"""
+                SELECT trade_date, etf_code, etf_name, trade_value, trade_volume, trade_count,
+                       open, high, low, close, change, source, fetched_at
+                FROM tw_etf_daily_market
+                {where_sql}
+                ORDER BY trade_date ASC, etf_code ASC
+                """,
+                conn,
+                params=params,
+            )
+        if df.empty:
+            return pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "etf_code",
+                    "etf_name",
+                    "trade_value",
+                    "trade_volume",
+                    "trade_count",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "change",
+                    "source",
+                    "fetched_at",
+                ]
+            )
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.astype(str)
+        for column in [
+            "trade_value",
+            "trade_volume",
+            "trade_count",
+            "open",
+            "high",
+            "low",
+            "close",
+            "change",
+        ]:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df
+
+    def load_tw_etf_daily_market_coverage(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> dict[str, object]:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*), MIN(trade_date), MAX(trade_date),
+                       COUNT(DISTINCT trade_date), COUNT(DISTINCT etf_code)
+                FROM tw_etf_daily_market
+                {where_sql}
+                """,
+                params,
+            ).fetchone()
+        if row is None:
+            return {
+                "row_count": 0,
+                "first_date": None,
+                "last_date": None,
+                "trade_date_count": 0,
+                "symbol_count": 0,
+            }
+        first = self._parse_iso_datetime(row[1])
+        last = self._parse_iso_datetime(row[2])
+        return {
+            "row_count": max(0, int(row[0] or 0)),
+            "first_date": first,
+            "last_date": last,
+            "trade_date_count": max(0, int(row[3] or 0)),
+            "symbol_count": max(0, int(row[4] or 0)),
+        }
 
     def load_universe_snapshot(self, universe_id: str) -> UniverseSnapshot | None:
         with self._connect_ctx() as conn:

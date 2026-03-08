@@ -31,6 +31,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(kwargs["symbols"], ["0050", "0052"])
 
     @patch("cli._resolve_store")
+    @patch("cli.sync_twse_etf_daily_market")
+    def test_sync_twse_etf_daily_outputs_summary(self, sync_mock, resolve_store_mock):
+        resolve_store_mock.return_value = object()
+        sync_mock.return_value = {
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-07",
+            "latest_date": "2026-03-06",
+            "requested_days": 7,
+            "synced_days": 3,
+            "skipped_days": 2,
+            "empty_days": 2,
+            "saved_rows": 600,
+            "issues": ["2026-03-02: timeout"],
+        }
+
+        result = self.runner.invoke(cli.cli, ["sync-twse-etf-daily", "--start", "2026-03-01"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("latest=2026-03-06", result.output)
+        self.assertIn("saved_rows=600", result.output)
+        self.assertIn("! 2026-03-02: timeout", result.output)
+
+    @patch("cli._resolve_store")
     @patch("cli.sync_symbols_if_needed")
     @patch("cli.load_and_prepare_symbol_bars")
     @patch("cli.execute_backtest_run")

@@ -11,6 +11,17 @@
 ## [Unreleased]
 
 ### Added
+- 新增 TWSE 官方 `ETFReport/ETFDaily` 日成交資料流：
+  - 新增 `services/tw_etf_daily_sync.py`，可同步 TWSE 上市 ETF 官方日級交易資料
+  - 新增 `tw_etf_daily_market` 持久化表（DuckDB / SQLite），保存 `成交金額 / 成交股數 / 成交筆數 / OHLC / 漲跌價差`
+  - 新增 CLI 指令 `realtime0052 sync-twse-etf-daily`
+- `台股 ETF 全類型總表` 新增「官方 ETF 日成交總表」區塊：
+  - 顯示最近交易日的 `成交金額(億) / 成交股數 / 成交筆數 / 20日均成交金額 / 20日波動率 / 量能異常`
+  - 沿用既有 ETF 名稱熱力圖導流與代碼回測導流
+- 新增測試：
+  - `tests/test_tw_etf_daily_sync.py`
+  - `tests/test_history_store.py`、`tests/test_duck_store.py`：TWSE ETF 日成交表讀寫
+  - `tests/test_active_etf_page.py`：官方日成交總表指標彙整
 - 新增 `ui/shared/runtime.py`：提供模組級 runtime symbol 顯式註冊器，取代 `ctx=globals()` 注入模式。
 - 新增 CLI 測試 `tests/test_cli.py` 與 DI 測試 `tests/test_di.py`。
 - 新增 `conf/` + `config_loader.py`，提供 `Hydra(YAML) / legacy env` 雙軌配置載入（預設仍維持 legacy env）。

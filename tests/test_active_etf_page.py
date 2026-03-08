@@ -27,6 +27,7 @@ from app import (
     _build_tw_active_etf_ytd_between,
     _build_tw_etf_all_types_performance_table,
     _build_tw_etf_aum_history_wide,
+    _build_tw_etf_daily_market_overview,
     _build_tw_etf_top10_between,
     _build_two_etf_aggressive_picks,
     _classify_issue_level,
@@ -1869,6 +1870,89 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(int(top10_build_mock.call_count), 2)
         for call in top10_build_mock.call_args_list:
             self.assertTrue(bool(call.kwargs.get("include_all_etf", False)))
+
+    def test_build_tw_etf_daily_market_overview(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-03-05",
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_value": 1000000000.0,
+                    "trade_volume": 10000000.0,
+                    "trade_count": 1000,
+                    "open": 75.0,
+                    "high": 76.0,
+                    "low": 74.5,
+                    "close": 75.5,
+                    "change": 0.5,
+                    "source": "twse_etf_daily",
+                    "fetched_at": "2026-03-05T12:00:00+00:00",
+                },
+                {
+                    "trade_date": "2026-03-06",
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_value": 1200000000.0,
+                    "trade_volume": 12000000.0,
+                    "trade_count": 1200,
+                    "open": 76.0,
+                    "high": 77.0,
+                    "low": 75.5,
+                    "close": 76.5,
+                    "change": 1.0,
+                    "source": "twse_etf_daily",
+                    "fetched_at": "2026-03-06T12:00:00+00:00",
+                },
+                {
+                    "trade_date": "2026-03-05",
+                    "etf_code": "0056",
+                    "etf_name": "元大高股息",
+                    "trade_value": 500000000.0,
+                    "trade_volume": 20000000.0,
+                    "trade_count": 1500,
+                    "open": 38.0,
+                    "high": 38.4,
+                    "low": 37.8,
+                    "close": 38.1,
+                    "change": -0.1,
+                    "source": "twse_etf_daily",
+                    "fetched_at": "2026-03-05T12:00:00+00:00",
+                },
+                {
+                    "trade_date": "2026-03-06",
+                    "etf_code": "0056",
+                    "etf_name": "元大高股息",
+                    "trade_value": 800000000.0,
+                    "trade_volume": 25000000.0,
+                    "trade_count": 1800,
+                    "open": 38.2,
+                    "high": 38.7,
+                    "low": 38.0,
+                    "close": 38.5,
+                    "change": 0.4,
+                    "source": "twse_etf_daily",
+                    "fetched_at": "2026-03-06T12:00:00+00:00",
+                },
+            ]
+        )
+        fake_store = SimpleNamespace(
+            load_tw_etf_daily_market_coverage=lambda **kwargs: {
+                "row_count": len(frame),
+                "first_date": pd.Timestamp("2026-03-05").to_pydatetime(),
+                "last_date": pd.Timestamp("2026-03-06").to_pydatetime(),
+                "trade_date_count": 2,
+                "symbol_count": 2,
+            },
+            load_tw_etf_daily_market=lambda **kwargs: frame.copy(),
+        )
+        with patch("app._history_store", return_value=fake_store):
+            out, meta = _build_tw_etf_daily_market_overview(lookback_days=30, top_n=10)
+
+        self.assertEqual(list(out["代碼"]), ["0050", "0056"])
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "收盤"].iloc[0]), 76.5)
+        self.assertEqual(float(out.loc[out["代碼"] == "0050", "日報酬(%)"].iloc[0]), 1.32)
+        self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
 
     def test_with_tw_today_fields_only_backfills_missing_open(self):
         frame = pd.DataFrame(

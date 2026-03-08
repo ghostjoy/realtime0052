@@ -438,6 +438,86 @@ class DuckStoreTests(unittest.TestCase):
             hist = store.load_tw_etf_aum_history(etf_codes=["0050"], keep_days=0)
             self.assertTrue(hist.empty)
 
+    def test_save_and_load_tw_etf_daily_market(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            saved = store.save_tw_etf_daily_market(
+                rows=[
+                    {
+                        "trade_date": "2026-03-06",
+                        "etf_code": "0050",
+                        "etf_name": "元大台灣50",
+                        "trade_value": 100000000.0,
+                        "trade_volume": 123456.0,
+                        "trade_count": 789,
+                        "open": 75.0,
+                        "high": 76.0,
+                        "low": 74.5,
+                        "close": 75.5,
+                        "change": -0.5,
+                        "source": "unit_test",
+                    },
+                    {
+                        "trade_date": "2026-03-06",
+                        "etf_code": "0056",
+                        "etf_name": "元大高股息",
+                        "trade_value": 50000000.0,
+                        "trade_volume": 654321.0,
+                        "trade_count": 321,
+                        "open": 38.0,
+                        "high": 38.5,
+                        "low": 37.8,
+                        "close": 38.2,
+                        "change": 0.2,
+                        "source": "unit_test",
+                    },
+                ],
+                trade_date="2026-03-06",
+            )
+            self.assertEqual(saved, 2)
+
+            coverage = store.load_tw_etf_daily_market_coverage()
+            self.assertEqual(int(coverage["row_count"]), 2)
+            self.assertEqual(int(coverage["trade_date_count"]), 1)
+            self.assertEqual(int(coverage["symbol_count"]), 2)
+
+            frame = store.load_tw_etf_daily_market(start="2026-03-06", end="2026-03-06")
+            self.assertEqual(len(frame), 2)
+            self.assertEqual(float(frame.loc[frame["etf_code"] == "0050", "close"].iloc[0]), 75.5)
+
+    def test_save_universe_snapshot_can_overwrite_same_universe_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            store.save_universe_snapshot(
+                universe_id="TW:0053",
+                symbols=["2330", "2317"],
+                source="unit_test_a",
+            )
+            store.save_universe_snapshot(
+                universe_id="TW:0053",
+                symbols=["2454"],
+                source="unit_test_b",
+            )
+
+            snap = store.load_universe_snapshot("TW:0053")
+            self.assertIsNotNone(snap)
+            assert snap is not None
+            self.assertEqual(snap.universe_id, "TW:0053")
+            self.assertEqual(snap.symbols, ["2454"])
+            self.assertEqual(snap.source, "unit_test_b")
+
     def test_upsert_and_list_heatmap_hub_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

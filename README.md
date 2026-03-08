@@ -10,6 +10,7 @@
 - `共識代表 ETF`：以前10 ETF 成分股交集推導單一代表 ETF（附前3備選）
 - `兩檔 ETF 推薦`：以「共識代表 + 低重疊動能」輸出核心/衛星兩檔組合（可切換海外限制與重疊門檻）
 - `2026 YTD 主動式 ETF`：台股主動式 ETF 的 2026 YTD Buy & Hold 績效卡，含 Benchmark 對照圖（策略/基準/各ETF買進持有）
+- `台股 ETF 全類型總表`：新增 TWSE 官方 `ETF 日成交資訊` 總表，可看成交金額/股數/筆數、20日均值、量能異常與波動
 - `ETF 輪動策略`：台股多ETF（月頻）動能輪動策略回測與Benchmark對照
 - `00910 熱力圖`：支援全球成分股 YTD（Buy & Hold）分組熱力圖（國內/海外分開對齊基準），並保留台股子集合進階回測
 - `00935 熱力圖`：00935 成分股逐檔回測、相對大盤超額報酬熱力圖
@@ -111,6 +112,7 @@ uv run python scripts/bootstrap_market_data.py --scope both --years 5 --max-work
 # 新增 CLI 入口（同步/回測/預載）
 uv run realtime0052 info
 uv run realtime0052 sync --market TW --symbols 0050,0052 --days 60
+uv run realtime0052 sync-twse-etf-daily --start 2026-03-01 --end 2026-03-08
 uv run realtime0052 backtest --symbol 0050 --market TW --strategy buy_hold
 uv run realtime0052 bootstrap --scope both --years 5
 ```
