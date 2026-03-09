@@ -2814,6 +2814,57 @@ def _heatmap_focus_benchmark_color(palette: dict[str, object]) -> str:
         return str(palette.get("benchmark", "#94A3B8"))
     return "#475569"
 
+
+def _plotly_price_axis_range_with_padding(
+    *,
+    lows: pd.Series,
+    highs: pd.Series,
+    extra_series: list[pd.Series] | None = None,
+    lower_pad_ratio: float = 0.08,
+    upper_pad_ratio: float = 0.03,
+) -> tuple[float, float] | None:
+    values = [
+        pd.to_numeric(lows, errors="coerce"),
+        pd.to_numeric(highs, errors="coerce"),
+    ]
+    for series in extra_series or []:
+        values.append(pd.to_numeric(series, errors="coerce"))
+    combined = pd.concat(values, axis=0).dropna()
+    if combined.empty:
+        return None
+    min_val = float(combined.min())
+    max_val = float(combined.max())
+    span = max_val - min_val
+    if not math.isfinite(span) or span <= 0:
+        base = max(abs(min_val), abs(max_val), 1.0)
+        span = base * 0.08
+    lower_pad = span * float(lower_pad_ratio)
+    upper_pad = span * float(upper_pad_ratio)
+    return (min_val - lower_pad, max_val + upper_pad)
+
+
+def _plotly_series_axis_range_with_padding(
+    series_list: list[pd.Series],
+    *,
+    lower_pad_ratio: float = 0.08,
+    upper_pad_ratio: float = 0.08,
+) -> tuple[float, float] | None:
+    values: list[pd.Series] = []
+    for series in series_list:
+        values.append(pd.to_numeric(series, errors="coerce"))
+    combined = pd.concat(values, axis=0).dropna()
+    if combined.empty:
+        return None
+    min_val = float(combined.min())
+    max_val = float(combined.max())
+    span = max_val - min_val
+    if not math.isfinite(span) or span <= 0:
+        base = max(abs(min_val), abs(max_val), 1.0)
+        span = base * 0.08
+    lower_pad = span * float(lower_pad_ratio)
+    upper_pad = span * float(upper_pad_ratio)
+    return (min_val - lower_pad, max_val + upper_pad)
+
 def _build_tw_etf_heatmap_focus_plotly_figure(
     *,
     etf_code: str,
@@ -2934,6 +2985,16 @@ def _build_tw_etf_heatmap_focus_plotly_figure(
             "tickfont": {"color": str(palette["text_color"])},
         },
     )
+    price_range = _plotly_price_axis_range_with_padding(
+        lows=bars["low"],
+        highs=bars["high"],
+        extra_series=[benchmark_overlay] if not benchmark_overlay.empty else [],
+    )
+    equity_range = _plotly_series_axis_range_with_padding(
+        [strategy_equity, benchmark_equity] if not benchmark_equity.empty else [strategy_equity],
+        lower_pad_ratio=0.1,
+        upper_pad_ratio=0.1,
+    )
     fig_focus.update_xaxes(showgrid=True, gridcolor=str(palette["grid"]))
     fig_focus.update_yaxes(
         showgrid=True,
@@ -2941,6 +3002,7 @@ def _build_tw_etf_heatmap_focus_plotly_figure(
         row=1,
         col=1,
         side="left",
+        range=list(price_range) if price_range is not None else None,
     )
     fig_focus.update_yaxes(
         showgrid=True,
@@ -2949,6 +3011,7 @@ def _build_tw_etf_heatmap_focus_plotly_figure(
         row=2,
         col=1,
         side="right",
+        range=list(equity_range) if equity_range is not None else None,
     )
     return fig_focus
 

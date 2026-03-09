@@ -259,6 +259,16 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(fig.data[0].increasing.fillcolor, fig.data[0].increasing.line.color)
         self.assertIn("同基準價", fig.data[1].name)
         self.assertFalse(fig.layout.annotations)
+        self.assertIsNotNone(fig.layout.yaxis.range)
+        assert fig.layout.yaxis.range is not None
+        self.assertLess(float(fig.layout.yaxis.range[0]), float(bars["low"].min()))
+        self.assertGreater(float(fig.layout.yaxis.range[1]), float(bars["high"].max()))
+        self.assertIsNotNone(fig.layout.yaxis2.range)
+        assert fig.layout.yaxis2.range is not None
+        equity_min = min(float(strategy.min()), float(benchmark.min()))
+        equity_max = max(float(strategy.max()), float(benchmark.max()))
+        self.assertLess(float(fig.layout.yaxis2.range[0]), equity_min)
+        self.assertGreater(float(fig.layout.yaxis2.range[1]), equity_max)
 
     def test_load_cached_twse_snapshot_skips_future_rows(self):
         fake_rows = [

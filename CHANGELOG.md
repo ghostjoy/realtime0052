@@ -347,6 +347,9 @@
 - Auto: updated .githooks/pre-commit, AGENTS.md, PROJECT_CONTEXT.md, README.md, app.py, backtest/__init__.py, ... (+12) [id:d87b9ff71f]
 
 ### Fixed
+- 調整 `00910 / 00935 / 00735 / 00993A / 0050 / 0052` 熱力圖頁中「ETF 本身 K 線」價格軸留白：
+  - 價格區改為保留上下 padding，讓 K 線不要貼近底部，視覺更清爽。
+  - 下方資產曲線區同步保留 y 軸上下留白，避免線條貼邊時不易辨識。
 - 調整 `2026 YTD 前十大 ETF` 與 `2026 YTD 前十大股利型、配息型 ETF` 排名異動顯示：`新進榜` 改為 `★`、`持平` 改為 `-`，並新增表格下方 `離開排行`（代碼/名稱/離開日期）清單。
 - `離開排行` 顯示方式調整為「排行表下方純文字說明」（不再使用獨立資料表），提升卡片閱讀連續性。
 - 修正 `0050` 成分股公司簡介表 `權重(%)` 欄位在缺值時輸出字串 `—` 導致 Streamlit/PyArrow 序列化失敗；改為以數值欄位（缺值 `NaN`）輸出，避免 `Could not convert '—' ... tried to convert to double`。
