@@ -6218,9 +6218,9 @@ def _build_tw_etf_daily_market_overview(
     latest["量能異常(倍)"] = latest["relative_volume_20x"]
     latest["日振幅(%)"] = latest["intraday_range_pct"]
     latest["日報酬(%)"] = latest["daily_return_pct"]
-    latest = latest.sort_values(["代碼", "ETF"], ascending=[True, True], na_position="last").reset_index(
-        drop=True
-    )
+    latest = latest.sort_values(
+        ["代碼", "ETF"], ascending=[True, True], na_position="last"
+    ).reset_index(drop=True)
     latest.insert(0, "編號", range(1, len(latest) + 1))
     if top_n > 0:
         latest = latest.head(max(1, int(top_n))).copy()
@@ -6316,9 +6316,9 @@ def _build_tw_etf_mis_overview(
     latest["申贖差額(萬)"] = latest["creation_redemption_diff"] / 10000.0
     latest["更新時間"] = latest["updated_at"].dt.strftime("%H:%M:%S").fillna("—")
     latest["折溢價絕對值"] = pd.to_numeric(latest["折溢價(%)"], errors="coerce").abs()
-    latest = latest.sort_values(["代碼", "ETF"], ascending=[True, True], na_position="last").reset_index(
-        drop=True
-    )
+    latest = latest.sort_values(
+        ["代碼", "ETF"], ascending=[True, True], na_position="last"
+    ).reset_index(drop=True)
     latest.insert(0, "編號", range(1, len(latest) + 1))
     if top_n > 0:
         latest = latest.head(max(1, int(top_n))).copy()
