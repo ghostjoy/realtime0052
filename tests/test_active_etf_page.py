@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
 import unittest
 from datetime import datetime, timezone
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs
@@ -191,6 +193,8 @@ class ActiveEtfPageTests(unittest.TestCase):
             mis_frame=mis,
         )
 
+        self.assertEqual(list(out["代碼"]), ["^TWII", "0050", "00999"])
+        self.assertEqual(list(out["編號"].astype(str)), ["-", "001", "002"])
         row_0050 = out.loc[out["代碼"] == "0050"].iloc[0]
         row_00999 = out.loc[out["代碼"] == "00999"].iloc[0]
         self.assertEqual(float(row_0050["收盤"]), 200.0)
@@ -202,7 +206,13 @@ class ActiveEtfPageTests(unittest.TestCase):
 
         csv_bytes = _build_tw_etf_super_export_csv_bytes(out)
         self.assertTrue(csv_bytes.startswith(b"\xef\xbb\xbf"))
-        self.assertIn("測試ETF", csv_bytes.decode("utf-8-sig"))
+        csv_text = csv_bytes.decode("utf-8-sig")
+        self.assertIn("測試ETF", csv_text)
+        parsed_rows = list(csv.reader(StringIO(csv_text)))
+        self.assertEqual(parsed_rows[1][0], '="-"')
+        self.assertEqual(parsed_rows[1][1], '="^TWII"')
+        self.assertEqual(parsed_rows[2][0], '="001"')
+        self.assertEqual(parsed_rows[2][1], '="0050"')
 
     def test_sync_tw_etf_all_types_export_sources_runs_all_updates(self):
         fake_store = SimpleNamespace()

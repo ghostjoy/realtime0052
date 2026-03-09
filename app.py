@@ -465,11 +465,60 @@ def _build_tw_etf_super_export_table(
     sanitized = result.copy()
     for column in sanitized.columns:
         sanitized[column] = sanitized[column].map(_sanitize_tw_etf_super_export_value)
+    if "代碼" in sanitized.columns:
+        code_order = sanitized["代碼"].astype(str).str.strip().str.upper()
+        name_order = (
+            sanitized["ETF"].astype(str).str.strip()
+            if "ETF" in sanitized.columns
+            else pd.Series("", index=sanitized.index)
+        )
+        sanitized = (
+            sanitized.assign(
+                __sort_bucket=code_order.map(lambda token: 0 if token.startswith("^") else 1),
+                __sort_code=code_order,
+                __sort_name=name_order,
+            )
+            .sort_values(
+                ["__sort_bucket", "__sort_code", "__sort_name"],
+                ascending=[True, True, True],
+                na_position="last",
+            )
+            .drop(columns=["__sort_bucket", "__sort_code", "__sort_name"])
+            .reset_index(drop=True)
+        )
+    serial_width = max(3, len(str(max(1, len(sanitized)))))
+    code_series = (
+        sanitized["代碼"].astype(str).str.strip().str.upper()
+        if "代碼" in sanitized.columns
+        else pd.Series("", index=sanitized.index)
+    )
+    serial_values: list[str] = []
+    etf_counter = 0
+    for code in code_series.tolist():
+        if str(code).startswith("^"):
+            serial_values.append("-")
+            continue
+        etf_counter += 1
+        serial_values.append(str(etf_counter).zfill(serial_width))
+    if "編號" in sanitized.columns:
+        sanitized["編號"] = pd.Series(serial_values, index=sanitized.index, dtype="string")
+        ordered = ["編號", *[column for column in sanitized.columns if column != "編號"]]
+        sanitized = sanitized[ordered]
+    else:
+        sanitized.insert(0, "編號", pd.Series(serial_values, index=sanitized.index, dtype="string"))
     return sanitized.reset_index(drop=True)
 
 
 def _build_tw_etf_super_export_csv_bytes(frame: pd.DataFrame) -> bytes:
     export_frame = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if isinstance(export_frame, pd.DataFrame) and not export_frame.empty:
+        export_frame = export_frame.copy()
+        for column in ("編號", "代碼"):
+            if column not in export_frame.columns:
+                continue
+            export_frame[column] = export_frame[column].map(
+                lambda value: f'="{str(value).replace(chr(34), chr(34) * 2)}"'
+            )
     csv_text = export_frame.to_csv(index=False)
     return ("\ufeff" + csv_text).encode("utf-8")
 
