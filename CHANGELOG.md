@@ -80,6 +80,7 @@
 
 ### Changed
 - `台股 ETF 全類型總表` 主表排序改為依 `台股代號` 由小到大，`編號` 也會依代號順序重編。
+- `台股 ETF 全類型總表` 頁面下方的「官方 ETF 日成交總表 / 官方 ETF MIS 指標總表 / 基金規模追蹤」也統一改為依 `台股代號` 由小到大排序。
 - Auto: updated app.py, services/tw_etf_daily_sync.py, services/tw_etf_mis_sync.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, ... (+2) [id:e7135a9dab]
 - `bootstrap` 預載流程納入台股 ETF 官方資料：
   - TW scope 會額外同步 `tw_etf_daily_market`

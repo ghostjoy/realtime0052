@@ -2108,6 +2108,36 @@ class ActiveEtfPageTests(unittest.TestCase):
             [
                 {
                     "trade_date": "2026-03-05",
+                    "etf_code": "00935",
+                    "etf_name": "野村臺灣新科技50",
+                    "trade_value": 2000000000.0,
+                    "trade_volume": 9000000.0,
+                    "trade_count": 900,
+                    "open": 18.0,
+                    "high": 18.4,
+                    "low": 17.8,
+                    "close": 18.1,
+                    "change": 0.3,
+                    "source": "twse_etf_daily",
+                    "fetched_at": "2026-03-05T12:00:00+00:00",
+                },
+                {
+                    "trade_date": "2026-03-06",
+                    "etf_code": "00935",
+                    "etf_name": "野村臺灣新科技50",
+                    "trade_value": 2200000000.0,
+                    "trade_volume": 10000000.0,
+                    "trade_count": 950,
+                    "open": 18.2,
+                    "high": 18.8,
+                    "low": 18.0,
+                    "close": 18.6,
+                    "change": 0.5,
+                    "source": "twse_etf_daily",
+                    "fetched_at": "2026-03-06T12:00:00+00:00",
+                },
+                {
+                    "trade_date": "2026-03-05",
                     "etf_code": "0050",
                     "etf_name": "元大台灣50",
                     "trade_value": 1000000000.0,
@@ -2174,14 +2204,15 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "first_date": pd.Timestamp("2026-03-05").to_pydatetime(),
                 "last_date": pd.Timestamp("2026-03-06").to_pydatetime(),
                 "trade_date_count": 2,
-                "symbol_count": 2,
+                "symbol_count": 3,
             },
             load_tw_etf_daily_market=lambda **kwargs: frame.copy(),
         )
         with patch("app._history_store", return_value=fake_store):
             out, meta = _build_tw_etf_daily_market_overview(lookback_days=30, top_n=10)
 
-        self.assertEqual(list(out["代碼"]), ["0050", "0056"])
+        self.assertEqual(list(out["代碼"]), ["0050", "0056", "00935"])
+        self.assertEqual(list(out["編號"]), [1, 2, 3])
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "收盤"].iloc[0]), 76.5)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "日報酬(%)"].iloc[0]), 1.32)
         self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
@@ -2189,6 +2220,21 @@ class ActiveEtfPageTests(unittest.TestCase):
     def test_build_tw_etf_mis_overview(self):
         frame = pd.DataFrame(
             [
+                {
+                    "trade_date": "2026-03-06",
+                    "etf_code": "00935",
+                    "etf_name": "野村臺灣新科技50",
+                    "issued_units": 620000000.0,
+                    "creation_redemption_diff": 3000000.0,
+                    "market_price": 21.3,
+                    "estimated_nav": 20.7,
+                    "premium_discount_pct": 2.89,
+                    "previous_nav": 20.42,
+                    "reference_url": "https://example.com/nav3",
+                    "updated_at": "2026-03-06T14:30:00+08:00",
+                    "source": "twse_mis_etf_indicator",
+                    "fetched_at": "2026-03-06T06:30:00+00:00",
+                },
                 {
                     "trade_date": "2026-03-06",
                     "etf_code": "0050",
@@ -2227,16 +2273,18 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "first_date": pd.Timestamp("2026-03-06").to_pydatetime(),
                 "last_date": pd.Timestamp("2026-03-06").to_pydatetime(),
                 "trade_date_count": 1,
-                "symbol_count": 2,
+                "symbol_count": 3,
             },
             load_tw_etf_mis_daily=lambda **kwargs: frame.copy(),
         )
         with patch("app._history_store", return_value=fake_store):
             out, meta = _build_tw_etf_mis_overview(top_n=0)
 
-        self.assertEqual(list(out["代碼"]), ["0056", "0050"])
+        self.assertEqual(list(out["代碼"]), ["0050", "0056", "00935"])
+        self.assertEqual(list(out["編號"]), [1, 2, 3])
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "預估NAV"].iloc[0]), 181.62)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "已發行單位(萬)"].iloc[0]), 135000.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "00935", "折溢價(%)"].iloc[0]), 2.89)
         self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
 
     def test_with_tw_today_fields_only_backfills_missing_open(self):

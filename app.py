@@ -6076,11 +6076,18 @@ def _build_tw_etf_all_types_performance_table(
         market_daily_return_pct=market_daily_return,
     )
     table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
-    code_sort_text = table_df.get("代碼", pd.Series(index=table_df.index, dtype=str)).astype(str).str.strip().str.upper()
+    code_sort_text = (
+        table_df.get("代碼", pd.Series(index=table_df.index, dtype=str))
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
     code_sort_num = pd.to_numeric(code_sort_text.str.extract(r"^(\d+)")[0], errors="coerce")
     table_df = (
         table_df.assign(_code_sort_num=code_sort_num, _code_sort_text=code_sort_text)
-        .sort_values(["_code_sort_num", "_code_sort_text"], ascending=[True, True], na_position="last")
+        .sort_values(
+            ["_code_sort_num", "_code_sort_text"], ascending=[True, True], na_position="last"
+        )
         .drop(columns=["_code_sort_num", "_code_sort_text"])
         .reset_index(drop=True)
     )
@@ -6211,11 +6218,9 @@ def _build_tw_etf_daily_market_overview(
     latest["量能異常(倍)"] = latest["relative_volume_20x"]
     latest["日振幅(%)"] = latest["intraday_range_pct"]
     latest["日報酬(%)"] = latest["daily_return_pct"]
-    latest = latest.sort_values(
-        ["成交金額(億)", "成交筆數", "代碼"],
-        ascending=[False, False, True],
-        na_position="last",
-    ).reset_index(drop=True)
+    latest = latest.sort_values(["代碼", "ETF"], ascending=[True, True], na_position="last").reset_index(
+        drop=True
+    )
     latest.insert(0, "編號", range(1, len(latest) + 1))
     if top_n > 0:
         latest = latest.head(max(1, int(top_n))).copy()
@@ -6311,11 +6316,9 @@ def _build_tw_etf_mis_overview(
     latest["申贖差額(萬)"] = latest["creation_redemption_diff"] / 10000.0
     latest["更新時間"] = latest["updated_at"].dt.strftime("%H:%M:%S").fillna("—")
     latest["折溢價絕對值"] = pd.to_numeric(latest["折溢價(%)"], errors="coerce").abs()
-    latest = latest.sort_values(
-        ["折溢價絕對值", "申贖差額(萬)", "代碼"],
-        ascending=[False, False, True],
-        na_position="last",
-    ).reset_index(drop=True)
+    latest = latest.sort_values(["代碼", "ETF"], ascending=[True, True], na_position="last").reset_index(
+        drop=True
+    )
     latest.insert(0, "編號", range(1, len(latest) + 1))
     if top_n > 0:
         latest = latest.head(max(1, int(top_n))).copy()
@@ -7543,6 +7546,7 @@ def _render_tw_etf_all_types_view():
             st.caption(
                 f"指標觀察窗：{daily_market_meta.get('lookback_start')} -> {daily_market_meta.get('last_trade_date')}"
             )
+        st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
         if daily_market_df.empty:
             st.info("尚無官方 ETF 日成交本地快取；按「更新官方日成交」後才會建立。")
         else:
@@ -7646,6 +7650,7 @@ def _render_tw_etf_all_types_view():
             st.caption(
                 f"目前顯示本地快取：{mis_last_date}。如需抓最新官方資料，請手動按「更新官方 MIS 指標」。"
             )
+        st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
         if mis_df.empty:
             st.info("尚無官方 ETF MIS 指標本地快取；按「更新官方 MIS 指標」後才會建立。")
         else:
@@ -7732,6 +7737,7 @@ def _render_tw_etf_all_types_view():
         st.caption(
             f"起算日：{aum_track_anchor_date}；資料庫採累積保存（不覆蓋），畫面僅顯示最近 10 個交易日。"
         )
+        st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
         if history_wide.empty:
             st.info("尚無規模追蹤資料，請按「更新規模追蹤」。")
         else:
