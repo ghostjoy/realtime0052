@@ -1514,7 +1514,21 @@ class HistoryStore:
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         source_token = self._normalize_text(source) or "twse_etf_daily"
 
-        dedup: dict[str, tuple[str, float | None, float | None, int | None, float | None, float | None, float | None, float | None, float | None, str]] = {}
+        dedup: dict[
+            str,
+            tuple[
+                str,
+                float | None,
+                float | None,
+                int | None,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                str,
+            ],
+        ] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -1532,7 +1546,12 @@ class HistoryStore:
             low = pd.to_numeric(row.get("low"), errors="coerce")
             close = pd.to_numeric(row.get("close"), errors="coerce")
             change = pd.to_numeric(row.get("change"), errors="coerce")
-            if not pd.notna(open_) or not pd.notna(high) or not pd.notna(low) or not pd.notna(close):
+            if (
+                not pd.notna(open_)
+                or not pd.notna(high)
+                or not pd.notna(low)
+                or not pd.notna(close)
+            ):
                 continue
             row_source = self._normalize_text(row.get("source")) or source_token
             dedup[code] = (

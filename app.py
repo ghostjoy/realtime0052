@@ -2865,6 +2865,7 @@ def _plotly_series_axis_range_with_padding(
     upper_pad = span * float(upper_pad_ratio)
     return (min_val - lower_pad, max_val + upper_pad)
 
+
 def _build_tw_etf_heatmap_focus_plotly_figure(
     *,
     etf_code: str,
@@ -2878,7 +2879,9 @@ def _build_tw_etf_heatmap_focus_plotly_figure(
     price_up_line = str(palette.get("price_up_line", palette.get("price_up", "#5FA783")))
     price_down_line = str(palette.get("price_down_line", palette.get("price_down", "#D78C95")))
     benchmark_color = _heatmap_focus_benchmark_color(palette)
-    style = _benchmark_line_style({"benchmark": benchmark_color, "benchmark_dash": "dash"}, width=1.2)
+    style = _benchmark_line_style(
+        {"benchmark": benchmark_color, "benchmark_dash": "dash"}, width=1.2
+    )
 
     fig_focus = make_subplots(
         rows=2,
@@ -6146,8 +6149,10 @@ def _build_tw_etf_daily_market_overview(
 
     raw = raw.copy()
     raw["trade_date"] = pd.to_datetime(raw["trade_date"], errors="coerce")
-    raw = raw.dropna(subset=["trade_date"]).sort_values(["etf_code", "trade_date"]).reset_index(
-        drop=True
+    raw = (
+        raw.dropna(subset=["trade_date"])
+        .sort_values(["etf_code", "trade_date"])
+        .reset_index(drop=True)
     )
     if raw.empty:
         return pd.DataFrame(), {
@@ -7441,7 +7446,9 @@ def _render_tw_etf_all_types_view():
         table_display = table_view_df
         merged_link_config: dict[str, object] = {}
         if table_drilldown_enabled:
-            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(filtered_table_df)
+            table_display, table_link_config = _decorate_tw_etf_name_heatmap_links(
+                filtered_table_df
+            )
             table_display, code_link_config = _decorate_dataframe_backtest_links(table_display)
             if isinstance(code_link_config, dict):
                 merged_link_config.update(code_link_config)
@@ -7473,10 +7480,14 @@ def _render_tw_etf_all_types_view():
         )
         daily_market_coverage = store.load_tw_etf_daily_market_coverage()
         daily_market_last_raw = (
-            daily_market_coverage.get("last_date") if isinstance(daily_market_coverage, dict) else None
+            daily_market_coverage.get("last_date")
+            if isinstance(daily_market_coverage, dict)
+            else None
         )
         daily_market_last_date = (
-            pd.Timestamp(daily_market_last_raw).date() if daily_market_last_raw is not None else None
+            pd.Timestamp(daily_market_last_raw).date()
+            if daily_market_last_raw is not None
+            else None
         )
         daily_market_sync_summary: dict[str, object] = {}
         if daily_market_refresh:
@@ -7514,7 +7525,9 @@ def _render_tw_etf_all_types_view():
                 daily_market_issues,
                 preview_limit=2,
             )
-        st.caption("資料來源：TWSE `ETFReport/ETFDaily` 官方日成交資訊（上市 ETF 全市場日級交易資料）。")
+        st.caption(
+            "資料來源：TWSE `ETFReport/ETFDaily` 官方日成交資訊（上市 ETF 全市場日級交易資料）。"
+        )
         if daily_market_last_date is None:
             st.caption("目前只讀本地快取；尚未建立快取時，請手動按「更新官方日成交」。")
         else:
@@ -7556,8 +7569,8 @@ def _render_tw_etf_all_types_view():
             daily_market_display = filtered_daily_market_df
             daily_market_link_config: dict[str, object] = {}
             if daily_market_drilldown_enabled:
-                daily_market_display, daily_market_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(
-                    filtered_daily_market_df
+                daily_market_display, daily_market_heatmap_cfg = (
+                    _decorate_tw_etf_name_heatmap_links(filtered_daily_market_df)
                 )
                 daily_market_display, daily_market_code_cfg = _decorate_dataframe_backtest_links(
                     daily_market_display
@@ -11452,7 +11465,9 @@ def _render_tw_etf_heatmap_view(
                 palette=palette,
             )
             st.plotly_chart(fig_focus, width="stretch", key=f"{page_key}_focus_plotly")
-            st.caption("上方為 ETF 本身日 K，並沿用目前頁面的 Benchmark、策略與成本參數計算下方資產曲線。")
+            st.caption(
+                "上方為 ETF 本身日 K，並沿用目前頁面的 Benchmark、策略與成本參數計算下方資產曲線。"
+            )
             if not benchmark_overlay.empty:
                 st.caption("價格圖虛線：Benchmark 同基準價疊加線。")
 

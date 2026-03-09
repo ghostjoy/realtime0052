@@ -74,7 +74,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("latest=2026-03-06", result.output)
         self.assertIn("saved_rows=120", result.output)
-        self.assertIn("! latest available date 2026-03-05 is outside requested range", result.output)
+        self.assertIn(
+            "! latest available date 2026-03-05 is outside requested range", result.output
+        )
 
     @patch("cli._resolve_store")
     @patch("cli.sync_symbols_if_needed")

@@ -98,7 +98,9 @@ def fetch_twse_etf_mis_report(
     for row in category_rows:
         if not isinstance(row, dict):
             continue
-        code = _normalize_code(str(row.get("ch", "")).split(".", 1)[0] or row.get("c") or row.get("a"))
+        code = _normalize_code(
+            str(row.get("ch", "")).split(".", 1)[0] or row.get("c") or row.get("a")
+        )
         if not code:
             continue
         category_map[code] = {
@@ -144,7 +146,9 @@ def fetch_twse_etf_mis_report(
                 {
                     "trade_date": trade_day,
                     "etf_code": code,
-                    "etf_name": category_info.get("etf_name") or _normalize_name(row.get("b")) or code,
+                    "etf_name": category_info.get("etf_name")
+                    or _normalize_name(row.get("b"))
+                    or code,
                     "issued_units": _to_float(row.get("c")),
                     "creation_redemption_diff": _to_float(row.get("d")),
                     "market_price": _to_float(row.get("e")),
@@ -180,11 +184,15 @@ def fetch_twse_etf_mis_report(
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame["trade_date"] = frame["trade_date"].dt.date.astype(str)
     frame = frame.sort_values(["etf_code"]).reset_index(drop=True)
-    return latest_trade_date.isoformat(), frame[TWSE_MIS_ETF_COLUMNS], {
-        "row_count": int(len(frame)),
-        "group_count": len(groups),
-        "source": TWSE_MIS_ETF_SOURCE,
-    }
+    return (
+        latest_trade_date.isoformat(),
+        frame[TWSE_MIS_ETF_COLUMNS],
+        {
+            "row_count": int(len(frame)),
+            "group_count": len(groups),
+            "source": TWSE_MIS_ETF_SOURCE,
+        },
+    )
 
 
 def sync_twse_etf_mis_daily(

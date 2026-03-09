@@ -126,7 +126,9 @@ class ActiveEtfPageTests(unittest.TestCase):
             with (
                 patch.object(app, "st", fake_st),
                 patch("app.cfg_or_env_bool", return_value=True),
-                patch("app._submit_daily_incremental_refresh", return_value=_PendingFuture()) as submit_mock,
+                patch(
+                    "app._submit_daily_incremental_refresh", return_value=_PendingFuture()
+                ) as submit_mock,
             ):
                 _auto_run_daily_incremental_refresh(fake_store)
 
@@ -232,8 +234,12 @@ class ActiveEtfPageTests(unittest.TestCase):
             },
             index=idx,
         )
-        strategy = pd.Series([1_000_000.0, 1_050_000.0, 1_120_000.0, 1_480_000.0, 2_000_000.0], index=idx)
-        benchmark = pd.Series([1_000_000.0, 1_010_000.0, 1_030_000.0, 1_200_000.0, 1_500_000.0], index=idx)
+        strategy = pd.Series(
+            [1_000_000.0, 1_050_000.0, 1_120_000.0, 1_480_000.0, 2_000_000.0], index=idx
+        )
+        benchmark = pd.Series(
+            [1_000_000.0, 1_010_000.0, 1_030_000.0, 1_200_000.0, 1_500_000.0], index=idx
+        )
         overlay = pd.Series([100.5, 101.0, 101.4, 102.0, 102.6], index=idx)
 
         fig = _build_tw_etf_heatmap_focus_plotly_figure(
@@ -729,10 +735,13 @@ class ActiveEtfPageTests(unittest.TestCase):
                 {"代碼": "^TWII", "ETF": "台股大盤"},
             ]
         )
-        with patch(
-            "app._get_tw_etf_management_fee_whitelist",
-            return_value={"0050": "0.4567%"},
-        ), patch("app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64}):
+        with (
+            patch(
+                "app._get_tw_etf_management_fee_whitelist",
+                return_value={"0050": "0.4567%"},
+            ),
+            patch("app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64}),
+        ):
             out = _attach_tw_etf_management_fee_column(source)
         self.assertIn("管理費(%)", out.columns)
         self.assertIn("ETF規模(億)", out.columns)
@@ -2027,7 +2036,9 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "app._load_tw_market_daily_return",
                 return_value=(0.8, "0050", "20260213", "20260214", []),
             ),
-            patch("app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64, "00935": 321.0}),
+            patch(
+                "app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64, "00935": 321.0}
+            ),
             patch(
                 "app._load_twii_twse_day_open_close",
                 side_effect=[(None, 113.0, []), (114.0, 114.0, [])],

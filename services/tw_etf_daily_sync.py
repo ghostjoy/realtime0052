@@ -90,7 +90,11 @@ def fetch_twse_etf_daily_report(
     rows = payload.get("data")
     if not isinstance(rows, list):
         if "沒有符合條件" in stat:
-            return trade_day.isoformat(), empty_tw_etf_daily_frame(), {"stat": stat, "date": date_token}
+            return (
+                trade_day.isoformat(),
+                empty_tw_etf_daily_frame(),
+                {"stat": stat, "date": date_token},
+            )
         raise RuntimeError(f"TWSE ETF daily payload missing data rows: {stat or 'unknown'}")
 
     fields = payload.get("fields")
@@ -139,18 +143,31 @@ def fetch_twse_etf_daily_report(
     if frame.empty:
         return trade_day.isoformat(), empty_tw_etf_daily_frame(), {"stat": stat, "date": date_token}
 
-    for column in ["trade_value", "trade_volume", "trade_count", "open", "high", "low", "close", "change"]:
+    for column in [
+        "trade_value",
+        "trade_volume",
+        "trade_count",
+        "open",
+        "high",
+        "low",
+        "close",
+        "change",
+    ]:
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.dropna(subset=["open", "high", "low", "close"], how="any")
     if frame.empty:
         return trade_day.isoformat(), empty_tw_etf_daily_frame(), {"stat": stat, "date": date_token}
     frame = frame.sort_values(["etf_code"]).reset_index(drop=True)
-    return trade_day.isoformat(), frame[TWSE_ETF_DAILY_COLUMNS], {
-        "stat": stat,
-        "date": date_token,
-        "row_count": int(len(frame)),
-    }
+    return (
+        trade_day.isoformat(),
+        frame[TWSE_ETF_DAILY_COLUMNS],
+        {
+            "stat": stat,
+            "date": date_token,
+            "row_count": int(len(frame)),
+        },
+    )
 
 
 def sync_twse_etf_daily_market(
@@ -169,7 +186,7 @@ def sync_twse_etf_daily_market(
         coverage = getattr(store, "load_tw_etf_daily_market_coverage", lambda **kwargs: {})()
         last_date = coverage.get("last_date") if isinstance(coverage, dict) else None
         if isinstance(last_date, datetime):
-            start_date = (last_date.date() - timedelta(days=max(0, int(lookback_days))))
+            start_date = last_date.date() - timedelta(days=max(0, int(lookback_days)))
         elif last_date:
             start_date = _coerce_trade_date(last_date) - timedelta(days=max(0, int(lookback_days)))
         else:

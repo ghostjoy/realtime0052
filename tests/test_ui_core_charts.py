@@ -38,8 +38,16 @@ def test_render_benchmark_lines_chart_uses_right_axis_for_second_series():
     idx = pd.date_range("2026-03-01", periods=3, freq="D", tz="UTC")
     charts._render_benchmark_lines_chart(
         lines=[
-            {"name": "Strategy Equity", "series": pd.Series([100, 110, 120], index=idx), "color": "#2563EB"},
-            {"name": "Benchmark Equity", "series": pd.Series([100, 105, 108], index=idx), "color": "#475569"},
+            {
+                "name": "Strategy Equity",
+                "series": pd.Series([100, 110, 120], index=idx),
+                "color": "#2563EB",
+            },
+            {
+                "name": "Benchmark Equity",
+                "series": pd.Series([100, 105, 108], index=idx),
+                "color": "#475569",
+            },
         ],
         height=420,
         chart_key="unit_test_chart",
@@ -59,7 +67,11 @@ def test_render_benchmark_lines_chart_adds_hidden_right_axis_mirror_for_single_s
     idx = pd.date_range("2026-03-01", periods=3, freq="D", tz="UTC")
     charts._render_benchmark_lines_chart(
         lines=[
-            {"name": "Strategy Equity", "series": pd.Series([100, 110, 120], index=idx), "color": "#2563EB"},
+            {
+                "name": "Strategy Equity",
+                "series": pd.Series([100, 110, 120], index=idx),
+                "color": "#2563EB",
+            },
         ],
         height=420,
         chart_key="unit_test_single_series_chart",

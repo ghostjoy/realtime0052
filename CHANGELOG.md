@@ -79,6 +79,7 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- Auto: updated app.py, services/tw_etf_daily_sync.py, services/tw_etf_mis_sync.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, ... (+2) [id:e7135a9dab]
 - `bootstrap` 預載流程納入台股 ETF 官方資料：
   - TW scope 會額外同步 `tw_etf_daily_market`
   - TW scope 會額外同步 `tw_etf_mis_daily`
