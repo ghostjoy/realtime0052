@@ -1973,17 +1973,6 @@ class ActiveEtfPageTests(unittest.TestCase):
             [
                 {
                     "排名": 1,
-                    "代碼": "0050",
-                    "ETF": "元大台灣50",
-                    "類型": "市值型",
-                    "期初收盤": 100.0,
-                    "復權期初": 100.0,
-                    "期末收盤": 112.0,
-                    "復權事件": "—",
-                    "區間報酬(%)": 12.349,
-                },
-                {
-                    "排名": 2,
                     "代碼": "00935",
                     "ETF": "野村臺灣新科技50",
                     "類型": "科技型",
@@ -1993,10 +1982,33 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "復權事件": "—",
                     "區間報酬(%)": 15.678,
                 },
+                {
+                    "排名": 2,
+                    "代碼": "0052",
+                    "ETF": "富邦科技",
+                    "類型": "科技型",
+                    "期初收盤": 140.0,
+                    "復權期初": 140.0,
+                    "期末收盤": 151.2,
+                    "復權事件": "—",
+                    "區間報酬(%)": 8.005,
+                },
+                {
+                    "排名": 3,
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "類型": "市值型",
+                    "期初收盤": 100.0,
+                    "復權期初": 100.0,
+                    "期末收盤": 112.0,
+                    "復權事件": "—",
+                    "區間報酬(%)": 12.349,
+                },
             ]
         )
         y2025_df = pd.DataFrame(
             [
+                {"代碼": "0052", "區間報酬(%)": 24.321},
                 {"代碼": "0050", "區間報酬(%)": 30.456},
                 {"代碼": "00935", "區間報酬(%)": 20.987},
             ]
@@ -2005,8 +2017,8 @@ class ActiveEtfPageTests(unittest.TestCase):
             patch(
                 "app._build_tw_etf_top10_between",
                 side_effect=[
-                    (ytd_df, "20251231", "20260214", 2),
-                    (y2025_df, "20241231", "20251231", 2),
+                    (ytd_df, "20251231", "20260214", 3),
+                    (y2025_df, "20241231", "20251231", 3),
                 ],
             ) as top10_build_mock,
             patch(
@@ -2018,26 +2030,27 @@ class ActiveEtfPageTests(unittest.TestCase):
             ),
             patch(
                 "app._load_tw_etf_daily_change_map",
-                return_value=({"0050": 1.5, "00935": 4.2}, "20260214", "20260213"),
+                return_value=({"0050": 1.5, "0052": 0.6, "00935": 4.2}, "20260214", "20260213"),
             ),
             patch(
                 "app._load_tw_snapshot_price_maps",
                 return_value=(
                     "20260214",
-                    {"0050": 113.0, "00935": 58.0},
-                    {"0050": 114.0, "00935": 59.0},
+                    {"0050": 113.0, "0052": 151.0, "00935": 58.0},
+                    {"0050": 114.0, "0052": 151.8, "00935": 59.0},
                 ),
             ),
             patch(
                 "app._load_tw_snapshot_close_map",
-                return_value=("20260213", {"0050": 113.0, "00935": 58.0}),
+                return_value=("20260213", {"0050": 113.0, "0052": 150.9, "00935": 58.0}),
             ),
             patch(
                 "app._load_tw_market_daily_return",
                 return_value=(0.8, "0050", "20260213", "20260214", []),
             ),
             patch(
-                "app._load_tw_etf_aum_billion_map", return_value={"0050": 12491.64, "00935": 321.0}
+                "app._load_tw_etf_aum_billion_map",
+                return_value={"0050": 12491.64, "0052": 800.0, "00935": 321.0},
             ),
             patch(
                 "app._load_twii_twse_day_open_close",
@@ -2051,7 +2064,7 @@ class ActiveEtfPageTests(unittest.TestCase):
                 compare_end_yyyymmdd="20251231",
             )
 
-        self.assertEqual(len(out), 2)
+        self.assertEqual(len(out), 3)
         self.assertIn("編號", out.columns)
         self.assertNotIn("排名", out.columns)
         self.assertIn("2025績效(%)", out.columns)
@@ -2064,15 +2077,22 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("收盤", out.columns)
         self.assertIn("今日漲幅", out.columns)
         self.assertIn("今日贏大盤%", out.columns)
+        self.assertEqual(list(out["代碼"]), ["0050", "0052", "00935"])
+        self.assertEqual(list(out["編號"]), [1, 2, 3])
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "2025績效(%)"].iloc[0]), 30.45)
+        self.assertEqual(float(out.loc[out["代碼"] == "0052", "2025績效(%)"].iloc[0]), 24.32)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "YTD績效(%)"].iloc[0]), 15.67)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "開盤"].iloc[0]), 113.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "0052", "開盤"].iloc[0]), 151.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "開盤"].iloc[0]), 58.0)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "昨收"].iloc[0]), 113.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "0052", "昨收"].iloc[0]), 150.9)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "昨收"].iloc[0]), 58.0)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "收盤"].iloc[0]), 114.0)
+        self.assertEqual(float(out.loc[out["代碼"] == "0052", "收盤"].iloc[0]), 151.8)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "收盤"].iloc[0]), 59.0)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "大盤超額2025(%)"].iloc[0]), 12.33)
+        self.assertEqual(float(out.loc[out["代碼"] == "0052", "今日漲幅"].iloc[0]), 0.6)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "大盤超額YTD(%)"].iloc[0]), 5.11)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "今日漲幅"].iloc[0]), 1.72)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "今日贏大盤%"].iloc[0]), 0.08)

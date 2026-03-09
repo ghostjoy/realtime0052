@@ -6076,9 +6076,14 @@ def _build_tw_etf_all_types_performance_table(
         market_daily_return_pct=market_daily_return,
     )
     table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
-    table_df = table_df.sort_values(
-        ["類型", "YTD績效(%)"], ascending=[True, False], na_position="last"
-    ).reset_index(drop=True)
+    code_sort_text = table_df.get("代碼", pd.Series(index=table_df.index, dtype=str)).astype(str).str.strip().str.upper()
+    code_sort_num = pd.to_numeric(code_sort_text.str.extract(r"^(\d+)")[0], errors="coerce")
+    table_df = (
+        table_df.assign(_code_sort_num=code_sort_num, _code_sort_text=code_sort_text)
+        .sort_values(["_code_sort_num", "_code_sort_text"], ascending=[True, True], na_position="last")
+        .drop(columns=["_code_sort_num", "_code_sort_text"])
+        .reset_index(drop=True)
+    )
     table_df["編號"] = range(1, len(table_df) + 1)
     columns_order = [
         "編號",
@@ -7339,7 +7344,7 @@ def _render_tw_etf_all_types_view():
         )
         if daily_end_used:
             st.caption(f"同日價格基準日：{daily_end_used}")
-        st.caption("排序規則：先依 ETF 類型，再依 `YTD績效(%)` 由高到低。")
+        st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
 
         today_trade_token = _resolve_latest_tw_trade_day_token()
         today_trade_date = _resolve_latest_tw_trade_date_iso(today_trade_token)
