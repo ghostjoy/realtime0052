@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -28,12 +29,15 @@ from app import (
     _build_snapshot_health,
     _build_symbol_line_styles,
     _build_tw_active_etf_ytd_between,
+    _build_tw_etf_all_types_main_table_view,
     _build_tw_etf_all_types_performance_table,
     _build_tw_etf_aum_history_wide,
     _build_tw_etf_daily_market_overview,
     _build_tw_etf_heatmap_focus_chart,
     _build_tw_etf_heatmap_focus_plotly_figure,
     _build_tw_etf_mis_overview,
+    _build_tw_etf_super_export_csv_bytes,
+    _build_tw_etf_super_export_table,
     _build_tw_etf_top10_between,
     _build_two_etf_aggressive_picks,
     _classify_issue_level,
@@ -67,6 +71,7 @@ from app import (
     _resolve_tw_symbol_names,
     _snapshot_fallback_depth,
     _style_tw_today_move_table,
+    _sync_tw_etf_all_types_export_sources,
     _tw_etf_precision_column_config,
     _with_tw_today_fields,
 )
@@ -104,6 +109,130 @@ class ActiveEtfPageTests(unittest.TestCase):
         out = _filter_dataframe_by_keyword(frame, keyword="", columns=["代碼", "ETF"])
 
         self.assertTrue(out.equals(frame))
+
+    def test_build_tw_etf_all_types_main_table_view_adds_benchmark_row(self):
+        table_df = pd.DataFrame(
+            [
+                {
+                    "編號": 1,
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "類型": "市值型",
+                    "YTD績效(%)": 12.34,
+                    "今日漲幅": 1.23,
+                }
+            ]
+        )
+
+        out = _build_tw_etf_all_types_main_table_view(
+            table_df,
+            meta={
+                "market_2025_return": 20.01,
+                "market_ytd_return": 8.88,
+                "market_daily_return": 0.45,
+                "market_daily_prev_close": 21999.0,
+                "market_daily_open": 22050.0,
+                "market_daily_close": 22100.0,
+            },
+        )
+
+        self.assertEqual(str(out.iloc[0]["代碼"]), "^TWII")
+        self.assertEqual(str(out.iloc[0]["ETF"]), "台股大盤")
+        self.assertEqual(str(out.iloc[1]["代碼"]), "0050")
+        self.assertEqual(str(out.iloc[1]["編號"]), "1")
+
+    def test_build_tw_etf_super_export_table_prefers_main_and_sanitizes_links(self):
+        main = pd.DataFrame(
+            [
+                {"編號": "—", "代碼": "^TWII", "ETF": "台股大盤", "類型": "大盤", "YTD績效(%)": 8.88},
+                {
+                    "編號": "1",
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "類型": "市值型",
+                    "收盤": 200.0,
+                    "折溢價(%)": np.nan,
+                },
+            ]
+        )
+        daily = pd.DataFrame(
+            [
+                {
+                    "編號": 1,
+                    "代碼": "0050",
+                    "ETF": build_heatmap_drill_url("0050", "元大台灣50"),
+                    "類型": "市值型",
+                    "收盤": 210.0,
+                    "成交金額(億)": 123.0,
+                }
+            ]
+        )
+        mis = pd.DataFrame(
+            [
+                {
+                    "編號": 1,
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "折溢價(%)": 0.23,
+                    "更新時間": "09:00:00",
+                },
+                {
+                    "編號": 2,
+                    "代碼": "00999",
+                    "ETF": build_heatmap_drill_url("00999", "測試ETF"),
+                    "市價": 15.2,
+                },
+            ]
+        )
+
+        out = _build_tw_etf_super_export_table(
+            main_frame=main,
+            daily_market_frame=daily,
+            mis_frame=mis,
+        )
+
+        row_0050 = out.loc[out["代碼"] == "0050"].iloc[0]
+        row_00999 = out.loc[out["代碼"] == "00999"].iloc[0]
+        self.assertEqual(float(row_0050["收盤"]), 200.0)
+        self.assertEqual(float(row_0050["折溢價(%)"]), 0.23)
+        self.assertEqual(float(row_0050["成交金額(億)"]), 123.0)
+        self.assertEqual(str(row_0050["ETF"]), "元大台灣50")
+        self.assertEqual(str(row_00999["ETF"]), "測試ETF")
+        self.assertEqual(str(row_00999["YTD績效(%)"]), "-")
+
+        csv_bytes = _build_tw_etf_super_export_csv_bytes(out)
+        self.assertTrue(csv_bytes.startswith(b"\xef\xbb\xbf"))
+        self.assertIn("測試ETF", csv_bytes.decode("utf-8-sig"))
+
+    def test_sync_tw_etf_all_types_export_sources_runs_all_updates(self):
+        fake_store = SimpleNamespace()
+        with (
+            patch("app._resolve_latest_tw_trade_day_token", return_value="20260309"),
+            patch("app._clear_tw_etf_all_types_view_caches") as clear_mock,
+            patch(
+                "app._fetch_twse_snapshot_network_single",
+                return_value=(
+                    "20260309",
+                    pd.DataFrame([{"code": "0050", "name": "元大台灣50", "open": 1.0, "close": 1.1}]),
+                ),
+            ) as main_sync_mock,
+            patch(
+                "app.sync_twse_etf_daily_market",
+                return_value={"requested_days": 14, "synced_days": 1},
+            ) as daily_mock,
+            patch(
+                "app.sync_twse_etf_mis_daily",
+                return_value={"requested_days": 1, "synced_days": 1},
+            ) as mis_mock,
+        ):
+            out = _sync_tw_etf_all_types_export_sources(fake_store)
+
+        self.assertEqual(clear_mock.call_count, 2)
+        main_sync_mock.assert_called_once_with("20260309")
+        daily_mock.assert_called_once_with(store=fake_store, lookback_days=14, force=True)
+        mis_mock.assert_called_once_with(store=fake_store, force=True)
+        self.assertEqual(out.get("main", {}).get("status"), "synced")
+        self.assertEqual(out.get("issues"), [])
 
     def test_auto_run_daily_incremental_refresh_schedules_background_future(self):
         today_token = app.date.today().isoformat()

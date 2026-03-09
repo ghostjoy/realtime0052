@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import logging
@@ -12,13 +13,14 @@ from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import parse_qs, quote, unquote, urlencode
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
 from backtest import (
@@ -291,6 +293,275 @@ def _filter_dataframe_by_keyword(
         axis=1,
     )
     return frame.loc[mask].reset_index(drop=True)
+
+
+_TW_ETF_SUPER_EXPORT_PENDING_KEY = "tw_etf_super_export_pending"
+_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY = "tw_etf_super_export_autolaunch"
+_GOOGLE_SHEETS_LAUNCH_URL = "https://docs.google.com/spreadsheets/u/0/"
+
+
+def _clear_tw_etf_all_types_view_caches() -> None:
+    _fetch_twse_snapshot_with_fallback.clear()
+    _build_tw_etf_top10_between.clear()
+    _load_twii_twse_month_close_map.clear()
+    _load_twii_twse_return_between.clear()
+    _load_tw_market_return_between.clear()
+    _load_tw_snapshot_price_maps.clear()
+    _load_tw_etf_daily_change_map.clear()
+    _load_tw_snapshot_open_map.clear()
+    _load_tw_market_intraday_return.clear()
+    _load_tw_market_daily_return.clear()
+    _build_tw_etf_all_types_performance_table.clear()
+
+
+def _build_tw_etf_all_types_main_table_view(
+    table_df: pd.DataFrame,
+    *,
+    meta: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    if not isinstance(table_df, pd.DataFrame) or table_df.empty:
+        return pd.DataFrame()
+    meta_dict = meta if isinstance(meta, dict) else {}
+    market_2025_return = _safe_float(meta_dict.get("market_2025_return"))
+    market_ytd_return = _safe_float(meta_dict.get("market_ytd_return"))
+    market_daily_return = _safe_float(meta_dict.get("market_daily_return"))
+    market_daily_prev_close = _safe_float(meta_dict.get("market_daily_prev_close"))
+    market_daily_open = _safe_float(meta_dict.get("market_daily_open"))
+    market_daily_close = _safe_float(meta_dict.get("market_daily_close"))
+    benchmark_row = {
+        "編號": "—",
+        "代碼": "^TWII",
+        "ETF": "台股大盤",
+        "管理費(%)": np.nan,
+        "ETF規模(億)": np.nan,
+        "類型": "大盤",
+        "2025績效(%)": _truncate_value(market_2025_return, digits=2)
+        if market_2025_return is not None
+        else np.nan,
+        "大盤超額2025(%)": 0.0 if market_2025_return is not None else np.nan,
+        "YTD績效(%)": _truncate_value(market_ytd_return, digits=2)
+        if market_ytd_return is not None
+        else np.nan,
+        "大盤超額YTD(%)": 0.0 if market_ytd_return is not None else np.nan,
+        "昨收": _truncate_value(market_daily_prev_close, digits=2)
+        if market_daily_prev_close is not None
+        else np.nan,
+        "開盤": _truncate_value(market_daily_open, digits=2)
+        if market_daily_open is not None
+        else np.nan,
+        "收盤": _truncate_value(market_daily_close, digits=2)
+        if market_daily_close is not None
+        else np.nan,
+        "今日漲幅": _truncate_value(market_daily_return, digits=2)
+        if market_daily_return is not None
+        else np.nan,
+        "今日贏大盤%": 0.0 if market_daily_return is not None else np.nan,
+    }
+    out = pd.DataFrame.from_records(
+        [benchmark_row, *table_df.to_dict("records")],
+        columns=table_df.columns,
+    )
+    if "編號" in out.columns:
+        serial_numbers = pd.to_numeric(out["編號"], errors="coerce")
+        out["編號"] = serial_numbers.map(lambda v: "—" if pd.isna(v) else f"{int(v)}")
+    return out.reset_index(drop=True)
+
+
+def _is_tw_etf_super_export_missing(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    text = str(value).strip()
+    return text in {"", "-", "—", "nan", "None", "<NA>"}
+
+
+def _sanitize_tw_etf_super_export_value(value: object) -> object:
+    if _is_tw_etf_super_export_missing(value):
+        return "-"
+    if not isinstance(value, str):
+        return value
+    text = str(value).strip()
+    if not text.startswith("?"):
+        return text
+    query = parse_qs(text.lstrip("?"), keep_blank_values=True)
+    if not query:
+        return text
+    bt_label = query.get("bt_label", [])
+    if bt_label:
+        return strip_symbol_label_token(unquote(str(bt_label[0])))
+    hm_label = query.get("hm_label", [])
+    if hm_label:
+        return unquote(str(hm_label[0]))
+    hm_name = query.get("hm_name", [])
+    if hm_name:
+        return unquote(str(hm_name[0]))
+    bt_symbol = query.get("bt_symbol", [])
+    if bt_symbol:
+        return str(bt_symbol[0]).strip().upper()
+    hm_etf = query.get("hm_etf", [])
+    if hm_etf:
+        return str(hm_etf[0]).strip().upper()
+    return text
+
+
+def _coalesce_tw_etf_super_export_columns(primary: pd.Series, fallback: pd.Series) -> pd.Series:
+    primary_missing = primary.map(_is_tw_etf_super_export_missing)
+    return primary.where(~primary_missing, fallback)
+
+
+def _build_tw_etf_super_export_table(
+    *,
+    main_frame: pd.DataFrame,
+    daily_market_frame: pd.DataFrame,
+    mis_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    sources: list[tuple[str, pd.DataFrame]] = [
+        ("main", main_frame),
+        ("daily", daily_market_frame),
+        ("mis", mis_frame),
+    ]
+    prepared: list[tuple[str, pd.DataFrame]] = []
+    ordered_columns: list[str] = []
+    for source_name, frame in sources:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            continue
+        if "代碼" not in frame.columns:
+            continue
+        work = frame.copy()
+        work["代碼"] = work["代碼"].astype(str).str.strip().str.upper()
+        work = work[work["代碼"] != ""].drop_duplicates(subset=["代碼"], keep="first").reset_index(
+            drop=True
+        )
+        if work.empty:
+            continue
+        prepared.append((source_name, work))
+        for column in work.columns:
+            if column not in ordered_columns:
+                ordered_columns.append(str(column))
+    if not prepared:
+        return pd.DataFrame()
+
+    result = prepared[0][1].copy()
+    for source_name, frame in prepared[1:]:
+        merge_suffix = f"__{source_name}"
+        result = result.merge(frame, on="代碼", how="outer", sort=False, suffixes=("", merge_suffix))
+        duplicated_columns = [
+            column for column in frame.columns if column != "代碼" and f"{column}{merge_suffix}" in result.columns
+        ]
+        for column in duplicated_columns:
+            result[column] = _coalesce_tw_etf_super_export_columns(
+                result[column],
+                result[f"{column}{merge_suffix}"],
+            )
+            result = result.drop(columns=[f"{column}{merge_suffix}"])
+
+    final_columns = [column for column in ordered_columns if column in result.columns]
+    if final_columns:
+        result = result[final_columns]
+    sanitized = result.copy()
+    for column in sanitized.columns:
+        sanitized[column] = sanitized[column].map(_sanitize_tw_etf_super_export_value)
+    return sanitized.reset_index(drop=True)
+
+
+def _build_tw_etf_super_export_csv_bytes(frame: pd.DataFrame) -> bytes:
+    export_frame = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    csv_text = export_frame.to_csv(index=False)
+    return ("\ufeff" + csv_text).encode("utf-8")
+
+
+def _render_tw_etf_super_export_launcher(
+    *,
+    csv_bytes: bytes,
+    file_name: str,
+    sheets_url: str = _GOOGLE_SHEETS_LAUNCH_URL,
+) -> None:
+    payload_b64 = base64.b64encode(csv_bytes).decode("ascii")
+    html = f"""
+    <div style="padding:0.3rem 0 0.1rem 0; font-size:0.95rem; color:#475569;">
+      已嘗試自動下載 CSV，並開啟 Google Sheets。若瀏覽器擋下自動開頁，請點下方連結。
+    </div>
+    <a id="tw-etf-super-export-sheets-link" href="{sheets_url}" target="_blank" rel="noopener noreferrer">
+      開啟 Google Sheets
+    </a>
+    <script>
+      (function() {{
+        const payload = "{payload_b64}";
+        const fileName = {json.dumps(file_name)};
+        const bytes = Uint8Array.from(atob(payload), ch => ch.charCodeAt(0));
+        const blob = new Blob([bytes], {{ type: "text/csv;charset=utf-8;" }});
+        const downloadUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = downloadUrl;
+        anchor.download = fileName;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+        const targetUrl = {json.dumps(sheets_url)};
+        const opener = (window.parent && window.parent !== window) ? window.parent : window;
+        try {{
+          opener.open(targetUrl, "_blank", "noopener,noreferrer");
+        }} catch (err) {{
+          const fallback = document.getElementById("tw-etf-super-export-sheets-link");
+          if (fallback) {{
+            fallback.style.display = "inline";
+          }}
+        }}
+      }})();
+    </script>
+    """
+    components.html(html, height=78)
+
+
+def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
+    trade_token = _resolve_latest_tw_trade_day_token()
+    summary: dict[str, object] = {
+        "main": {"status": "fallback", "used_trade_date": ""},
+        "daily_market": {},
+        "mis": {},
+        "issues": [],
+    }
+    issues: list[str] = []
+    _clear_tw_etf_all_types_view_caches()
+    try:
+        main_out = _fetch_twse_snapshot_network_single(trade_token)
+        if main_out is not None:
+            used_trade_date, _ = main_out
+            summary["main"] = {"status": "synced", "used_trade_date": str(used_trade_date)}
+        else:
+            used_trade_date, _ = _fetch_twse_snapshot_with_fallback(trade_token, lookback_days=14)
+            summary["main"] = {"status": "fallback", "used_trade_date": str(used_trade_date)}
+    except Exception as exc:
+        issues.append(f"main_snapshot: {exc}")
+        summary["main"] = {"status": "error", "used_trade_date": ""}
+
+    try:
+        summary["daily_market"] = sync_twse_etf_daily_market(
+            store=store,
+            lookback_days=14,
+            force=True,
+        )
+    except Exception as exc:
+        issues.append(f"daily_market: {exc}")
+        summary["daily_market"] = {"status": "error", "issues": [str(exc)]}
+
+    try:
+        summary["mis"] = sync_twse_etf_mis_daily(
+            store=store,
+            force=True,
+        )
+    except Exception as exc:
+        issues.append(f"mis: {exc}")
+        summary["mis"] = {"status": "error", "issues": [str(exc)]}
+
+    _clear_tw_etf_all_types_view_caches()
+    summary["issues"] = issues
+    return summary
 
 
 BACKTEST_DRILL_CODE_COLUMNS = {
@@ -7222,6 +7493,21 @@ def _render_top10_etf_2025_view():
 
 
 def _render_tw_etf_all_types_view():
+    store = _history_store()
+    pending_super_export = bool(st.session_state.pop(_TW_ETF_SUPER_EXPORT_PENDING_KEY, False))
+    if pending_super_export:
+        with st.spinner("更新 ETF 總表來源並準備匯出中..."):
+            st.session_state[_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY] = {
+                "prepared_at": datetime.now(tz=timezone.utc).isoformat(),
+                "refresh_summary": _sync_tw_etf_all_types_export_sources(store),
+            }
+    export_launch_payload = st.session_state.get(_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY)
+    export_refresh_summary = (
+        export_launch_payload.get("refresh_summary", {})
+        if isinstance(export_launch_payload, dict)
+        else {}
+    )
+
     title_col, refresh_col, aum_track_col = st.columns([5, 1, 1])
     with title_col:
         st.subheader("台股 ETF 全類型總表（2025 / 2026 YTD）")
@@ -7244,17 +7530,7 @@ def _render_tw_etf_all_types_view():
             width="stretch",
         )
     if refresh_market:
-        _fetch_twse_snapshot_with_fallback.clear()
-        _build_tw_etf_top10_between.clear()
-        _load_twii_twse_month_close_map.clear()
-        _load_twii_twse_return_between.clear()
-        _load_tw_market_return_between.clear()
-        _load_tw_snapshot_price_maps.clear()
-        _load_tw_etf_daily_change_map.clear()
-        _load_tw_snapshot_open_map.clear()
-        _load_tw_market_intraday_return.clear()
-        _load_tw_market_daily_return.clear()
-        _build_tw_etf_all_types_performance_table.clear()
+        _clear_tw_etf_all_types_view_caches()
         st.rerun()
 
     with st.container(border=True):
@@ -7275,8 +7551,6 @@ def _render_tw_etf_all_types_view():
         if table_df.empty:
             st.warning("目前沒有可顯示的台股 ETF 全類型資料。")
             return
-
-        store = _history_store()
 
         universe_count = int(meta.get("universe_count", len(table_df)))
         type_series = table_df.get("類型", pd.Series(dtype=str)).astype(str)
@@ -7320,9 +7594,6 @@ def _render_tw_etf_all_types_view():
         market_daily_symbol = str(meta.get("market_daily_symbol", "")).strip()
         market_daily_prev_used = str(meta.get("market_daily_prev_used", "")).strip()
         market_daily_end_used = str(meta.get("market_daily_end_used", "")).strip()
-        market_daily_prev_close = _safe_float(meta.get("market_daily_prev_close"))
-        market_daily_open = _safe_float(meta.get("market_daily_open"))
-        market_daily_close = _safe_float(meta.get("market_daily_close"))
         daily_end_used = str(meta.get("daily_end_used", "")).strip()
         if (
             market_daily_return is not None
@@ -7403,43 +7674,7 @@ def _render_tw_etf_all_types_view():
             label="總表點擊導流",
             default=True,
         )
-        benchmark_row = {
-            "編號": "—",
-            "代碼": "^TWII",
-            "ETF": "台股大盤",
-            "管理費(%)": np.nan,
-            "ETF規模(億)": np.nan,
-            "類型": "大盤",
-            "2025績效(%)": _truncate_value(market_2025_return, digits=2)
-            if market_2025_return is not None
-            else np.nan,
-            "大盤超額2025(%)": 0.0 if market_2025_return is not None else np.nan,
-            "YTD績效(%)": _truncate_value(market_ytd_return, digits=2)
-            if market_ytd_return is not None
-            else np.nan,
-            "大盤超額YTD(%)": 0.0 if market_ytd_return is not None else np.nan,
-            "昨收": _truncate_value(market_daily_prev_close, digits=2)
-            if market_daily_prev_close is not None
-            else np.nan,
-            "開盤": _truncate_value(market_daily_open, digits=2)
-            if market_daily_open is not None
-            else np.nan,
-            "收盤": _truncate_value(market_daily_close, digits=2)
-            if market_daily_close is not None
-            else np.nan,
-            "今日漲幅": _truncate_value(market_daily_return, digits=2)
-            if market_daily_return is not None
-            else np.nan,
-            "今日贏大盤%": 0.0 if market_daily_return is not None else np.nan,
-        }
-        # Use records assembly to avoid pandas concat all-NA dtype deprecation warnings.
-        table_view_df = pd.DataFrame.from_records(
-            [benchmark_row, *table_df.to_dict("records")],
-            columns=table_df.columns,
-        )
-        if "編號" in table_view_df.columns:
-            serial_numbers = pd.to_numeric(table_view_df["編號"], errors="coerce")
-            table_view_df["編號"] = serial_numbers.map(lambda v: "—" if pd.isna(v) else f"{int(v)}")
+        table_view_df = _build_tw_etf_all_types_main_table_view(table_df, meta=meta)
         main_search = st.text_input(
             "搜尋總表",
             value="",
@@ -7497,7 +7732,11 @@ def _render_tw_etf_all_types_view():
             if daily_market_last_raw is not None
             else None
         )
-        daily_market_sync_summary: dict[str, object] = {}
+        daily_market_sync_summary: dict[str, object] = (
+            dict(export_refresh_summary.get("daily_market", {}))
+            if isinstance(export_refresh_summary.get("daily_market", {}), dict)
+            else {}
+        )
         if daily_market_refresh:
             try:
                 with st.spinner("同步 TWSE 官方 ETF 日成交中..."):
@@ -7608,7 +7847,11 @@ def _render_tw_etf_all_types_view():
             key="tw_etf_mis_refresh",
             width="stretch",
         )
-        mis_sync_summary: dict[str, object] = {}
+        mis_sync_summary: dict[str, object] = (
+            dict(export_refresh_summary.get("mis", {}))
+            if isinstance(export_refresh_summary.get("mis", {}), dict)
+            else {}
+        )
         if mis_refresh:
             try:
                 with st.spinner("同步 TWSE 官方 ETF MIS 指標中..."):
@@ -7698,6 +7941,72 @@ def _render_tw_etf_all_types_view():
             st.caption(
                 "欄位說明：`申贖差額(萬)` 為與前日已發行受益單位差異數；`折溢價(%)` 以市價相對預估 NAV 揭露。"
             )
+
+        st.markdown("#### 超級大表匯出")
+        super_export_df = _build_tw_etf_super_export_table(
+            main_frame=table_view_df,
+            daily_market_frame=daily_market_df,
+            mis_frame=mis_df,
+        )
+        export_trade_token = _resolve_latest_tw_trade_day_token()
+        export_file_name = f"tw_etf_super_export_{export_trade_token}.csv"
+        export_csv_bytes = _build_tw_etf_super_export_csv_bytes(super_export_df)
+        ex1, ex2 = st.columns(2)
+        ex1.download_button(
+            "下載超級大表 CSV",
+            data=export_csv_bytes,
+            file_name=export_file_name,
+            mime="text/csv;charset=utf-8",
+            width="stretch",
+            disabled=super_export_df.empty,
+        )
+        if ex2.button(
+            "一鍵下載並開啟 Google Sheets",
+            key="tw_etf_super_export_one_click",
+            width="stretch",
+            disabled=super_export_df.empty,
+        ):
+            st.session_state[_TW_ETF_SUPER_EXPORT_PENDING_KEY] = True
+            st.rerun()
+        if super_export_df.empty:
+            st.info("目前沒有可匯出的超級大表資料。")
+        else:
+            st.caption(
+                f"匯出摘要：{len(super_export_df)} 列 / {len(super_export_df.columns)} 欄。"
+                "輸出為純文字 CSV，不含點擊導流連結。"
+            )
+            if isinstance(export_refresh_summary, dict) and export_refresh_summary:
+                main_refresh_summary = export_refresh_summary.get("main", {})
+                main_status = (
+                    str(main_refresh_summary.get("status", "")).strip()
+                    if isinstance(main_refresh_summary, dict)
+                    else ""
+                )
+                main_used_trade_date = (
+                    str(main_refresh_summary.get("used_trade_date", "")).strip()
+                    if isinstance(main_refresh_summary, dict)
+                    else ""
+                )
+                if main_status or main_used_trade_date:
+                    st.caption(
+                        "一鍵匯出更新摘要："
+                        f" 主總表={main_status or 'unknown'}"
+                        f"{f' ({main_used_trade_date})' if main_used_trade_date else ''}"
+                    )
+                export_issues = export_refresh_summary.get("issues", [])
+                if isinstance(export_issues, list) and export_issues:
+                    _render_sync_issues(
+                        "一鍵匯出更新時有部分錯誤，已盡量改用本地快取",
+                        export_issues,
+                        preview_limit=2,
+                    )
+            if isinstance(export_launch_payload, dict):
+                _render_tw_etf_super_export_launcher(
+                    csv_bytes=export_csv_bytes,
+                    file_name=export_file_name,
+                )
+                st.session_state.pop(_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY, None)
+                st.caption("已先更新主總表、官方日成交、官方 MIS，再自動下載 CSV 並開啟 Google Sheets。")
 
         history_df = store.load_tw_etf_aum_history(
             etf_codes=table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
