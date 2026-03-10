@@ -79,6 +79,68 @@ class CliTests(unittest.TestCase):
         )
 
     @patch("cli._resolve_store")
+    @patch("cli.export_tw_etf_super_table_artifact")
+    def test_export_tw_etf_super_table_outputs_summary(self, export_mock, resolve_store_mock):
+        fake_store = object()
+        resolve_store_mock.return_value = fake_store
+        export_mock.return_value = {
+            "run_id": "tw_etf_super_export:20260310T090000000000",
+            "output_path": "/tmp/tw_etf_super_export_20260310.csv",
+            "trade_date_anchor": "20260310",
+            "row_count": 123,
+            "column_count": 27,
+            "ytd_start": "20260101",
+            "ytd_end": "20260310",
+            "compare_start": "20250101",
+            "compare_end": "20251231",
+            "refresh_summary": {
+                "main": {"status": "synced", "used_trade_date": "20260310"},
+                "daily_market": {"synced_days": 2, "saved_rows": 240},
+                "mis": {"synced_days": 1, "saved_rows": 120},
+            },
+            "issues": ["daily_market: skipped holiday 2026-03-08"],
+        }
+
+        result = self.runner.invoke(
+            cli.cli,
+            [
+                "export-tw-etf-super-table",
+                "--out",
+                "/tmp/custom.csv",
+                "--ytd-start",
+                "20260101",
+                "--ytd-end",
+                "20260310",
+                "--compare-start",
+                "20250101",
+                "--compare-end",
+                "20251231",
+                "--daily-lookback-days",
+                "21",
+                "--force",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        export_mock.assert_called_once_with(
+            store=fake_store,
+            out="/tmp/custom.csv",
+            ytd_start="20260101",
+            ytd_end="20260310",
+            compare_start="20250101",
+            compare_end="20251231",
+            force=True,
+            daily_lookback_days=21,
+        )
+        self.assertIn("trade_date=20260310", result.output)
+        self.assertIn("path=/tmp/tw_etf_super_export_20260310.csv", result.output)
+        self.assertIn("rows=123 cols=27", result.output)
+        self.assertIn("refresh main=synced(20260310)", result.output)
+        self.assertIn("daily=synced:2/saved:240", result.output)
+        self.assertIn("mis=synced:1/saved:120", result.output)
+        self.assertIn("! daily_market: skipped holiday 2026-03-08", result.output)
+
+    @patch("cli._resolve_store")
     @patch("cli.sync_symbols_if_needed")
     @patch("cli.load_and_prepare_symbol_bars")
     @patch("cli.execute_backtest_run")

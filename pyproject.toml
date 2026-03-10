@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "realtime-0052"
 version = "0.1.0"
@@ -24,6 +28,24 @@ dependencies = [
 
 [project.scripts]
 realtime0052 = "cli:main"
+
+[tool.setuptools]
+py-modules = [
+  "advice",
+  "app",
+  "cli",
+  "config_loader",
+  "data_sources",
+  "di",
+  "indicators",
+  "market_data_types",
+  "state_keys",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backtest*", "providers*", "services*", "storage*", "ui*", "utils*"]
+namespaces = false
 
 [dependency-groups]
 dev = [

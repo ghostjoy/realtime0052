@@ -160,6 +160,49 @@ class DuckStoreTests(unittest.TestCase):
             self.assertAlmostEqual(float(bars["vwap"].iloc[0]), 100.1666666667, places=6)
             self.assertEqual(store.list_symbols("TW"), ["2330"])
 
+    def test_save_and_load_latest_tw_etf_super_export_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            first_run_id = store.save_tw_etf_super_export_run(
+                ytd_start="20260101",
+                ytd_end="20260309",
+                compare_start="20250101",
+                compare_end="20251231",
+                trade_date_anchor="20260309",
+                output_path="/tmp/tw_etf_super_export_20260309.csv",
+                row_count=100,
+                column_count=28,
+                payload={"frame": {"rows": [{"代碼": "0050"}]}},
+            )
+            second_run_id = store.save_tw_etf_super_export_run(
+                ytd_start="20260101",
+                ytd_end="20260310",
+                compare_start="20250101",
+                compare_end="20251231",
+                trade_date_anchor="20260310",
+                output_path="/tmp/tw_etf_super_export_20260310.csv",
+                row_count=123,
+                column_count=29,
+                payload={"csv_sha256": "abc123", "frame": {"rows": [{"代碼": "0052"}]}},
+            )
+
+            self.assertNotEqual(first_run_id, second_run_id)
+            latest = store.load_latest_tw_etf_super_export_run()
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.run_id, second_run_id)
+            self.assertEqual(latest.trade_date_anchor, "20260310")
+            self.assertEqual(latest.output_path, "/tmp/tw_etf_super_export_20260310.csv")
+            self.assertEqual(latest.row_count, 123)
+            self.assertEqual(latest.column_count, 29)
+            self.assertEqual(latest.payload.get("csv_sha256"), "abc123")
+
     def test_intraday_ticks_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

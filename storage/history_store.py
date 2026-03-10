@@ -139,6 +139,21 @@ class BacktestReplayRun:
 
 
 @dataclass(frozen=True)
+class SuperExportRun:
+    run_id: str
+    ytd_start: str
+    ytd_end: str
+    compare_start: str
+    compare_end: str
+    trade_date_anchor: str
+    output_path: str
+    row_count: int
+    column_count: int
+    payload: dict[str, object]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class SymbolMetadata:
     symbol: str
     market: str
@@ -342,6 +357,21 @@ class HistoryStore:
                     error TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS tw_etf_super_export_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    ytd_start TEXT NOT NULL,
+                    ytd_end TEXT NOT NULL,
+                    compare_start TEXT NOT NULL,
+                    compare_end TEXT NOT NULL,
+                    trade_date_anchor TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    column_count INTEGER NOT NULL DEFAULT 0,
+                    payload_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS tw_etf_aum_history (
                     etf_code TEXT NOT NULL,
                     etf_name TEXT NOT NULL,
@@ -411,6 +441,9 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_bootstrap_runs_started_at
                     ON bootstrap_runs(started_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_super_export_runs_created_at
+                    ON tw_etf_super_export_runs(created_at DESC);
 
                 CREATE INDEX IF NOT EXISTS idx_tw_etf_aum_history_trade_date
                     ON tw_etf_aum_history(trade_date DESC);
@@ -1344,6 +1377,109 @@ class HistoryStore:
             params=params,
             payload=payload,
             created_at=created_at,
+        )
+
+    def save_tw_etf_super_export_run(
+        self,
+        *,
+        ytd_start: str,
+        ytd_end: str,
+        compare_start: str,
+        compare_end: str,
+        trade_date_anchor: str,
+        output_path: str,
+        row_count: int,
+        column_count: int,
+        payload: dict[str, object],
+    ) -> str:
+        now = datetime.now(tz=timezone.utc)
+        run_id = f"tw_etf_super_export:{now.strftime('%Y%m%dT%H%M%S%f')}"
+        with self._connect_ctx() as conn:
+            conn.execute(
+                """
+                INSERT INTO tw_etf_super_export_runs(
+                    run_id,
+                    created_at,
+                    ytd_start,
+                    ytd_end,
+                    compare_start,
+                    compare_end,
+                    trade_date_anchor,
+                    output_path,
+                    row_count,
+                    column_count,
+                    payload_json
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    now.isoformat(),
+                    str(ytd_start or "").strip(),
+                    str(ytd_end or "").strip(),
+                    str(compare_start or "").strip(),
+                    str(compare_end or "").strip(),
+                    str(trade_date_anchor or "").strip(),
+                    str(output_path or "").strip(),
+                    max(0, int(row_count)),
+                    max(0, int(column_count)),
+                    json.dumps(payload or {}, ensure_ascii=False, default=str),
+                ),
+            )
+        return run_id
+
+    def load_latest_tw_etf_super_export_run(self) -> SuperExportRun | None:
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    run_id,
+                    created_at,
+                    ytd_start,
+                    ytd_end,
+                    compare_start,
+                    compare_end,
+                    trade_date_anchor,
+                    output_path,
+                    row_count,
+                    column_count,
+                    payload_json
+                FROM tw_etf_super_export_runs
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+
+        created_at = datetime.now(tz=timezone.utc)
+        try:
+            created_at = datetime.fromisoformat(str(row[1]))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+        payload_obj: dict[str, object] = {}
+        try:
+            obj = json.loads(str(row[10] or "{}"))
+            if isinstance(obj, dict):
+                payload_obj = obj
+        except Exception:
+            payload_obj = {}
+
+        return SuperExportRun(
+            run_id=str(row[0] or ""),
+            created_at=created_at,
+            ytd_start=str(row[2] or ""),
+            ytd_end=str(row[3] or ""),
+            compare_start=str(row[4] or ""),
+            compare_end=str(row[5] or ""),
+            trade_date_anchor=str(row[6] or ""),
+            output_path=str(row[7] or ""),
+            row_count=max(0, int(row[8] or 0)),
+            column_count=max(0, int(row[9] or 0)),
+            payload=payload_obj,
         )
 
     def save_universe_snapshot(

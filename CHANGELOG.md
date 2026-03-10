@@ -19,6 +19,9 @@
   - 新增 `services/tw_etf_mis_sync.py`，可同步 TWSE MIS `all_etf.txt` + `getCategory.jsp?ex=tse&i=B0`
   - 新增 `tw_etf_mis_daily` 持久化表（DuckDB / SQLite），保存 `已發行單位 / 與前日差異 / 市價 / 預估NAV / 折溢價% / 前一營業日NAV`
   - 新增 CLI 指令 `realtime0052 sync-twse-etf-mis`
+- 新增 `realtime0052 export-tw-etf-super-table` CLI：
+  - 可在 terminal / crontab 直接同步 `台股 ETF 全類型總表` + 官方 ETF 日成交 + 官方 MIS 後匯出超級大表 CSV
+  - 新增 `tw_etf_super_export_runs`（DuckDB / SQLite）保存每次匯出期間、輸出檔路徑、列欄數與 payload 摘要
 - `台股 ETF 全類型總表` 新增「官方 ETF 日成交總表」區塊：
   - 顯示最近交易日的 `成交金額(億) / 成交股數 / 成交筆數 / 20日均成交金額 / 20日波動率 / 量能異常`
   - 沿用既有 ETF 名稱熱力圖導流與代碼回測導流
@@ -79,6 +82,8 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- Auto: updated .gitignore, README.md, cli.py, pyproject.toml, services/tw_etf_super_export.py, storage/__init__.py, ... (+6) [id:f2becf9d9c]
+- `pyproject.toml` 補上 setuptools build/discovery 設定，`uv run realtime0052 ...` 現在可直接建立 CLI entrypoint，適合放進 `crontab`。
 - `台股 ETF 全類型總表` 主表排序改為依 `台股代號` 由小到大，`編號` 也會依代號順序重編。
 - `台股 ETF 全類型總表` 頁面下方的「官方 ETF 日成交總表 / 官方 ETF MIS 指標總表 / 基金規模追蹤」也統一改為依 `台股代號` 由小到大排序。
 - Auto: updated app.py, services/tw_etf_daily_sync.py, services/tw_etf_mis_sync.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, ... (+2) [id:e7135a9dab]

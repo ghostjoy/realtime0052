@@ -1176,7 +1176,7 @@ wheels = [
 [[package]]
 name = "realtime-0052"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "duckdb" },

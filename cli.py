@@ -22,6 +22,7 @@ from services.bootstrap_loader import run_market_data_bootstrap
 from services.sync_orchestrator import normalize_symbols, sync_symbols_if_needed
 from services.tw_etf_daily_sync import sync_twse_etf_daily_market
 from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
+from services.tw_etf_super_export import export_tw_etf_super_table_artifact
 
 
 def _resolve_store():
@@ -210,6 +211,66 @@ def sync_twse_etf_mis(
         f"saved_rows={int(summary.get('saved_rows') or 0)}"
     )
     issues = summary.get("issues") if isinstance(summary, dict) else []
+    if isinstance(issues, list):
+        for issue in issues[:10]:
+            click.echo(f"! {issue}")
+
+
+@cli.command()
+@click.option("--out", help="Output CSV path. Defaults to ./tw_etf_super_export_<trade_day>.csv")
+@click.option("--ytd-start", help="YTD start date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--ytd-end", help="YTD end date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--compare-start", help="Compare period start date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--compare-end", help="Compare period end date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--daily-lookback-days", default=14, type=int, show_default=True)
+@click.option("--force", is_flag=True, default=False, help="Force re-fetch for covered official datasets")
+def export_tw_etf_super_table(
+    out: str | None,
+    ytd_start: str | None,
+    ytd_end: str | None,
+    compare_start: str | None,
+    compare_end: str | None,
+    daily_lookback_days: int,
+    force: bool,
+) -> None:
+    """Sync sources and export TW ETF super table CSV."""
+    store = _resolve_store()
+    result = export_tw_etf_super_table_artifact(
+        store=store,
+        out=out,
+        ytd_start=ytd_start,
+        ytd_end=ytd_end,
+        compare_start=compare_start,
+        compare_end=compare_end,
+        force=bool(force),
+        daily_lookback_days=max(1, int(daily_lookback_days)),
+    )
+    click.echo(
+        "tw_etf_super_export "
+        f"ytd={result.get('ytd_start')}->{result.get('ytd_end')} "
+        f"compare={result.get('compare_start')}->{result.get('compare_end')} "
+        f"trade_date={result.get('trade_date_anchor')}"
+    )
+    click.echo(
+        f"path={result.get('output_path')} "
+        f"rows={int(result.get('row_count') or 0)} "
+        f"cols={int(result.get('column_count') or 0)} "
+        f"run_id={result.get('run_id') or 'n/a'}"
+    )
+    refresh_summary = result.get("refresh_summary") if isinstance(result, dict) else {}
+    if isinstance(refresh_summary, dict):
+        main_summary = refresh_summary.get("main", {})
+        daily_summary = refresh_summary.get("daily_market", {})
+        mis_summary = refresh_summary.get("mis", {})
+        main_used_trade_date = str(main_summary.get("used_trade_date") or "").strip()
+        click.echo(
+            "refresh "
+            f"main={str(main_summary.get('status') or 'unknown')}"
+            f"{f'({main_used_trade_date})' if main_used_trade_date else ''} "
+            f"daily=synced:{int(daily_summary.get('synced_days') or 0)}/saved:{int(daily_summary.get('saved_rows') or 0)} "
+            f"mis=synced:{int(mis_summary.get('synced_days') or 0)}/saved:{int(mis_summary.get('saved_rows') or 0)}"
+        )
+    issues = result.get("issues") if isinstance(result, dict) else []
     if isinstance(issues, list):
         for issue in issues[:10]:
             click.echo(f"! {issue}")

@@ -89,6 +89,9 @@ git config --get core.hooksPath
   - `universe_snapshots`
   - `heatmap_runs`
   - `rotation_runs`
+  - `tw_etf_daily_market`（TWSE 官方 ETF 日成交）
+  - `tw_etf_mis_daily`（TWSE 官方 ETF MIS 指標）
+  - `tw_etf_super_export_runs`（超級大表 CLI 匯出紀錄）
   - `market_snapshots`（外部來源快照、來源鏈路與新鮮度）
 
 ```bash
@@ -114,11 +117,13 @@ uv run realtime0052 info
 uv run realtime0052 sync --market TW --symbols 0050,0052 --days 60
 uv run realtime0052 sync-twse-etf-daily --start 2026-03-01 --end 2026-03-08
 uv run realtime0052 sync-twse-etf-mis
+uv run realtime0052 export-tw-etf-super-table --out ./tw_etf_super_export_latest.csv
 uv run realtime0052 backtest --symbol 0050 --market TW --strategy buy_hold
 uv run realtime0052 bootstrap --scope both --years 5
 ```
 
 - 預載流程會先建立 `symbol_metadata`，再批次同步 `daily_bars`，接著同步 `tw_etf_daily_market` 與 `tw_etf_mis_daily`，最後把任務摘要寫入 `bootstrap_runs`。
+- `export-tw-etf-super-table` 適合放進 `crontab`：會先同步主總表來源 + 官方 ETF 日成交 + 官方 MIS，再輸出 CSV，並把該次匯出摘要寫入 DuckDB `tw_etf_super_export_runs`。
 
 ### 3) 回測（第一版）
 
