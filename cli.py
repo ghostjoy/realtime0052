@@ -223,7 +223,9 @@ def sync_twse_etf_mis(
 @click.option("--compare-start", help="Compare period start date (YYYY-MM-DD or YYYYMMDD)")
 @click.option("--compare-end", help="Compare period end date (YYYY-MM-DD or YYYYMMDD)")
 @click.option("--daily-lookback-days", default=14, type=int, show_default=True)
-@click.option("--force", is_flag=True, default=False, help="Force re-fetch for covered official datasets")
+@click.option(
+    "--force", is_flag=True, default=False, help="Force re-fetch for covered official datasets"
+)
 def export_tw_etf_super_table(
     out: str | None,
     ytd_start: str | None,

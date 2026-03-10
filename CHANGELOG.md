@@ -82,6 +82,7 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- Auto: updated app.py, cli.py, services/tw_etf_super_export.py, tests/test_active_etf_page.py [id:e0d7c04121]
 - Auto: updated .gitignore, README.md, cli.py, pyproject.toml, services/tw_etf_super_export.py, storage/__init__.py, ... (+6) [id:f2becf9d9c]
 - `pyproject.toml` 補上 setuptools build/discovery 設定，`uv run realtime0052 ...` 現在可直接建立 CLI entrypoint，適合放進 `crontab`。
 - `台股 ETF 全類型總表` 主表排序改為依 `台股代號` 由小到大，`編號` 也會依代號順序重編。

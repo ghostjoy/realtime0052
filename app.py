@@ -433,8 +433,10 @@ def _build_tw_etf_super_export_table(
             continue
         work = frame.copy()
         work["代碼"] = work["代碼"].astype(str).str.strip().str.upper()
-        work = work[work["代碼"] != ""].drop_duplicates(subset=["代碼"], keep="first").reset_index(
-            drop=True
+        work = (
+            work[work["代碼"] != ""]
+            .drop_duplicates(subset=["代碼"], keep="first")
+            .reset_index(drop=True)
         )
         if work.empty:
             continue
@@ -448,9 +450,13 @@ def _build_tw_etf_super_export_table(
     result = prepared[0][1].copy()
     for source_name, frame in prepared[1:]:
         merge_suffix = f"__{source_name}"
-        result = result.merge(frame, on="代碼", how="outer", sort=False, suffixes=("", merge_suffix))
+        result = result.merge(
+            frame, on="代碼", how="outer", sort=False, suffixes=("", merge_suffix)
+        )
         duplicated_columns = [
-            column for column in frame.columns if column != "代碼" and f"{column}{merge_suffix}" in result.columns
+            column
+            for column in frame.columns
+            if column != "代碼" and f"{column}{merge_suffix}" in result.columns
         ]
         for column in duplicated_columns:
             result[column] = _coalesce_tw_etf_super_export_columns(
@@ -8055,7 +8061,9 @@ def _render_tw_etf_all_types_view():
                     file_name=export_file_name,
                 )
                 st.session_state.pop(_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY, None)
-                st.caption("已先更新主總表、官方日成交、官方 MIS，再自動下載 CSV 並開啟 Google Sheets。")
+                st.caption(
+                    "已先更新主總表、官方日成交、官方 MIS，再自動下載 CSV 並開啟 Google Sheets。"
+                )
 
         history_df = store.load_tw_etf_aum_history(
             etf_codes=table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),

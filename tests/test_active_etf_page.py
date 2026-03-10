@@ -146,7 +146,13 @@ class ActiveEtfPageTests(unittest.TestCase):
     def test_build_tw_etf_super_export_table_prefers_main_and_sanitizes_links(self):
         main = pd.DataFrame(
             [
-                {"編號": "—", "代碼": "^TWII", "ETF": "台股大盤", "類型": "大盤", "YTD績效(%)": 8.88},
+                {
+                    "編號": "—",
+                    "代碼": "^TWII",
+                    "ETF": "台股大盤",
+                    "類型": "大盤",
+                    "YTD績效(%)": 8.88,
+                },
                 {
                     "編號": "1",
                     "代碼": "0050",
@@ -223,7 +229,9 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "app._fetch_twse_snapshot_network_single",
                 return_value=(
                     "20260309",
-                    pd.DataFrame([{"code": "0050", "name": "元大台灣50", "open": 1.0, "close": 1.1}]),
+                    pd.DataFrame(
+                        [{"code": "0050", "name": "元大台灣50", "open": 1.0, "close": 1.1}]
+                    ),
                 ),
             ) as main_sync_mock,
             patch(

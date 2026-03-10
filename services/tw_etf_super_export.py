@@ -209,7 +209,9 @@ def build_tw_etf_all_types_main_export_frame(
         "昨收": _truncate_value(market_daily_prev_close, digits=2)
         if market_daily_prev_close is not None
         else None,
-        "開盤": _truncate_value(market_daily_open, digits=2) if market_daily_open is not None else None,
+        "開盤": _truncate_value(market_daily_open, digits=2)
+        if market_daily_open is not None
+        else None,
         "收盤": _truncate_value(market_daily_close, digits=2)
         if market_daily_close is not None
         else None,
@@ -298,8 +300,10 @@ def build_tw_etf_super_export_table(
             continue
         work = frame.copy()
         work["代碼"] = work["代碼"].astype(str).str.strip().str.upper()
-        work = work[work["代碼"] != ""].drop_duplicates(subset=["代碼"], keep="first").reset_index(
-            drop=True
+        work = (
+            work[work["代碼"] != ""]
+            .drop_duplicates(subset=["代碼"], keep="first")
+            .reset_index(drop=True)
         )
         if work.empty:
             continue
@@ -313,9 +317,13 @@ def build_tw_etf_super_export_table(
     result = prepared[0][1].copy()
     for source_name, frame in prepared[1:]:
         merge_suffix = f"__{source_name}"
-        result = result.merge(frame, on="代碼", how="outer", sort=False, suffixes=("", merge_suffix))
+        result = result.merge(
+            frame, on="代碼", how="outer", sort=False, suffixes=("", merge_suffix)
+        )
         duplicated_columns = [
-            column for column in frame.columns if column != "代碼" and f"{column}{merge_suffix}" in result.columns
+            column
+            for column in frame.columns
+            if column != "代碼" and f"{column}{merge_suffix}" in result.columns
         ]
         for column in duplicated_columns:
             result[column] = _coalesce_tw_etf_super_export_columns(
