@@ -2997,12 +2997,12 @@ class DuckHistoryStore:
         *,
         rows: list[dict[str, object]],
         trade_date: str,
-        keep_days: int = 22,
+        keep_days: int = 0,
     ) -> int:
         try:
             keep = int(keep_days)
         except Exception:
-            keep = 22
+            keep = 0
         try:
             trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
         except Exception:
@@ -3069,12 +3069,12 @@ class DuckHistoryStore:
         self,
         *,
         etf_codes: list[str],
-        keep_days: int = 22,
+        keep_days: int = 0,
     ) -> pd.DataFrame:
         try:
             keep = int(keep_days)
         except Exception:
-            keep = 22
+            keep = 0
         keep_limit = keep if keep > 0 else None
         normalized_codes: list[str] = []
         seen: set[str] = set()

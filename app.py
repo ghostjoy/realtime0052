@@ -4741,10 +4741,10 @@ def _blend_hex_color(start_color: str, end_color: str, ratio: float) -> str:
 def _compute_tw_etf_aum_alert_fill_color(
     pct: float,
     *,
-    up_threshold: float = 0.10,
-    down_threshold: float | None = -0.10,
-    up_cap: float = 0.30,
-    down_cap: float = -0.30,
+    up_threshold: float = 0.0,
+    down_threshold: float | None = 0.0,
+    up_cap: float = 0.20,
+    down_cap: float = -0.20,
 ) -> str | None:
     if pct > float(up_threshold):
         upper_bound = max(float(up_cap), float(up_threshold))
@@ -4752,7 +4752,7 @@ def _compute_tw_etf_aum_alert_fill_color(
             ratio = 1.0
         else:
             ratio = (float(pct) - float(up_threshold)) / (upper_bound - float(up_threshold))
-        return _blend_hex_color("#e8f7e8", "#1f7a1f", ratio)
+        return _blend_hex_color("#f2fbf4", "#b8e3c2", ratio)
     if (down_threshold is not None) and (pct < float(down_threshold)):
         lower_bound = min(float(down_cap), float(down_threshold))
         if lower_bound >= float(down_threshold):
@@ -4761,17 +4761,17 @@ def _compute_tw_etf_aum_alert_fill_color(
             ratio = (abs(float(pct)) - abs(float(down_threshold))) / (
                 abs(lower_bound) - abs(float(down_threshold))
             )
-        return _blend_hex_color("#fdecec", "#b42318", ratio)
+        return _blend_hex_color("#fff4f4", "#f1c2c2", ratio)
     return None
 
 
 def _compute_tw_etf_aum_alert_mask(
     frame: pd.DataFrame,
     *,
-    up_threshold: float = 0.10,
-    down_threshold: float | None = -0.10,
-    up_cap: float = 0.30,
-    down_cap: float = -0.30,
+    up_threshold: float = 0.0,
+    down_threshold: float | None = 0.0,
+    up_cap: float = 0.20,
+    down_cap: float = -0.20,
 ) -> dict[tuple[int, str], str]:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return {}
@@ -4814,10 +4814,10 @@ def _style_tw_etf_aum_history_table(frame: pd.DataFrame):
         work[col] = pd.to_numeric(work[col], errors="coerce")
     alert_mask = _compute_tw_etf_aum_alert_mask(
         work,
-        up_threshold=0.10,
-        down_threshold=-0.10,
-        up_cap=0.30,
-        down_cap=-0.30,
+        up_threshold=0.0,
+        down_threshold=0.0,
+        up_cap=0.20,
+        down_cap=-0.20,
     )
 
     def _apply_row(row: pd.Series) -> list[str]:

@@ -954,55 +954,65 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         out = _compute_tw_etf_aum_alert_mask(
             frame,
-            up_threshold=0.10,
-            down_threshold=-0.10,
-            up_cap=0.30,
-            down_cap=-0.30,
+            up_threshold=0.0,
+            down_threshold=0.0,
+            up_cap=0.20,
+            down_cap=-0.20,
         )
         up_pct = (120.0 - 100.0) / 100.0
         down_pct = (96.0 - 120.0) / 120.0
+        rebound_pct = (105.0 - 96.0) / 96.0
         self.assertEqual(
             out.get((0, "2026-01-03(億)")),
             _compute_tw_etf_aum_alert_fill_color(
                 up_pct,
-                up_threshold=0.10,
-                down_threshold=-0.10,
-                up_cap=0.30,
-                down_cap=-0.30,
+                up_threshold=0.0,
+                down_threshold=0.0,
+                up_cap=0.20,
+                down_cap=-0.20,
             ),
         )
         self.assertEqual(
             out.get((0, "2026-01-04(億)")),
             _compute_tw_etf_aum_alert_fill_color(
                 down_pct,
-                up_threshold=0.10,
-                down_threshold=-0.10,
-                up_cap=0.30,
-                down_cap=-0.30,
+                up_threshold=0.0,
+                down_threshold=0.0,
+                up_cap=0.20,
+                down_cap=-0.20,
             ),
         )
-        self.assertNotIn((0, "2026-01-05(億)"), out)
+        self.assertEqual(
+            out.get((0, "2026-01-05(億)")),
+            _compute_tw_etf_aum_alert_fill_color(
+                rebound_pct,
+                up_threshold=0.0,
+                down_threshold=0.0,
+                up_cap=0.20,
+                down_cap=-0.20,
+            ),
+        )
 
     def test_compute_tw_etf_aum_alert_fill_color_caps_at_gradient_end(self):
         self.assertEqual(
             _compute_tw_etf_aum_alert_fill_color(
                 0.45,
-                up_threshold=0.10,
-                down_threshold=-0.10,
-                up_cap=0.30,
-                down_cap=-0.30,
+                up_threshold=0.0,
+                down_threshold=0.0,
+                up_cap=0.20,
+                down_cap=-0.20,
             ),
-            "#1f7a1f",
+            "#b8e3c2",
         )
         self.assertEqual(
             _compute_tw_etf_aum_alert_fill_color(
                 -0.45,
-                up_threshold=0.10,
-                down_threshold=-0.10,
-                up_cap=0.30,
-                down_cap=-0.30,
+                up_threshold=0.0,
+                down_threshold=0.0,
+                up_cap=0.20,
+                down_cap=-0.20,
             ),
-            "#b42318",
+            "#f1c2c2",
         )
 
     def test_decorate_tw_etf_aum_history_links(self):

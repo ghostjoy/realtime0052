@@ -82,6 +82,10 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- Auto: updated app.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, tests/test_duck_store.py, tests/test_history_store.py [id:7cbf4d98a6]
+- `台股 ETF 全類型總表` 的基金規模追蹤改為預設永久保留：
+  - `DuckHistoryStore` / `HistoryStore` 的 `tw_etf_aum_history` 預設 `keep_days=0`，未顯式指定時也不裁切歷史。
+  - 追蹤表底色規則改為「相較前一日增加即淡綠、減少即淡紅」，並依單日增減比例套用較淺色階。
 - Auto: updated app.py, cli.py, services/tw_etf_super_export.py, tests/test_active_etf_page.py [id:e0d7c04121]
 - Auto: updated .gitignore, README.md, cli.py, pyproject.toml, services/tw_etf_super_export.py, storage/__init__.py, ... (+6) [id:f2becf9d9c]
 - `pyproject.toml` 補上 setuptools build/discovery 設定，`uv run realtime0052 ...` 現在可直接建立 CLI entrypoint，適合放進 `crontab`。

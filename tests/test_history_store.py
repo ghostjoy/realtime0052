@@ -221,6 +221,24 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(int((hist_all["etf_code"] == "0050").sum()), 4)
             self.assertIn("2026-01-02", set(hist_all["trade_date"].astype(str)))
 
+    def test_tw_etf_aum_history_defaults_to_keep_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            dates = ["2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]
+            for idx, trade_date in enumerate(dates):
+                saved = store.save_tw_etf_aum_snapshot(
+                    rows=[
+                        {"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1000 + idx},
+                    ],
+                    trade_date=trade_date,
+                )
+                self.assertEqual(saved, 1)
+
+            hist_all = store.load_tw_etf_aum_history(etf_codes=["0050"])
+            self.assertEqual(int((hist_all["etf_code"] == "0050").sum()), 4)
+            self.assertIn("2026-01-02", set(hist_all["trade_date"].astype(str)))
+
     def test_clear_tw_etf_aum_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"
