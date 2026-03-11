@@ -82,6 +82,9 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- Auto: updated app.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, tests/test_duck_store.py [id:71da411457]
+- 首頁標題區新增來源 IP（推測）與近期連線清單，並把訪客 session 寫入 DuckDB `client_visits`。
+- 新增 `留言板` 卡片頁：支援主留言、回覆與 DuckDB 持久化保存。
 - `台股 ETF 全類型總表` 新增 `全表更新` 按鈕，集中觸發主總表、官方日成交、官方 MIS 與基金規模追蹤四段更新。
 - `台股 ETF 全類型總表` 的 `更新規模追蹤` 按鈕移到「基金規模追蹤」區塊，避免與 `更新最新市況` 混在同一列。
 - 移除 `台股 ETF 全類型總表` 的「從今日重置」按鈕與相關重置機制，避免誤刪 DuckDB 內的基金規模追蹤歷史。

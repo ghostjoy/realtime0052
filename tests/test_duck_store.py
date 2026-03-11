@@ -485,6 +485,65 @@ class DuckStoreTests(unittest.TestCase):
             self.assertEqual(int((hist_all["etf_code"] == "0050").sum()), 4)
             self.assertIn("2026-01-02", set(hist_all["trade_date"].astype(str)))
 
+    def test_client_visit_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            self.assertTrue(
+                store.upsert_client_visit(
+                    session_id="sess_1",
+                    ip_address="203.0.113.10",
+                    forwarded_for="203.0.113.10, 10.0.0.1",
+                    user_agent="pytest",
+                    last_page="留言板",
+                )
+            )
+            self.assertTrue(
+                store.upsert_client_visit(
+                    session_id="sess_1",
+                    ip_address="203.0.113.10",
+                    user_agent="pytest",
+                    last_page="台股 ETF 全類型總表",
+                )
+            )
+            visits = store.list_recent_client_visits(limit=10)
+            self.assertEqual(len(visits), 1)
+            self.assertEqual(visits[0].ip_address, "203.0.113.10")
+            self.assertEqual(visits[0].visit_count, 2)
+            self.assertEqual(visits[0].last_page, "台股 ETF 全類型總表")
+
+    def test_message_board_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            root_id = store.save_message_board_entry(
+                author_name="訪客A",
+                body="第一則留言",
+                ip_address="203.0.113.10",
+            )
+            reply_id = store.save_message_board_entry(
+                author_name="訪客B",
+                body="這是回覆",
+                parent_message_id=root_id,
+                ip_address="198.51.100.8",
+            )
+            rows = store.list_message_board_entries(limit=10)
+            ids = {row.message_id for row in rows}
+            self.assertIn(root_id, ids)
+            self.assertIn(reply_id, ids)
+            reply_row = next(row for row in rows if row.message_id == reply_id)
+            self.assertEqual(reply_row.parent_message_id, root_id)
+
     def test_clear_tw_etf_aum_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -122,6 +122,30 @@ class HeatmapHubEntry:
 
 
 @dataclass(frozen=True)
+class ClientVisit:
+    session_id: str
+    ip_address: str
+    forwarded_for: str
+    user_agent: str
+    last_page: str
+    visit_count: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass(frozen=True)
+class MessageBoardEntry:
+    message_id: str
+    parent_message_id: str
+    author_name: str
+    body: str
+    ip_address: str
+    user_agent: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class RotationRun:
     universe_id: str
     run_key: str

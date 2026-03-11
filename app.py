@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import csv
+import html
 import json
 import logging
 import math
 import re
 import threading
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
@@ -2285,12 +2287,14 @@ PAGE_CARDS = [
     {"key": "00735 熱力圖", "desc": "00735 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "0052 熱力圖", "desc": "0052 成分股回測的相對大盤熱力圖。"},
+    {"key": "留言板", "desc": "訪客可留言提問，也可直接回覆既有留言。"},
     {"key": "資料庫檢視", "desc": "直接查看 DuckDB 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
 ]
 DEFAULT_ACTIVE_PAGE = "台股 ETF 全類型總表"
 DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
+CLIENT_VISIT_SESSION_KEY = "client_visit_session_id"
 
 
 def _runtime_page_cards() -> list[dict[str, str]]:
@@ -2323,6 +2327,344 @@ def _safe_float(value: object) -> float | None:
     if math.isnan(fv) or math.isinf(fv):
         return None
     return fv
+
+
+def _streamlit_context_headers() -> dict[str, str]:
+    ctx = getattr(st, "context", None)
+    headers = getattr(ctx, "headers", None)
+    if headers is None:
+        return {}
+    try:
+        items = headers.items()
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for key, value in items:
+        text_key = str(key or "").strip()
+        text_value = str(value or "").strip()
+        if text_key and text_value:
+            out[text_key] = text_value
+    return out
+
+
+def _extract_client_ip_from_headers(headers: dict[str, str]) -> tuple[str, str]:
+    if not isinstance(headers, dict):
+        return "", ""
+    lookup = {str(k or "").strip().lower(): str(v or "").strip() for k, v in headers.items()}
+    forwarded_for = lookup.get("x-forwarded-for", "")
+    if forwarded_for:
+        first_ip = str(forwarded_for.split(",")[0]).strip().strip('"')
+        if first_ip:
+            return first_ip, forwarded_for
+    for key in ("x-real-ip", "cf-connecting-ip", "true-client-ip", "fly-client-ip"):
+        value = lookup.get(key, "")
+        if value:
+            return value.strip().strip('"'), forwarded_for
+    forwarded = lookup.get("forwarded", "")
+    if forwarded:
+        m = re.search(r"for=(?:\"?\[?)([^;\],\"]+)", forwarded)
+        if m:
+            return str(m.group(1)).strip(), forwarded_for
+    return "", forwarded_for
+
+
+def _build_client_connection_context(*, page_hint: str = "") -> dict[str, str]:
+    headers = _streamlit_context_headers()
+    ip_address, forwarded_for = _extract_client_ip_from_headers(headers)
+    user_agent = str(headers.get("User-Agent") or headers.get("user-agent") or "").strip()
+    return {
+        "ip_address": ip_address,
+        "forwarded_for": forwarded_for,
+        "user_agent": user_agent,
+        "page_hint": str(page_hint or "").strip(),
+    }
+
+
+def _capture_client_visit_context(*, page_hint: str = "") -> dict[str, str]:
+    ctx = _build_client_connection_context(page_hint=page_hint)
+    store = _history_store()
+    writer = getattr(store, "upsert_client_visit", None)
+    if not callable(writer):
+        return ctx
+    session_id = str(st.session_state.get(CLIENT_VISIT_SESSION_KEY, "")).strip()
+    if not session_id:
+        session_id = uuid.uuid4().hex
+        st.session_state[CLIENT_VISIT_SESSION_KEY] = session_id
+    try:
+        writer(
+            session_id=session_id,
+            ip_address=ctx.get("ip_address", ""),
+            forwarded_for=ctx.get("forwarded_for", ""),
+            user_agent=ctx.get("user_agent", ""),
+            last_page=ctx.get("page_hint", ""),
+        )
+    except Exception:
+        return ctx
+    return ctx
+
+
+def _format_client_ip_label(ip_address: object) -> str:
+    text = str(ip_address or "").strip()
+    return text or "unknown"
+
+
+def _truncate_text(value: object, *, max_len: int = 80) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max(0, max_len - 1)] + "…"
+
+
+def _load_recent_client_visits(limit: int = 12) -> list[Any]:
+    store = _history_store()
+    loader = getattr(store, "list_recent_client_visits", None)
+    if not callable(loader):
+        return []
+    try:
+        return list(loader(limit=limit))
+    except Exception:
+        return []
+
+
+def _render_connection_status_near_title(client_ctx: dict[str, str]) -> None:
+    ip_label = _format_client_ip_label(client_ctx.get("ip_address"))
+    st.caption(f"來源IP（推測）：`{ip_label}`")
+    visits = _load_recent_client_visits(limit=10)
+    if not visits:
+        return
+    with st.expander("最近連線", expanded=False):
+        rows: list[dict[str, object]] = []
+        for row in visits:
+            rows.append(
+                {
+                    "來源IP": _format_client_ip_label(getattr(row, "ip_address", "")),
+                    "最近頁面": str(getattr(row, "last_page", "") or "—").strip() or "—",
+                    "最近時間": getattr(row, "last_seen_at", datetime.now(tz=timezone.utc))
+                    .astimezone()
+                    .strftime("%Y-%m-%d %H:%M:%S"),
+                    "互動次數": int(getattr(row, "visit_count", 0) or 0),
+                    "裝置": _truncate_text(getattr(row, "user_agent", ""), max_len=70) or "—",
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+def _load_message_board_entries(limit: int = 120) -> list[Any]:
+    store = _history_store()
+    loader = getattr(store, "list_message_board_entries", None)
+    if not callable(loader):
+        return []
+    try:
+        return list(loader(limit=limit))
+    except Exception:
+        return []
+
+
+def _build_message_board_threads(entries: list[Any]) -> list[dict[str, Any]]:
+    roots: list[Any] = []
+    replies_by_parent: dict[str, list[Any]] = {}
+    for entry in entries:
+        parent_id = str(getattr(entry, "parent_message_id", "") or "").strip()
+        if parent_id:
+            replies_by_parent.setdefault(parent_id, []).append(entry)
+        else:
+            roots.append(entry)
+    roots.sort(key=lambda item: getattr(item, "created_at", datetime.min), reverse=True)
+    for reply_rows in replies_by_parent.values():
+        reply_rows.sort(key=lambda item: getattr(item, "created_at", datetime.min))
+    return [{"root": root, "replies": replies_by_parent.get(str(getattr(root, "message_id", "")), [])} for root in roots]
+
+
+def _render_message_board_view():
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stForm"] {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 12px;
+            padding: 1.1rem 1.1rem 0.35rem 1.1rem;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+        }
+        div[data-testid="stForm"] textarea {
+            background: #ffffff !important;
+            border: 1px solid #d0d7de !important;
+            border-radius: 10px !important;
+            color: #1f2328 !important;
+            font-size: 1.02rem !important;
+            line-height: 1.7 !important;
+            padding: 1rem 1.05rem !important;
+            font-family: "Noto Sans TC", "PingFang TC", "Segoe UI", sans-serif !important;
+        }
+        div[data-testid="stForm"] label {
+            color: #57606a !important;
+            font-size: 0.94rem !important;
+            font-weight: 600 !important;
+        }
+        div[data-testid="stForm"] button {
+            border-radius: 10px !important;
+            font-weight: 600 !important;
+        }
+        .message-board-entry {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 12px;
+            padding: 1rem 1.1rem 0.95rem 1.1rem;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+        }
+        .message-board-meta {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 1rem;
+            margin-bottom: 0.55rem;
+        }
+        .message-board-time {
+            font-size: 0.86rem;
+            color: #57606a;
+        }
+        .message-board-body {
+            color: #1f2328;
+            font-size: 1.02rem;
+            line-height: 1.8;
+            white-space: normal;
+        }
+        .message-board-replies {
+            margin-top: 1rem;
+            padding-top: 0.9rem;
+            border-top: 1px solid #d8dee4;
+        }
+        .message-board-reply {
+            background: #f6f8fa;
+            border: 1px solid #d8dee4;
+            border-radius: 10px;
+            padding: 0.85rem 0.95rem;
+            margin-top: 0.75rem;
+        }
+        .message-board-reply-time {
+            font-size: 0.82rem;
+            color: #57606a;
+            margin-bottom: 0.35rem;
+        }
+        .message-board-section-title {
+            font-size: 0.88rem;
+            font-weight: 700;
+            color: #57606a;
+            letter-spacing: 0.02em;
+            margin-top: 0.1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.subheader("留言板")
+    st.caption("可直接留言提問，也可回覆既有留言。內容會保存到 DuckDB。")
+    client_ctx = _build_client_connection_context(
+        page_hint=str(st.session_state.get("active_page", "留言板"))
+    )
+    store = _history_store()
+    writer = getattr(store, "save_message_board_entry", None)
+    if not callable(writer):
+        st.error("目前 store 未提供留言板寫入 API。")
+        return
+
+    with st.container():
+        _render_card_section_header("新增留言", "簡單留下問題、觀察或回饋。")
+        with st.form("message_board_new_entry", clear_on_submit=True):
+            body = st.text_area(
+                "留言內容",
+                value="",
+                height=220,
+                placeholder="輸入你想提問、回饋或討論的內容",
+            )
+            submitted = st.form_submit_button("送出留言", use_container_width=True)
+        if submitted:
+            text = str(body or "").strip()
+            if not text:
+                st.warning("請先輸入留言內容。")
+            else:
+                try:
+                    writer(
+                        author_name="訪客",
+                        body=text,
+                        ip_address=client_ctx.get("ip_address", ""),
+                        user_agent=client_ctx.get("user_agent", ""),
+                    )
+                    st.success("留言已送出。")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(f"留言送出失敗：{exc}")
+
+    entries = _load_message_board_entries(limit=200)
+    threads = _build_message_board_threads(entries)
+    if not threads:
+        st.info("目前還沒有留言。")
+        return
+
+    for thread in threads:
+        root = thread["root"]
+        replies = thread["replies"]
+        root_id = str(getattr(root, "message_id", "") or "").strip()
+        created_at = getattr(root, "created_at", datetime.now(tz=timezone.utc))
+        body_text = str(getattr(root, "body", "") or "").strip()
+        with st.container(border=True):
+            body_html = html.escape(body_text).replace("\n", "<br>")
+            st.markdown(
+                (
+                    "<div class='message-board-entry'>"
+                    "<div class='message-board-meta'>"
+                    f"<div class='message-board-time'>{created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} · 回覆 {len(replies)}</div>"
+                    "</div>"
+                    f"<div class='message-board-body'>{body_html}</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+            if replies:
+                st.markdown("<div class='message-board-replies'>", unsafe_allow_html=True)
+                st.markdown("<div class='message-board-section-title'>回覆</div>", unsafe_allow_html=True)
+                for reply in replies:
+                    reply_created = getattr(reply, "created_at", datetime.now(tz=timezone.utc))
+                    reply_html = html.escape(str(getattr(reply, "body", "") or "").strip()).replace(
+                        "\n", "<br>"
+                    )
+                    st.markdown(
+                        (
+                            "<div class='message-board-reply'>"
+                            f"<div class='message-board-reply-time'>{reply_created.astimezone().strftime('%Y-%m-%d %H:%M:%S')}</div>"
+                            f"<div class='message-board-body'>{reply_html}</div>"
+                            "</div>"
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                st.markdown("</div>", unsafe_allow_html=True)
+            with st.expander("回覆這則留言", expanded=False):
+                with st.form(f"message_board_reply_{root_id}", clear_on_submit=True):
+                    reply_body = st.text_area(
+                        "回覆內容",
+                        value="",
+                        height=170,
+                        key=f"reply_body_{root_id}",
+                        placeholder="輸入你的回覆",
+                    )
+                    reply_submitted = st.form_submit_button("送出回覆", use_container_width=True)
+                if reply_submitted:
+                    text = str(reply_body or "").strip()
+                    if not text:
+                        st.warning("請先輸入回覆內容。")
+                    else:
+                        try:
+                            writer(
+                                author_name="訪客",
+                                body=text,
+                                parent_message_id=root_id,
+                                ip_address=client_ctx.get("ip_address", ""),
+                                user_agent=client_ctx.get("user_agent", ""),
+                            )
+                            st.success("回覆已送出。")
+                            st.rerun()
+                        except Exception as exc:
+                            st.warning(f"回覆送出失敗：{exc}")
+            st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _format_as_of_token(value: object) -> str:
@@ -12861,7 +13203,10 @@ def main():
     _consume_heatmap_drilldown_query()
     _consume_backtest_drilldown_query()
     _auto_run_daily_incremental_refresh(_history_store())
+    current_page_hint = str(st.session_state.get("active_page", DEFAULT_ACTIVE_PAGE) or DEFAULT_ACTIVE_PAGE)
+    client_ctx = _capture_client_visit_context(page_hint=current_page_hint)
     st.title("股．海明威ETF研究中心")
+    _render_connection_status_near_title(client_ctx)
     st.caption(_runtime_stack_caption())
     _render_design_toolbox()
     active_page = _render_page_cards_nav()
@@ -12882,6 +13227,7 @@ def main():
         "00735 熱力圖": _render_00735_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
         "0052 熱力圖": _render_0052_heatmap_view,
+        "留言板": _render_message_board_view,
         "資料庫檢視": _render_db_browser_view,
         "新手教學": _render_tutorial_view,
     }

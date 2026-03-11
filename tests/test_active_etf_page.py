@@ -24,8 +24,10 @@ from app import (
     _auto_run_daily_incremental_refresh,
     _benchmark_candidates_tw,
     _blend_hex_color,
+    _build_client_connection_context,
     _build_consensus_representative_between,
     _build_data_health,
+    _build_message_board_threads,
     _build_rank_exit_table,
     _build_replay_source_hash,
     _build_snapshot_health,
@@ -56,6 +58,7 @@ from app import (
     _decorate_tw_etf_name_heatmap_links,
     _decorate_tw_etf_top10_ytd_table,
     _dynamic_heatmap_page_renderers,
+    _extract_client_ip_from_headers,
     _fetch_twse_snapshot_with_fallback,
     _fill_unresolved_tw_names,
     _filter_dataframe_by_keyword,
@@ -224,6 +227,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         fake_store = SimpleNamespace()
         with (
             patch("app._resolve_latest_tw_trade_day_token", return_value="20260309"),
+            patch("app._resolve_latest_tw_trade_date_iso", return_value="2026-03-09"),
             patch("app._clear_tw_etf_all_types_view_caches") as clear_mock,
             patch(
                 "app._fetch_twse_snapshot_network_single",
@@ -242,14 +246,36 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "app.sync_twse_etf_mis_daily",
                 return_value={"requested_days": 1, "synced_days": 1},
             ) as mis_mock,
+            patch(
+                "app._build_tw_etf_all_types_performance_table",
+                return_value=(
+                    pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                    {},
+                ),
+            ) as perf_mock,
+            patch(
+                "app._load_tw_etf_aum_billion_map",
+                return_value={"0050": 1234.0},
+            ) as aum_map_mock,
+            patch(
+                "app._build_tw_etf_aum_snapshot_rows",
+                return_value=[
+                    {"etf_code": "0050", "etf_name": "元大台灣50", "aum_billion": 1234.0}
+                ],
+            ) as aum_rows_mock,
         ):
+            fake_store.save_tw_etf_aum_snapshot = lambda **kwargs: 1
             out = _sync_tw_etf_all_types_export_sources(fake_store)
 
         self.assertEqual(clear_mock.call_count, 2)
         main_sync_mock.assert_called_once_with("20260309")
         daily_mock.assert_called_once_with(store=fake_store, lookback_days=14, force=True)
         mis_mock.assert_called_once_with(store=fake_store, force=True)
+        perf_mock.assert_called_once()
+        aum_map_mock.assert_called_once_with("20260309")
+        aum_rows_mock.assert_called_once()
         self.assertEqual(out.get("main", {}).get("status"), "synced")
+        self.assertEqual(out.get("aum_track", {}).get("status"), "synced")
         self.assertEqual(out.get("issues"), [])
 
     def test_auto_run_daily_incremental_refresh_schedules_background_future(self):
@@ -1014,6 +1040,45 @@ class ActiveEtfPageTests(unittest.TestCase):
             ),
             "#f1c2c2",
         )
+
+    def test_extract_client_ip_from_headers(self):
+        ip, forwarded = _extract_client_ip_from_headers(
+            {
+                "X-Forwarded-For": "203.0.113.10, 10.0.0.1",
+                "User-Agent": "pytest",
+            }
+        )
+        self.assertEqual(ip, "203.0.113.10")
+        self.assertEqual(forwarded, "203.0.113.10, 10.0.0.1")
+
+    def test_build_client_connection_context_uses_headers(self):
+        with patch("app._streamlit_context_headers", return_value={"X-Real-IP": "198.51.100.7"}):
+            out = _build_client_connection_context(page_hint="留言板")
+        self.assertEqual(out["ip_address"], "198.51.100.7")
+        self.assertEqual(out["page_hint"], "留言板")
+
+    def test_build_message_board_threads(self):
+        rows = [
+            SimpleNamespace(
+                message_id="root1",
+                parent_message_id="",
+                author_name="A",
+                body="root",
+                created_at=datetime(2026, 3, 10, 1, 0, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                message_id="reply1",
+                parent_message_id="root1",
+                author_name="B",
+                body="reply",
+                created_at=datetime(2026, 3, 10, 2, 0, tzinfo=timezone.utc),
+            ),
+        ]
+        out = _build_message_board_threads(rows)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["root"].message_id, "root1")
+        self.assertEqual(len(out[0]["replies"]), 1)
+        self.assertEqual(out[0]["replies"][0].message_id, "reply1")
 
     def test_decorate_tw_etf_aum_history_links(self):
         source = pd.DataFrame(

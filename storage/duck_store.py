@@ -20,8 +20,10 @@ from services.market_data_service import MarketDataService
 from storage.history_store import (
     BacktestReplayRun,
     BootstrapRun,
+    ClientVisit,
     HeatmapHubEntry,
     HeatmapRun,
+    MessageBoardEntry,
     RotationRun,
     SuperExportRun,
     SyncReport,
@@ -447,6 +449,37 @@ class DuckHistoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS client_visits (
+                    session_id VARCHAR,
+                    ip_address VARCHAR,
+                    forwarded_for VARCHAR,
+                    user_agent VARCHAR,
+                    last_page VARCHAR,
+                    visit_count BIGINT DEFAULT 0,
+                    first_seen_at VARCHAR,
+                    last_seen_at VARCHAR,
+                    UNIQUE(session_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_board_entries (
+                    id BIGINT,
+                    message_id VARCHAR,
+                    parent_message_id VARCHAR,
+                    author_name VARCHAR,
+                    body VARCHAR,
+                    ip_address VARCHAR,
+                    user_agent VARCHAR,
+                    created_at VARCHAR,
+                    updated_at VARCHAR,
+                    UNIQUE(message_id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS rotation_runs (
                     id BIGINT,
                     universe_id VARCHAR,
@@ -571,6 +604,12 @@ class DuckHistoryStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_heatmap_hub_entries_pin_updated ON heatmap_hub_entries(pin_as_card, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_client_visits_last_seen ON client_visits(last_seen_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_board_parent_created ON message_board_entries(parent_message_id, created_at)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_rotation_runs_universe_created_at ON rotation_runs(universe_id, created_at)"
@@ -723,6 +762,8 @@ class DuckHistoryStore:
                 "universe_snapshots",
                 "heatmap_runs",
                 "heatmap_hub_entries",
+                "client_visits",
+                "message_board_entries",
                 "rotation_runs",
                 "tw_etf_aum_history",
             ]:
@@ -3762,6 +3803,177 @@ class DuckHistoryStore:
                 (1 if bool(pin_as_card) else 0, now, code),
             )
             return True
+
+    def upsert_client_visit(
+        self,
+        *,
+        session_id: str,
+        ip_address: str,
+        forwarded_for: str = "",
+        user_agent: str = "",
+        last_page: str = "",
+    ) -> bool:
+        session_key = self._normalize_text(session_id)
+        if not session_key:
+            return False
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT visit_count, first_seen_at FROM client_visits WHERE session_id=?",
+                (session_key,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO client_visits(
+                        session_id, ip_address, forwarded_for, user_agent, last_page,
+                        visit_count, first_seen_at, last_seen_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_key,
+                        self._normalize_text(ip_address),
+                        self._normalize_text(forwarded_for),
+                        self._normalize_text(user_agent),
+                        self._normalize_text(last_page),
+                        1,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+                return True
+            visit_count = max(0, int(row[0] or 0)) + 1
+            first_seen_at = str(row[1] or now_iso)
+            conn.execute(
+                """
+                UPDATE client_visits
+                SET ip_address=?, forwarded_for=?, user_agent=?, last_page=?,
+                    visit_count=?, first_seen_at=?, last_seen_at=?
+                WHERE session_id=?
+                """,
+                (
+                    self._normalize_text(ip_address),
+                    self._normalize_text(forwarded_for),
+                    self._normalize_text(user_agent),
+                    self._normalize_text(last_page),
+                    visit_count,
+                    first_seen_at,
+                    now_iso,
+                    session_key,
+                ),
+            )
+            return True
+
+    def list_recent_client_visits(self, *, limit: int = 20) -> list[ClientVisit]:
+        try:
+            limit_value = max(1, min(int(limit), 200))
+        except Exception:
+            limit_value = 20
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT session_id, ip_address, forwarded_for, user_agent, last_page,
+                       visit_count, first_seen_at, last_seen_at
+                FROM client_visits
+                ORDER BY last_seen_at DESC, first_seen_at DESC, session_id ASC
+                LIMIT ?
+                """,
+                (limit_value,),
+            ).fetchall()
+        finally:
+            conn.close()
+        now = datetime.now(tz=timezone.utc)
+        out: list[ClientVisit] = []
+        for row in rows:
+            out.append(
+                ClientVisit(
+                    session_id=self._normalize_text(row[0]),
+                    ip_address=self._normalize_text(row[1]),
+                    forwarded_for=self._normalize_text(row[2]),
+                    user_agent=self._normalize_text(row[3]),
+                    last_page=self._normalize_text(row[4]),
+                    visit_count=max(0, int(row[5] or 0)),
+                    first_seen_at=self._parse_iso_datetime(row[6]) or now,
+                    last_seen_at=self._parse_iso_datetime(row[7]) or now,
+                )
+            )
+        return out
+
+    def save_message_board_entry(
+        self,
+        *,
+        author_name: str,
+        body: str,
+        parent_message_id: str = "",
+        ip_address: str = "",
+        user_agent: str = "",
+    ) -> str:
+        author = self._normalize_text(author_name) or "訪客"
+        text = self._normalize_text(body)
+        if not text:
+            raise ValueError("body is required")
+        parent_id = self._normalize_text(parent_message_id)
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        message_id = f"msg_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
+        with self._connect_ctx() as conn:
+            rid = self._next_id(conn, "message_board_entries")
+            conn.execute(
+                """
+                INSERT INTO message_board_entries(
+                    id, message_id, parent_message_id, author_name, body,
+                    ip_address, user_agent, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rid,
+                    message_id,
+                    parent_id,
+                    author[:40],
+                    text[:2000],
+                    self._normalize_text(ip_address),
+                    self._normalize_text(user_agent)[:300],
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        return message_id
+
+    def list_message_board_entries(self, *, limit: int = 200) -> list[MessageBoardEntry]:
+        try:
+            limit_value = max(1, min(int(limit), 1000))
+        except Exception:
+            limit_value = 200
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT message_id, parent_message_id, author_name, body,
+                       ip_address, user_agent, created_at, updated_at
+                FROM message_board_entries
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit_value,),
+            ).fetchall()
+        finally:
+            conn.close()
+        now = datetime.now(tz=timezone.utc)
+        out: list[MessageBoardEntry] = []
+        for row in rows:
+            out.append(
+                MessageBoardEntry(
+                    message_id=self._normalize_text(row[0]),
+                    parent_message_id=self._normalize_text(row[1]),
+                    author_name=self._normalize_text(row[2]) or "訪客",
+                    body=self._normalize_text(row[3]),
+                    ip_address=self._normalize_text(row[4]),
+                    user_agent=self._normalize_text(row[5]),
+                    created_at=self._parse_iso_datetime(row[6]) or now,
+                    updated_at=self._parse_iso_datetime(row[7]) or now,
+                )
+            )
+        return out
 
     def save_rotation_run(
         self,
