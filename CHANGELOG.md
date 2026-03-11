@@ -82,6 +82,10 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- `台股 ETF 全類型總表` 新增 `全表更新` 按鈕，集中觸發主總表、官方日成交、官方 MIS 與基金規模追蹤四段更新。
+- `台股 ETF 全類型總表` 的 `更新規模追蹤` 按鈕移到「基金規模追蹤」區塊，避免與 `更新最新市況` 混在同一列。
+- 移除 `台股 ETF 全類型總表` 的「從今日重置」按鈕與相關重置機制，避免誤刪 DuckDB 內的基金規模追蹤歷史。
+- 首頁主標題與頁籤標題改為 `股．海明威ETF研究中心`，統一站點識別文字。
 - Auto: updated app.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, tests/test_duck_store.py, tests/test_history_store.py [id:7cbf4d98a6]
 - `台股 ETF 全類型總表` 的基金規模追蹤改為預設永久保留：
   - `DuckHistoryStore` / `HistoryStore` 的 `tw_etf_aum_history` 預設 `keep_days=0`，未顯式指定時也不裁切歷史。

@@ -575,10 +575,12 @@ def _render_tw_etf_super_export_launcher(
 
 def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
     trade_token = _resolve_latest_tw_trade_day_token()
+    trade_date_iso = _resolve_latest_tw_trade_date_iso(trade_token)
     summary: dict[str, object] = {
         "main": {"status": "fallback", "used_trade_date": ""},
         "daily_market": {},
         "mis": {},
+        "aum_track": {},
         "issues": [],
     }
     issues: list[str] = []
@@ -613,6 +615,34 @@ def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
     except Exception as exc:
         issues.append(f"mis: {exc}")
         summary["mis"] = {"status": "error", "issues": [str(exc)]}
+
+    try:
+        table_df, _ = _build_tw_etf_all_types_performance_table(
+            ytd_start_yyyymmdd="20251231",
+            ytd_end_yyyymmdd=datetime.now().strftime("%Y%m%d"),
+            compare_start_yyyymmdd="20241231",
+            compare_end_yyyymmdd="20251231",
+        )
+        aum_rows = _build_tw_etf_aum_snapshot_rows(
+            table_df,
+            aum_map=_load_tw_etf_aum_billion_map(trade_token),
+        )
+        if aum_rows:
+            updated = store.save_tw_etf_aum_snapshot(
+                rows=aum_rows,
+                trade_date=trade_date_iso,
+                keep_days=0,
+            )
+            summary["aum_track"] = {
+                "status": "synced",
+                "updated": int(updated),
+                "trade_date": trade_date_iso,
+            }
+        else:
+            summary["aum_track"] = {"status": "empty", "updated": 0, "trade_date": trade_date_iso}
+    except Exception as exc:
+        issues.append(f"aum_track: {exc}")
+        summary["aum_track"] = {"status": "error", "issues": [str(exc)]}
 
     _clear_tw_etf_all_types_view_caches()
     summary["issues"] = issues
@@ -4580,10 +4610,6 @@ def _build_tw_etf_aum_snapshot_rows(
     return list(rows.values())
 
 
-_TW_ETF_AUM_TRACK_ANCHOR_CODE = "__AUM_TRACK_ANCHOR__"
-_TW_ETF_AUM_TRACK_ANCHOR_NAME = "AUM_TRACK_ANCHOR"
-
-
 def _resolve_latest_tw_trade_day_token(anchor_yyyymmdd: str | None = None) -> str:
     token = re.sub(r"\D", "", str(anchor_yyyymmdd or "").strip())
     if not token:
@@ -4598,45 +4624,6 @@ def _resolve_latest_tw_trade_date_iso(anchor_yyyymmdd: str | None = None) -> str
         return pd.Timestamp(trade_token).date().isoformat()
     except Exception:
         return datetime.now().date().isoformat()
-
-
-def _load_tw_etf_aum_track_anchor_date(store) -> str | None:
-    try:
-        meta_df = store.load_tw_etf_aum_history(
-            etf_codes=[_TW_ETF_AUM_TRACK_ANCHOR_CODE],
-            keep_days=1,
-        )
-    except Exception:
-        return None
-    if not isinstance(meta_df, pd.DataFrame) or meta_df.empty:
-        return None
-    token = str(meta_df.iloc[-1].get("trade_date", "")).strip()
-    try:
-        return pd.Timestamp(token).date().isoformat()
-    except Exception:
-        return None
-
-
-def _set_tw_etf_aum_track_anchor_date(store, *, trade_date: str) -> bool:
-    try:
-        trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
-    except Exception:
-        return False
-    try:
-        store.save_tw_etf_aum_snapshot(
-            rows=[
-                {
-                    "etf_code": _TW_ETF_AUM_TRACK_ANCHOR_CODE,
-                    "etf_name": _TW_ETF_AUM_TRACK_ANCHOR_NAME,
-                    "aum_billion": 0.0,
-                }
-            ],
-            trade_date=trade_date_iso,
-            keep_days=1,
-        )
-    except Exception:
-        return False
-    return True
 
 
 def _build_tw_etf_aum_history_wide(
@@ -7563,7 +7550,7 @@ def _render_tw_etf_all_types_view():
         else {}
     )
 
-    title_col, refresh_col, aum_track_col = st.columns([5, 1, 1])
+    title_col, refresh_col, full_refresh_col = st.columns([4, 1, 1])
     with title_col:
         st.subheader("台股 ETF 全類型總表（2025 / 2026 YTD）")
     with refresh_col:
@@ -7573,20 +7560,19 @@ def _render_tw_etf_all_types_view():
             width="stretch",
             type="primary",
         )
-    with aum_track_col:
-        refresh_aum_track = st.button(
-            "更新規模追蹤",
-            key="tw_etf_all_types_update_aum_track",
-            width="stretch",
-        )
-        reset_aum_track = st.button(
-            "從今日重置",
-            key="tw_etf_all_types_reset_aum_track",
+    with full_refresh_col:
+        full_refresh = st.button(
+            "全表更新",
+            key="tw_etf_all_types_update_all",
             width="stretch",
         )
     if refresh_market:
         _clear_tw_etf_all_types_view_caches()
         st.rerun()
+    if full_refresh:
+        with st.spinner("同步全類型總表、官方日成交、官方 MIS 與基金規模追蹤中..."):
+            export_refresh_summary = _sync_tw_etf_all_types_export_sources(store)
+        st.success("全表更新完成。")
 
     with st.container(border=True):
         _render_card_section_header(
@@ -7674,55 +7660,6 @@ def _render_tw_etf_all_types_view():
         if daily_end_used:
             st.caption(f"同日價格基準日：{daily_end_used}")
         st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
-
-        today_trade_token = _resolve_latest_tw_trade_day_token()
-        today_trade_date = _resolve_latest_tw_trade_date_iso(today_trade_token)
-        aum_track_anchor_date = _load_tw_etf_aum_track_anchor_date(store)
-        if not aum_track_anchor_date:
-            try:
-                removed = store.clear_tw_etf_aum_history()
-                _set_tw_etf_aum_track_anchor_date(store, trade_date=today_trade_date)
-                aum_track_anchor_date = today_trade_date
-                if removed > 0:
-                    st.info(
-                        f"基金規模追蹤已重新起算（刪除 {removed} 筆舊資料），第一日為 {today_trade_date}。"
-                    )
-            except Exception as exc:
-                aum_track_anchor_date = today_trade_date
-                st.warning(f"初始化基金規模追蹤起算日失敗：{exc}")
-        aum_track_anchor_date = (
-            str(aum_track_anchor_date or today_trade_date).strip() or today_trade_date
-        )
-
-        if reset_aum_track:
-            try:
-                removed = store.clear_tw_etf_aum_history()
-                _set_tw_etf_aum_track_anchor_date(store, trade_date=today_trade_date)
-                aum_track_anchor_date = today_trade_date
-                st.success(f"已重置基金規模追蹤資料（刪除 {removed} 筆），從今日開始累積。")
-            except Exception as exc:
-                st.warning(f"重置基金規模追蹤失敗：{exc}")
-
-        if refresh_aum_track:
-            try:
-                with st.spinner("更新今日 ETF 基金規模中..."):
-                    aum_rows = _build_tw_etf_aum_snapshot_rows(
-                        table_df,
-                        aum_map=_load_tw_etf_aum_billion_map(today_trade_token),
-                    )
-                    if not aum_rows:
-                        st.warning("今日沒有可更新的 ETF 規模資料。")
-                    else:
-                        updated = store.save_tw_etf_aum_snapshot(
-                            rows=aum_rows,
-                            trade_date=today_trade_date,
-                            keep_days=0,  # <=0: DB 永久保留
-                        )
-                        st.success(
-                            f"已累積 ETF 規模追蹤：{updated} 檔（日期 {today_trade_date}）。"
-                        )
-            except Exception as exc:
-                st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
 
         table_drilldown_enabled = _render_table_drilldown_toggle_inline(
             scope="tw_etf_all_types_main",
@@ -8071,7 +8008,6 @@ def _render_tw_etf_all_types_view():
         )
         history_wide = _build_tw_etf_aum_history_wide(
             history_df,
-            start_date=aum_track_anchor_date,
             max_date_cols=10,
         )
         history_drilldown_enabled = _render_table_drilldown_toggle_inline(
@@ -8096,13 +8032,56 @@ def _render_tw_etf_all_types_view():
             history_display, history_link_config = _decorate_tw_etf_aum_history_links(
                 filtered_history_wide
             )
-        st.markdown("#### 基金規模追蹤（最近 10 交易日）")
+        history_title_col, history_action_col = st.columns([5, 1])
+        with history_title_col:
+            st.markdown("#### 基金規模追蹤（最近 10 交易日）")
+        with history_action_col:
+            refresh_aum_track = st.button(
+                "更新規模追蹤",
+                key="tw_etf_all_types_update_aum_track",
+                width="stretch",
+            )
+        today_trade_token = _resolve_latest_tw_trade_day_token()
+        today_trade_date = _resolve_latest_tw_trade_date_iso(today_trade_token)
+        if refresh_aum_track:
+            try:
+                with st.spinner("更新今日 ETF 基金規模中..."):
+                    aum_rows = _build_tw_etf_aum_snapshot_rows(
+                        table_df,
+                        aum_map=_load_tw_etf_aum_billion_map(today_trade_token),
+                    )
+                    if not aum_rows:
+                        st.warning("今日沒有可更新的 ETF 規模資料。")
+                    else:
+                        updated = store.save_tw_etf_aum_snapshot(
+                            rows=aum_rows,
+                            trade_date=today_trade_date,
+                            keep_days=0,  # <=0: DB 永久保留
+                        )
+                        st.success(
+                            f"已累積 ETF 規模追蹤：{updated} 檔（日期 {today_trade_date}）。"
+                        )
+            except Exception as exc:
+                st.warning(f"更新 ETF 規模追蹤失敗：{exc}")
         st.caption(
-            "欄位單位：億（整數顯示）；色塊規則：日增幅 > 10% 以綠色漸層、日減幅 < -10% 以紅色漸層，幅度越大顏色越深。"
+            "欄位單位：億（整數顯示）；色塊規則：較前一日增加為淡綠、減少為淡紅，增減比例越大色階越明顯。"
         )
-        st.caption(
-            f"起算日：{aum_track_anchor_date}；資料庫採累積保存（不覆蓋），畫面僅顯示最近 10 個交易日。"
+        st.caption("資料庫採累積保存（不覆蓋）；畫面僅顯示最近 10 個交易日。")
+        aum_track_summary = (
+            dict(export_refresh_summary.get("aum_track", {}))
+            if isinstance(export_refresh_summary.get("aum_track", {}), dict)
+            else {}
         )
+        if aum_track_summary:
+            aum_status = str(aum_track_summary.get("status", "")).strip() or "unknown"
+            aum_trade_date = str(aum_track_summary.get("trade_date", "")).strip()
+            aum_updated = int(aum_track_summary.get("updated") or 0)
+            st.caption(
+                "同步摘要："
+                f" status={aum_status}"
+                f" / updated={aum_updated}"
+                f"{f' / trade_date={aum_trade_date}' if aum_trade_date else ''}"
+            )
         st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
         if history_wide.empty:
             st.info("尚無規模追蹤資料，請按「更新規模追蹤」。")
@@ -12877,12 +12856,12 @@ def _render_db_browser_view():
 
 
 def main():
-    st.set_page_config(page_title="即時看盤 + 回測平台", layout="wide")
+    st.set_page_config(page_title="股．海明威ETF研究中心", layout="wide")
     _inject_ui_styles()
     _consume_heatmap_drilldown_query()
     _consume_backtest_drilldown_query()
     _auto_run_daily_incremental_refresh(_history_store())
-    st.title("即時走勢 / 多來源資料 / 回測平台")
+    st.title("股．海明威ETF研究中心")
     st.caption(_runtime_stack_caption())
     _render_design_toolbox()
     active_page = _render_page_cards_nav()
