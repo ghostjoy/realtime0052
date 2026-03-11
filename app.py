@@ -2472,7 +2472,10 @@ def _build_message_board_threads(entries: list[Any]) -> list[dict[str, Any]]:
     roots.sort(key=lambda item: getattr(item, "created_at", datetime.min), reverse=True)
     for reply_rows in replies_by_parent.values():
         reply_rows.sort(key=lambda item: getattr(item, "created_at", datetime.min))
-    return [{"root": root, "replies": replies_by_parent.get(str(getattr(root, "message_id", "")), [])} for root in roots]
+    return [
+        {"root": root, "replies": replies_by_parent.get(str(getattr(root, "message_id", "")), [])}
+        for root in roots
+    ]
 
 
 def _render_message_board_view():
@@ -2621,7 +2624,9 @@ def _render_message_board_view():
             )
             if replies:
                 st.markdown("<div class='message-board-replies'>", unsafe_allow_html=True)
-                st.markdown("<div class='message-board-section-title'>回覆</div>", unsafe_allow_html=True)
+                st.markdown(
+                    "<div class='message-board-section-title'>回覆</div>", unsafe_allow_html=True
+                )
                 for reply in replies:
                     reply_created = getattr(reply, "created_at", datetime.now(tz=timezone.utc))
                     reply_html = html.escape(str(getattr(reply, "body", "") or "").strip()).replace(
@@ -13203,7 +13208,9 @@ def main():
     _consume_heatmap_drilldown_query()
     _consume_backtest_drilldown_query()
     _auto_run_daily_incremental_refresh(_history_store())
-    current_page_hint = str(st.session_state.get("active_page", DEFAULT_ACTIVE_PAGE) or DEFAULT_ACTIVE_PAGE)
+    current_page_hint = str(
+        st.session_state.get("active_page", DEFAULT_ACTIVE_PAGE) or DEFAULT_ACTIVE_PAGE
+    )
     client_ctx = _capture_client_visit_context(page_hint=current_page_hint)
     st.title("股．海明威ETF研究中心")
     _render_connection_status_near_title(client_ctx)
