@@ -82,6 +82,15 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- `台股 ETF 全類型總表` 的「超級大表匯出」區塊調整：
+  - 只保留單一「下載超級大表 CSV」按鈕，移除「一鍵下載並開啟 Google Sheets」。
+  - 「一鍵下載超級大表 CSV」按鈕移到頁首操作列，放在「全表更新」右邊。
+  - 匯出檔名改為優先依實際資料日期命名（例如 `daily_end_used / last_trade_date`），避免僅用推算交易日造成日期看起來不一致。
+- 站點標題 `股．海明威ETF研究中心` 改為自訂字徽樣式：`股` 字外圍增加圓圈。
+- 站點名稱更新為 `海明威ETF釣魚研究所`，並同步套用到首頁主標題與瀏覽器頁籤標題。
+- 修正 `台股 ETF 全類型總表 / 基金規模追蹤` 對 `00625K / 00643K` 這類無當日收盤價 ETF 的顯示：
+  - 總表會從 ETF 規模來源補列缺少當日價格的 ETF，價格/績效欄位顯示空白而不整檔消失。
+  - 基金規模追蹤改為使用「總表代碼 + ETF 規模來源代碼」聯集，不再因總表缺列而漏掉既有規模歷史。
 - Auto: updated app.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, tests/test_duck_store.py [id:71da411457]
 - 首頁標題區新增來源 IP（推測）與近期連線清單，並把訪客 session 寫入 DuckDB `client_visits`。
 - 新增 `留言板` 卡片頁：支援主留言、回覆與 DuckDB 持久化保存。

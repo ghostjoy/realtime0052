@@ -21,6 +21,7 @@ from app import (
     _attach_rank_movement_columns,
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
+    _append_missing_tw_etf_rows_from_aum_snapshot,
     _auto_run_daily_incremental_refresh,
     _benchmark_candidates_tw,
     _blend_hex_color,
@@ -36,6 +37,7 @@ from app import (
     _build_tw_etf_all_types_main_table_view,
     _build_tw_etf_all_types_performance_table,
     _build_tw_etf_aum_history_wide,
+    _build_tw_etf_aum_rows_from_snapshot_info,
     _build_tw_etf_daily_market_overview,
     _build_tw_etf_heatmap_focus_chart,
     _build_tw_etf_heatmap_focus_plotly_figure,
@@ -74,6 +76,7 @@ from app import (
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
     _resolve_tw_symbol_names,
+    _resolve_tw_etf_super_export_file_name,
     _snapshot_fallback_depth,
     _style_tw_today_move_table,
     _sync_tw_etf_all_types_export_sources,
@@ -222,6 +225,16 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(parsed_rows[1][1], '="^TWII"')
         self.assertEqual(parsed_rows[2][0], '="001"')
         self.assertEqual(parsed_rows[2][1], '="0050"')
+
+    def test_resolve_tw_etf_super_export_file_name_prefers_actual_data_date(self):
+        out = _resolve_tw_etf_super_export_file_name(
+            export_frame=pd.DataFrame([{"代碼": "0050"}]),
+            main_meta={"daily_end_used": "2026-03-10"},
+            daily_market_meta={"last_trade_date": "2026-03-09"},
+            mis_meta={"last_trade_date": "2026-03-08"},
+        )
+
+        self.assertEqual(out, "tw_etf_super_export_20260310.csv")
 
     def test_sync_tw_etf_all_types_export_sources_runs_all_updates(self):
         fake_store = SimpleNamespace()
@@ -963,6 +976,37 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         self.assertEqual(int(out.iloc[0]["編號"]), 1)
         self.assertEqual(str(out.loc[out["台股代號"] == "0050", "ETF名稱"].iloc[0]), "元大台灣50")
+
+    def test_build_tw_etf_aum_rows_from_snapshot_info_keeps_k_suffix_codes(self):
+        out = _build_tw_etf_aum_rows_from_snapshot_info(
+            {
+                "00625K": {"name": "富邦上証+R(人民幣)", "aum_billion": 45.0},
+                "00643K": {"name": "群益深証中小+R(人民幣)", "aum_billion": 17.0},
+            }
+        )
+
+        self.assertEqual([row["etf_code"] for row in out], ["00625K", "00643K"])
+        self.assertEqual(out[0]["etf_name"], "富邦上証+R(人民幣)")
+
+    def test_append_missing_tw_etf_rows_from_aum_snapshot_adds_missing_k_suffix_etfs(self):
+        source = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50", "類型": "市值型", "YTD績效(%)": 12.3},
+            ]
+        )
+
+        out = _append_missing_tw_etf_rows_from_aum_snapshot(
+            source,
+            snapshot_info={
+                "00625K": {"name": "富邦上証+R(人民幣)", "aum_billion": 45.0},
+                "00643K": {"name": "群益深証中小+R(人民幣)", "aum_billion": 17.0},
+            },
+        )
+
+        self.assertEqual(set(out["代碼"].astype(str)), {"0050", "00625K", "00643K"})
+        row = out.loc[out["代碼"] == "00625K"].iloc[0]
+        self.assertEqual(str(row["ETF"]), "富邦上証+R(人民幣)")
+        self.assertTrue(pd.isna(row.get("YTD績效(%)")))
 
     def test_compute_tw_etf_aum_alert_mask(self):
         frame = pd.DataFrame(

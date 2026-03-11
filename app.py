@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import csv
 import html
 import json
@@ -22,7 +21,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
 from backtest import (
@@ -297,11 +295,6 @@ def _filter_dataframe_by_keyword(
     return frame.loc[mask].reset_index(drop=True)
 
 
-_TW_ETF_SUPER_EXPORT_PENDING_KEY = "tw_etf_super_export_pending"
-_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY = "tw_etf_super_export_autolaunch"
-_GOOGLE_SHEETS_LAUNCH_URL = "https://docs.google.com/spreadsheets/u/0/"
-
-
 def _clear_tw_etf_all_types_view_caches() -> None:
     _fetch_twse_snapshot_with_fallback.clear()
     _build_tw_etf_top10_between.clear()
@@ -531,48 +524,52 @@ def _build_tw_etf_super_export_csv_bytes(frame: pd.DataFrame) -> bytes:
     return ("\ufeff" + csv_text).encode("utf-8")
 
 
-def _render_tw_etf_super_export_launcher(
+def _normalize_trade_date_token(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        digits = re.sub(r"\D", "", text)
+        return digits[:8] if len(digits) >= 8 else ""
+    return pd.Timestamp(parsed).strftime("%Y%m%d")
+
+
+def _resolve_tw_etf_super_export_file_name(
     *,
-    csv_bytes: bytes,
-    file_name: str,
-    sheets_url: str = _GOOGLE_SHEETS_LAUNCH_URL,
-) -> None:
-    payload_b64 = base64.b64encode(csv_bytes).decode("ascii")
-    html = f"""
-    <div style="padding:0.3rem 0 0.1rem 0; font-size:0.95rem; color:#475569;">
-      已嘗試自動下載 CSV，並開啟 Google Sheets。若瀏覽器擋下自動開頁，請點下方連結。
-    </div>
-    <a id="tw-etf-super-export-sheets-link" href="{sheets_url}" target="_blank" rel="noopener noreferrer">
-      開啟 Google Sheets
-    </a>
-    <script>
-      (function() {{
-        const payload = "{payload_b64}";
-        const fileName = {json.dumps(file_name)};
-        const bytes = Uint8Array.from(atob(payload), ch => ch.charCodeAt(0));
-        const blob = new Blob([bytes], {{ type: "text/csv;charset=utf-8;" }});
-        const downloadUrl = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = downloadUrl;
-        anchor.download = fileName;
-        document.body.appendChild(anchor);
-        anchor.click();
-        document.body.removeChild(anchor);
-        setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-        const targetUrl = {json.dumps(sheets_url)};
-        const opener = (window.parent && window.parent !== window) ? window.parent : window;
-        try {{
-          opener.open(targetUrl, "_blank", "noopener,noreferrer");
-        }} catch (err) {{
-          const fallback = document.getElementById("tw-etf-super-export-sheets-link");
-          if (fallback) {{
-            fallback.style.display = "inline";
-          }}
-        }}
-      }})();
-    </script>
-    """
-    components.html(html, height=78)
+    export_frame: pd.DataFrame,
+    main_meta: dict[str, object] | None = None,
+    daily_market_meta: dict[str, object] | None = None,
+    mis_meta: dict[str, object] | None = None,
+) -> str:
+    meta_candidates: list[object] = []
+    if isinstance(main_meta, dict):
+        meta_candidates.extend(
+            [
+                main_meta.get("daily_end_used"),
+                main_meta.get("market_daily_end_used"),
+                main_meta.get("ytd_end_used"),
+            ]
+        )
+    if isinstance(daily_market_meta, dict):
+        meta_candidates.append(daily_market_meta.get("last_trade_date"))
+    if isinstance(mis_meta, dict):
+        meta_candidates.append(mis_meta.get("last_trade_date"))
+    for candidate in meta_candidates:
+        token = _normalize_trade_date_token(candidate)
+        if token:
+            return f"tw_etf_super_export_{token}.csv"
+    if isinstance(export_frame, pd.DataFrame) and not export_frame.empty and "日期" in export_frame.columns:
+        series = export_frame.get("日期")
+        if isinstance(series, pd.Series):
+            valid_tokens = [
+                token
+                for token in series.map(_normalize_trade_date_token).tolist()
+                if token
+            ]
+            if valid_tokens:
+                return f"tw_etf_super_export_{max(valid_tokens)}.csv"
+    return f"tw_etf_super_export_{_resolve_latest_tw_trade_day_token()}.csv"
 
 
 def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
@@ -2718,6 +2715,18 @@ def _render_data_health_caption(title: str, health: DataHealth):
     st.caption(render_data_health_caption(title, health))
 
 
+def _render_app_title() -> None:
+    st.markdown(
+        (
+            "<div class='site-title-wrap'>"
+            "<span class='site-title-mark'>股</span>"
+            "<span class='site-title-text'>海明威ETF釣魚研究所</span>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def _classify_issue_level(message: str) -> str:
     text = str(message or "").strip()
     lowered = text.lower()
@@ -4085,6 +4094,33 @@ def _inject_ui_styles():
             -moz-osx-font-smoothing: grayscale;
             margin-bottom: 0.5rem;
         }}
+        .site-title-wrap {{
+            display: flex;
+            align-items: center;
+            gap: 0.48rem;
+            margin: 0.1rem 0 0.35rem 0;
+            color: {text_color};
+            font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Segoe UI", sans-serif;
+        }}
+        .site-title-mark {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.2rem;
+            height: 2.2rem;
+            border: 2px solid {text_color};
+            border-radius: 999px;
+            font-size: 1.26rem;
+            font-weight: 800;
+            line-height: 1;
+            flex: 0 0 auto;
+        }}
+        .site-title-text {{
+            font-size: 2.2rem;
+            font-weight: 800;
+            line-height: 1.08;
+            letter-spacing: 0.01em;
+        }}
         .crisp-table-wrap {{
             border: 1px solid {card_border};
             border-radius: 10px;
@@ -4665,7 +4701,8 @@ def _normalize_tw_etf_management_fee_label(value: object) -> str:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_tw_etf_aum_snapshot_info(target_yyyymmdd: str = "") -> dict[str, dict[str, object]]:
     import requests
 
     store = _history_store()
@@ -4674,10 +4711,30 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
         token if re.fullmatch(r"\d{8}", token) else datetime.now(tz=timezone.utc).strftime("%Y%m%d")
     )
 
-    def _decode_payload(payload: object) -> dict[str, float]:
-        if not isinstance(payload, dict) or not isinstance(payload.get("map"), dict):
+    def _decode_payload(payload: object) -> dict[str, dict[str, object]]:
+        if not isinstance(payload, dict):
             return {}
-        out_map: dict[str, float] = {}
+        out_map: dict[str, dict[str, object]] = {}
+        rows = payload.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                code = str(row.get("code", "")).strip().upper()
+                name = str(row.get("name", "")).strip()
+                value_num = pd.to_numeric(row.get("aum_billion"), errors="coerce")
+                if not code or pd.isna(value_num):
+                    continue
+                try:
+                    value = float(value_num)
+                except Exception:
+                    continue
+                if math.isfinite(value) and value >= 0:
+                    out_map[code] = {"name": name or code, "aum_billion": value}
+            if out_map:
+                return out_map
+        if not isinstance(payload.get("map"), dict):
+            return {}
         for code_raw, value_raw in payload.get("map", {}).items():
             code = str(code_raw or "").strip().upper()
             value_num = pd.to_numeric(value_raw, errors="coerce")
@@ -4688,10 +4745,10 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
             except Exception:
                 continue
             if math.isfinite(value) and value >= 0:
-                out_map[code] = value
+                out_map[code] = {"name": code, "aum_billion": value}
         return out_map
 
-    latest_cached_map: dict[str, float] = {}
+    latest_cached_info: dict[str, dict[str, object]] = {}
     loader = getattr(store, "load_latest_market_snapshot", None)
     if callable(loader):
         try:
@@ -4705,18 +4762,18 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
             cached = None
         if isinstance(cached, dict):
             cached_asof = cached.get("asof")
-            cached_map = _decode_payload(cached.get("payload"))
-            latest_cached_map = dict(cached_map)
-            if cached_map:
+            cached_info = _decode_payload(cached.get("payload"))
+            latest_cached_info = dict(cached_info)
+            if cached_info:
                 if not token:
-                    return cached_map
+                    return cached_info
                 if (
                     isinstance(cached_asof, datetime)
                     and cached_asof.strftime("%Y%m%d") == asof_token
                 ):
-                    return cached_map
+                    return cached_info
 
-    out: dict[str, float] = {}
+    out: dict[str, dict[str, object]] = {}
     try:
         params: dict[str, str] = {}
         if re.fullmatch(r"\d{8}", token):
@@ -4744,9 +4801,12 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
                 continue
             if not math.isfinite(aum) or aum < 0:
                 continue
-            out[code] = float(aum)
+            out[code] = {
+                "name": str(row[1] or "").strip() or code,
+                "aum_billion": float(aum),
+            }
     except Exception:
-        return latest_cached_map
+        return latest_cached_info
     writer = getattr(store, "save_market_snapshot", None)
     if out and callable(writer):
         now_utc = datetime.now(tz=timezone.utc)
@@ -4763,7 +4823,18 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
                 interval="1d",
                 source="twse_etf_excel",
                 asof=asof_dt,
-                payload={"date": asof_token, "map": out},
+                payload={
+                    "date": asof_token,
+                    "rows": [
+                        {
+                            "code": code,
+                            "name": str(item.get("name", "")).strip(),
+                            "aum_billion": item.get("aum_billion"),
+                        }
+                        for code, item in sorted(out.items())
+                    ],
+                    "map": {code: item.get("aum_billion") for code, item in out.items()},
+                },
                 freshness_sec=freshness,
                 quality_score=1.0,
                 stale=freshness > 86400,
@@ -4771,6 +4842,19 @@ def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
             )
         except Exception:
             pass
+    return out
+
+
+def _load_tw_etf_aum_billion_map(target_yyyymmdd: str = "") -> dict[str, float]:
+    info = _load_tw_etf_aum_snapshot_info(target_yyyymmdd)
+    out: dict[str, float] = {}
+    for code, item in info.items():
+        if not isinstance(item, dict):
+            continue
+        value = _safe_float(item.get("aum_billion"))
+        if value is None or (not math.isfinite(float(value))) or float(value) < 0:
+            continue
+        out[str(code).strip().upper()] = float(value)
     return out
 
 
@@ -4955,6 +5039,71 @@ def _build_tw_etf_aum_snapshot_rows(
             "aum_billion": value,
         }
     return list(rows.values())
+
+
+def _build_tw_etf_aum_rows_from_snapshot_info(
+    snapshot_info: dict[str, dict[str, object]] | None,
+) -> list[dict[str, object]]:
+    if not isinstance(snapshot_info, dict) or not snapshot_info:
+        return []
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for code_raw, item in sorted(snapshot_info.items()):
+        code = str(code_raw or "").strip().upper()
+        if not re.fullmatch(r"\d{4,6}[A-Z]?", code) or code in seen:
+            continue
+        if not isinstance(item, dict):
+            continue
+        value = _safe_float(item.get("aum_billion"))
+        if value is None or (not math.isfinite(float(value))) or float(value) < 0:
+            continue
+        rows.append(
+            {
+                "etf_code": code,
+                "etf_name": str(item.get("name", "")).strip() or code,
+                "aum_billion": float(value),
+            }
+        )
+        seen.add(code)
+    return rows
+
+
+def _append_missing_tw_etf_rows_from_aum_snapshot(
+    frame: pd.DataFrame,
+    *,
+    snapshot_info: dict[str, dict[str, object]] | None,
+) -> pd.DataFrame:
+    base = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if not isinstance(snapshot_info, dict) or not snapshot_info:
+        return base
+    existing_codes: set[str] = set()
+    if "代碼" in base.columns:
+        existing_codes = {
+            str(code).strip().upper()
+            for code in base["代碼"].astype(str).tolist()
+            if str(code).strip()
+        }
+    missing_rows: list[dict[str, object]] = []
+    for code, item in sorted(snapshot_info.items()):
+        code_text = str(code or "").strip().upper()
+        if not code_text or code_text in existing_codes:
+            continue
+        if not isinstance(item, dict):
+            continue
+        name_text = str(item.get("name", "")).strip()
+        if not _is_tw_any_etf(code_text, name_text):
+            continue
+        missing_rows.append(
+            {
+                "代碼": code_text,
+                "ETF": name_text or code_text,
+                "類型": _classify_tw_etf(name_text, code=code_text),
+            }
+        )
+    if not missing_rows:
+        return base
+    missing_df = pd.DataFrame(missing_rows)
+    return pd.concat([base, missing_df], ignore_index=True, sort=False)
 
 
 def _resolve_latest_tw_trade_day_token(anchor_yyyymmdd: str | None = None) -> str:
@@ -6647,6 +6796,7 @@ def _build_tw_etf_all_types_performance_table(
     compare_start_yyyymmdd: str = "20250101",
     compare_end_yyyymmdd: str = "20251231",
 ) -> tuple[pd.DataFrame, dict[str, object]]:
+    aum_snapshot_info = _load_tw_etf_aum_snapshot_info(ytd_end_yyyymmdd)
     ytd_df, ytd_start_used, ytd_end_used, universe_count = _build_tw_etf_top10_between(
         start_yyyymmdd=ytd_start_yyyymmdd,
         end_yyyymmdd=ytd_end_yyyymmdd,
@@ -6734,6 +6884,10 @@ def _build_tw_etf_all_types_performance_table(
         daily_close_map=daily_close_map,
         prefer_daily_ohlc=True,
         market_daily_return_pct=market_daily_return,
+    )
+    table_df = _append_missing_tw_etf_rows_from_aum_snapshot(
+        table_df,
+        snapshot_info=aum_snapshot_info,
     )
     table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
     code_sort_text = (
@@ -7883,21 +8037,9 @@ def _render_top10_etf_2025_view():
 
 def _render_tw_etf_all_types_view():
     store = _history_store()
-    pending_super_export = bool(st.session_state.pop(_TW_ETF_SUPER_EXPORT_PENDING_KEY, False))
-    if pending_super_export:
-        with st.spinner("更新 ETF 總表來源並準備匯出中..."):
-            st.session_state[_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY] = {
-                "prepared_at": datetime.now(tz=timezone.utc).isoformat(),
-                "refresh_summary": _sync_tw_etf_all_types_export_sources(store),
-            }
-    export_launch_payload = st.session_state.get(_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY)
-    export_refresh_summary = (
-        export_launch_payload.get("refresh_summary", {})
-        if isinstance(export_launch_payload, dict)
-        else {}
-    )
+    export_refresh_summary: dict[str, object] = {}
 
-    title_col, refresh_col, full_refresh_col = st.columns([4, 1, 1])
+    title_col, refresh_col, full_refresh_col, quick_export_col = st.columns([4, 1, 1, 1.35])
     with title_col:
         st.subheader("台股 ETF 全類型總表（2025 / 2026 YTD）")
     with refresh_col:
@@ -7913,6 +8055,8 @@ def _render_tw_etf_all_types_view():
             key="tw_etf_all_types_update_all",
             width="stretch",
         )
+    with quick_export_col:
+        quick_export_slot = st.empty()
     if refresh_market:
         _clear_tw_etf_all_types_view_caches()
         st.rerun()
@@ -8287,26 +8431,21 @@ def _render_tw_etf_all_types_view():
             daily_market_frame=daily_market_df,
             mis_frame=mis_df,
         )
-        export_trade_token = _resolve_latest_tw_trade_day_token()
-        export_file_name = f"tw_etf_super_export_{export_trade_token}.csv"
+        export_file_name = _resolve_tw_etf_super_export_file_name(
+            export_frame=super_export_df,
+            main_meta=meta,
+            daily_market_meta=daily_market_meta,
+            mis_meta=mis_meta,
+        )
         export_csv_bytes = _build_tw_etf_super_export_csv_bytes(super_export_df)
-        ex1, ex2 = st.columns(2)
-        ex1.download_button(
-            "下載超級大表 CSV",
+        quick_export_slot.download_button(
+            "一鍵下載超級大表 CSV",
             data=export_csv_bytes,
             file_name=export_file_name,
             mime="text/csv;charset=utf-8",
             width="stretch",
             disabled=super_export_df.empty,
         )
-        if ex2.button(
-            "一鍵下載並開啟 Google Sheets",
-            key="tw_etf_super_export_one_click",
-            width="stretch",
-            disabled=super_export_df.empty,
-        ):
-            st.session_state[_TW_ETF_SUPER_EXPORT_PENDING_KEY] = True
-            st.rerun()
         if super_export_df.empty:
             st.info("目前沒有可匯出的超級大表資料。")
         else:
@@ -8314,6 +8453,7 @@ def _render_tw_etf_all_types_view():
                 f"匯出摘要：{len(super_export_df)} 列 / {len(super_export_df.columns)} 欄。"
                 "輸出為純文字 CSV，不含點擊導流連結。"
             )
+            st.caption(f"下載檔名：`{export_file_name}`")
             if isinstance(export_refresh_summary, dict) and export_refresh_summary:
                 main_refresh_summary = export_refresh_summary.get("main", {})
                 main_status = (
@@ -8339,18 +8479,18 @@ def _render_tw_etf_all_types_view():
                         export_issues,
                         preview_limit=2,
                     )
-            if isinstance(export_launch_payload, dict):
-                _render_tw_etf_super_export_launcher(
-                    csv_bytes=export_csv_bytes,
-                    file_name=export_file_name,
-                )
-                st.session_state.pop(_TW_ETF_SUPER_EXPORT_AUTOLAUNCH_KEY, None)
-                st.caption(
-                    "已先更新主總表、官方日成交、官方 MIS，再自動下載 CSV 並開啟 Google Sheets。"
-                )
 
+        current_aum_snapshot_info = _load_tw_etf_aum_snapshot_info()
+        history_codes = sorted(
+            {
+                str(code).strip().upper()
+                for code in table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist()
+                if str(code).strip()
+            }
+            | set(current_aum_snapshot_info.keys())
+        )
         history_df = store.load_tw_etf_aum_history(
-            etf_codes=table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
+            etf_codes=history_codes,
             keep_days=0,
         )
         history_wide = _build_tw_etf_aum_history_wide(
@@ -8393,9 +8533,8 @@ def _render_tw_etf_all_types_view():
         if refresh_aum_track:
             try:
                 with st.spinner("更新今日 ETF 基金規模中..."):
-                    aum_rows = _build_tw_etf_aum_snapshot_rows(
-                        table_df,
-                        aum_map=_load_tw_etf_aum_billion_map(today_trade_token),
+                    aum_rows = _build_tw_etf_aum_rows_from_snapshot_info(
+                        _load_tw_etf_aum_snapshot_info(today_trade_token),
                     )
                     if not aum_rows:
                         st.warning("今日沒有可更新的 ETF 規模資料。")
@@ -13203,7 +13342,7 @@ def _render_db_browser_view():
 
 
 def main():
-    st.set_page_config(page_title="股．海明威ETF研究中心", layout="wide")
+    st.set_page_config(page_title="海明威ETF釣魚研究所", layout="wide")
     _inject_ui_styles()
     _consume_heatmap_drilldown_query()
     _consume_backtest_drilldown_query()
@@ -13212,7 +13351,7 @@ def main():
         st.session_state.get("active_page", DEFAULT_ACTIVE_PAGE) or DEFAULT_ACTIVE_PAGE
     )
     client_ctx = _capture_client_visit_context(page_hint=current_page_hint)
-    st.title("股．海明威ETF研究中心")
+    _render_app_title()
     _render_connection_status_near_title(client_ctx)
     st.caption(_runtime_stack_caption())
     _render_design_toolbox()
