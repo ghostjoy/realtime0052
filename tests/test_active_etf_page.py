@@ -17,11 +17,11 @@ from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
     DEFAULT_ACTIVE_PAGE,
+    _append_missing_tw_etf_rows_from_aum_snapshot,
     _apply_unified_benchmark_hover,
     _attach_rank_movement_columns,
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
-    _append_missing_tw_etf_rows_from_aum_snapshot,
     _auto_run_daily_incremental_refresh,
     _benchmark_candidates_tw,
     _blend_hex_color,
@@ -75,8 +75,8 @@ from app import (
     _load_tw_market_return_between,
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
-    _resolve_tw_symbol_names,
     _resolve_tw_etf_super_export_file_name,
+    _resolve_tw_symbol_names,
     _snapshot_fallback_depth,
     _style_tw_today_move_table,
     _sync_tw_etf_all_types_export_sources,
@@ -1094,6 +1094,16 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         self.assertEqual(ip, "203.0.113.10")
         self.assertEqual(forwarded, "203.0.113.10, 10.0.0.1")
+
+    def test_extract_client_ip_from_headers_only_accepts_ipv4(self):
+        ip, forwarded = _extract_client_ip_from_headers(
+            {
+                "X-Forwarded-For": "2001:db8::1",
+                "X-Real-IP": "for=198.51.100.22:443",
+            }
+        )
+        self.assertEqual(ip, "198.51.100.22")
+        self.assertEqual(forwarded, "2001:db8::1")
 
     def test_build_client_connection_context_uses_headers(self):
         with patch("app._streamlit_context_headers", return_value={"X-Real-IP": "198.51.100.7"}):
@@ -2318,6 +2328,7 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "app._load_tw_etf_aum_billion_map",
                 return_value={"0050": 12491.64, "0052": 800.0, "00935": 321.0},
             ),
+            patch("app._load_tw_etf_aum_snapshot_info", return_value={}),
             patch(
                 "app._load_twii_twse_day_open_close",
                 side_effect=[(None, 113.0, []), (114.0, 114.0, [])],

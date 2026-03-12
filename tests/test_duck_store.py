@@ -543,6 +543,39 @@ class DuckStoreTests(unittest.TestCase):
             self.assertIn(reply_id, ids)
             reply_row = next(row for row in rows if row.message_id == reply_id)
             self.assertEqual(reply_row.parent_message_id, root_id)
+            self.assertTrue(
+                store.update_message_board_entry(message_id=root_id, body="第一則留言（已修改）")
+            )
+            rows_after_update = store.list_message_board_entries(limit=10)
+            root_row = next(row for row in rows_after_update if row.message_id == root_id)
+            self.assertEqual(root_row.body, "第一則留言（已修改）")
+            deleted = store.delete_message_board_entry(message_id=root_id)
+            self.assertEqual(deleted, 2)
+            rows_after_delete = store.list_message_board_entries(limit=10)
+            self.assertEqual(rows_after_delete, [])
+
+    def test_notebook_entry_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            note_id = store.save_notebook_entry(note_id="default", body="# 測試筆記\n\n內容 A")
+            first = store.load_notebook_entry(note_id="default")
+            self.assertEqual(note_id, "default")
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertEqual(first.note_id, "default")
+            self.assertEqual(first.body, "# 測試筆記\n\n內容 A")
+
+            store.save_notebook_entry(note_id="default", body="# 測試筆記\n\n內容 B")
+            second = store.load_notebook_entry(note_id="default")
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertEqual(second.body, "# 測試筆記\n\n內容 B")
 
     def test_clear_tw_etf_aum_history(self):
         with tempfile.TemporaryDirectory() as tmp:

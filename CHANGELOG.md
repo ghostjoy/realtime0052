@@ -11,6 +11,12 @@
 ## [Unreleased]
 
 ### Added
+- 新增 `筆記本` 卡片頁：
+  - 支援 DuckDB 持久化保存單一本地 markdown 筆記
+  - 預覽區採 GitHub 風格排版，編輯器與預覽預設字級為 `18px`
+- `留言板` 新增留言管理：
+  - 主留言與回覆都可直接修改或刪除
+  - 刪除主留言時會一併刪除其回覆
 - 新增 TWSE 官方 `ETFReport/ETFDaily` 日成交資料流：
   - 新增 `services/tw_etf_daily_sync.py`，可同步 TWSE 上市 ETF 官方日級交易資料
   - 新增 `tw_etf_daily_market` 持久化表（DuckDB / SQLite），保存 `成交金額 / 成交股數 / 成交筆數 / OHLC / 漲跌價差`
@@ -82,6 +88,7 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- Auto: updated README.md, app.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, tests/test_duck_store.py [id:f1b8fd428f]
 - `台股 ETF 全類型總表` 的「超級大表匯出」區塊調整：
   - 只保留單一「下載超級大表 CSV」按鈕，移除「一鍵下載並開啟 Google Sheets」。
   - 「一鍵下載超級大表 CSV」按鈕移到頁首操作列，放在「全表更新」右邊。

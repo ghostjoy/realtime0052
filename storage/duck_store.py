@@ -24,6 +24,7 @@ from storage.history_store import (
     HeatmapHubEntry,
     HeatmapRun,
     MessageBoardEntry,
+    NotebookEntry,
     RotationRun,
     SuperExportRun,
     SyncReport,
@@ -480,6 +481,18 @@ class DuckHistoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS notebook_entries (
+                    id BIGINT,
+                    note_id VARCHAR,
+                    body VARCHAR,
+                    created_at VARCHAR,
+                    updated_at VARCHAR,
+                    UNIQUE(note_id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS rotation_runs (
                     id BIGINT,
                     universe_id VARCHAR,
@@ -610,6 +623,9 @@ class DuckHistoryStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_message_board_parent_created ON message_board_entries(parent_message_id, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notebook_entries_updated_at ON notebook_entries(updated_at)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_rotation_runs_universe_created_at ON rotation_runs(universe_id, created_at)"
@@ -3974,6 +3990,110 @@ class DuckHistoryStore:
                 )
             )
         return out
+
+    def update_message_board_entry(self, *, message_id: str, body: str) -> bool:
+        entry_id = self._normalize_text(message_id)
+        text = self._normalize_text(body)
+        if not entry_id:
+            return False
+        if not text:
+            raise ValueError("body is required")
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM message_board_entries WHERE message_id=?",
+                (entry_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                """
+                UPDATE message_board_entries
+                SET body=?, updated_at=?
+                WHERE message_id=?
+                """,
+                (text[:2000], now_iso, entry_id),
+            )
+        return True
+
+    def delete_message_board_entry(self, *, message_id: str) -> int:
+        entry_id = self._normalize_text(message_id)
+        if not entry_id:
+            return 0
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM message_board_entries
+                WHERE message_id=? OR parent_message_id=?
+                """,
+                (entry_id, entry_id),
+            ).fetchone()
+            delete_count = max(0, int(row[0] or 0)) if row is not None else 0
+            if delete_count <= 0:
+                return 0
+            conn.execute(
+                """
+                DELETE FROM message_board_entries
+                WHERE message_id=? OR parent_message_id=?
+                """,
+                (entry_id, entry_id),
+            )
+        return delete_count
+
+    def save_notebook_entry(self, *, note_id: str = "default", body: str) -> str:
+        note_key = self._normalize_text(note_id) or "default"
+        text = str(body or "")
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT id, created_at FROM notebook_entries WHERE note_id=?",
+                (note_key,),
+            ).fetchone()
+            if row is None:
+                rid = self._next_id(conn, "notebook_entries")
+                conn.execute(
+                    """
+                    INSERT INTO notebook_entries(
+                        id, note_id, body, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?)
+                    """,
+                    (rid, note_key, text, now_iso, now_iso),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE notebook_entries
+                    SET body=?, updated_at=?
+                    WHERE note_id=?
+                    """,
+                    (text, now_iso, note_key),
+                )
+        return note_key
+
+    def load_notebook_entry(self, *, note_id: str = "default") -> NotebookEntry | None:
+        note_key = self._normalize_text(note_id) or "default"
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT note_id, body, created_at, updated_at
+                FROM notebook_entries
+                WHERE note_id=?
+                """,
+                (note_key,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        now = datetime.now(tz=timezone.utc)
+        return NotebookEntry(
+            note_id=self._normalize_text(row[0]) or note_key,
+            body=str(row[1] or ""),
+            created_at=self._parse_iso_datetime(row[2]) or now,
+            updated_at=self._parse_iso_datetime(row[3]) or now,
+        )
 
     def save_rotation_run(
         self,

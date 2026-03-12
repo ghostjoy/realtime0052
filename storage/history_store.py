@@ -146,6 +146,14 @@ class MessageBoardEntry:
 
 
 @dataclass(frozen=True)
+class NotebookEntry:
+    note_id: str
+    body: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class RotationRun:
     universe_id: str
     run_key: str

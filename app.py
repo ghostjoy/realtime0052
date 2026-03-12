@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from markdown_it import MarkdownIt
 from plotly.subplots import make_subplots
 
 from backtest import (
@@ -2284,6 +2285,7 @@ PAGE_CARDS = [
     {"key": "00735 熱力圖", "desc": "00735 成分股回測的相對大盤熱力圖。"},
     {"key": "0050 熱力圖", "desc": "0050 成分股回測的相對大盤熱力圖。"},
     {"key": "0052 熱力圖", "desc": "0052 成分股回測的相對大盤熱力圖。"},
+    {"key": "筆記本", "desc": "GitHub 風格 markdown 筆記卡，可直接編輯與預覽。"},
     {"key": "留言板", "desc": "訪客可留言提問，也可直接回覆既有留言。"},
     {"key": "資料庫檢視", "desc": "直接查看 DuckDB 各表筆數、欄位與內容。"},
     {"key": "新手教學", "desc": "參數白話解釋與常見回測誤區。"},
@@ -2292,6 +2294,8 @@ DEFAULT_ACTIVE_PAGE = "台股 ETF 全類型總表"
 DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
 CLIENT_VISIT_SESSION_KEY = "client_visit_session_id"
+DEFAULT_NOTEBOOK_ID = "default"
+NOTEBOOK_BODY_STATE_KEY = "notebook_markdown_body"
 
 
 def _runtime_page_cards() -> list[dict[str, str]]:
@@ -2344,24 +2348,36 @@ def _streamlit_context_headers() -> dict[str, str]:
     return out
 
 
+def _extract_ipv4(text: object) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", raw)
+    return str(m.group(0)).strip() if m else ""
+
+
 def _extract_client_ip_from_headers(headers: dict[str, str]) -> tuple[str, str]:
     if not isinstance(headers, dict):
         return "", ""
     lookup = {str(k or "").strip().lower(): str(v or "").strip() for k, v in headers.items()}
     forwarded_for = lookup.get("x-forwarded-for", "")
     if forwarded_for:
-        first_ip = str(forwarded_for.split(",")[0]).strip().strip('"')
+        first_ip = _extract_ipv4(forwarded_for.split(",")[0])
+        if not first_ip:
+            first_ip = _extract_ipv4(forwarded_for)
         if first_ip:
             return first_ip, forwarded_for
     for key in ("x-real-ip", "cf-connecting-ip", "true-client-ip", "fly-client-ip"):
         value = lookup.get(key, "")
         if value:
-            return value.strip().strip('"'), forwarded_for
+            ipv4 = _extract_ipv4(value)
+            if ipv4:
+                return ipv4, forwarded_for
     forwarded = lookup.get("forwarded", "")
     if forwarded:
-        m = re.search(r"for=(?:\"?\[?)([^;\],\"]+)", forwarded)
-        if m:
-            return str(m.group(1)).strip(), forwarded_for
+        ipv4 = _extract_ipv4(forwarded)
+        if ipv4:
+            return ipv4, forwarded_for
     return "", forwarded_for
 
 
@@ -2457,6 +2473,203 @@ def _load_message_board_entries(limit: int = 120) -> list[Any]:
         return []
 
 
+def _default_notebook_markdown() -> str:
+    return """# 筆記本
+
+這裡支援 **Markdown**，預覽區會用 GitHub 風格呈現。
+
+## 可用範例
+
+- 條列重點
+- `inline code`
+- [外部連結](https://github.com)
+
+```python
+print("hello notebook")
+```
+"""
+
+
+def _load_notebook_entry(note_id: str = DEFAULT_NOTEBOOK_ID) -> Any | None:
+    store = _history_store()
+    loader = getattr(store, "load_notebook_entry", None)
+    if not callable(loader):
+        return None
+    try:
+        return loader(note_id=note_id)
+    except Exception:
+        return None
+
+
+def _render_notebook_markdown_html(markdown_text: str) -> str:
+    renderer = MarkdownIt(
+        "gfm-like",
+        {
+            "html": False,
+            "linkify": False,
+        },
+    )
+    return renderer.render(str(markdown_text or ""))
+
+
+def _render_notebook_view():
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stTextArea"] textarea {
+            background: #ffffff !important;
+            border: 1px solid #d0d7de !important;
+            border-radius: 12px !important;
+            color: #1f2328 !important;
+            font-size: 18px !important;
+            line-height: 1.75 !important;
+            padding: 1rem 1.05rem !important;
+            font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace !important;
+        }
+        .notebook-preview {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 12px;
+            padding: 1.35rem 1.45rem;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+        }
+        .github-markdown-body {
+            color: #1f2328;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            font-size: 18px;
+            line-height: 1.75;
+            word-wrap: break-word;
+        }
+        .github-markdown-body > *:first-child {
+            margin-top: 0;
+        }
+        .github-markdown-body > *:last-child {
+            margin-bottom: 0;
+        }
+        .github-markdown-body h1,
+        .github-markdown-body h2,
+        .github-markdown-body h3,
+        .github-markdown-body h4,
+        .github-markdown-body h5,
+        .github-markdown-body h6 {
+            margin-top: 1.5em;
+            margin-bottom: 0.65em;
+            font-weight: 700;
+            line-height: 1.25;
+            border-bottom: 1px solid #d8dee4;
+            padding-bottom: 0.28em;
+        }
+        .github-markdown-body p,
+        .github-markdown-body ul,
+        .github-markdown-body ol,
+        .github-markdown-body blockquote,
+        .github-markdown-body table,
+        .github-markdown-body pre {
+            margin-top: 0;
+            margin-bottom: 1em;
+        }
+        .github-markdown-body a {
+            color: #0969da !important;
+            text-decoration: none;
+        }
+        .github-markdown-body a:hover {
+            text-decoration: underline;
+        }
+        .github-markdown-body code {
+            background: rgba(175, 184, 193, 0.2);
+            border-radius: 6px;
+            font-size: 0.92em;
+            padding: 0.12em 0.32em;
+            font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+        }
+        .github-markdown-body pre {
+            background: #f6f8fa;
+            border: 1px solid #d8dee4;
+            border-radius: 10px;
+            overflow: auto;
+            padding: 1rem 1.05rem;
+        }
+        .github-markdown-body pre code {
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
+        }
+        .github-markdown-body blockquote {
+            color: #57606a;
+            border-left: 0.25em solid #d0d7de;
+            padding: 0 1em;
+        }
+        .github-markdown-body hr {
+            height: 0.25em;
+            padding: 0;
+            margin: 1.5rem 0;
+            background: #d0d7de;
+            border: 0;
+        }
+        .github-markdown-body table {
+            display: block;
+            width: 100%;
+            overflow: auto;
+            border-spacing: 0;
+            border-collapse: collapse;
+        }
+        .github-markdown-body table th,
+        .github-markdown-body table td {
+            border: 1px solid #d0d7de;
+            padding: 0.55rem 0.8rem;
+        }
+        .github-markdown-body table tr:nth-child(2n) {
+            background: #f6f8fa;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.subheader("筆記本")
+    st.caption("以 GitHub 文件頁風格顯示 markdown，內容會保存到 DuckDB。")
+    store = _history_store()
+    writer = getattr(store, "save_notebook_entry", None)
+    if not callable(writer):
+        st.error("目前 store 未提供筆記本寫入 API。")
+        return
+
+    note = _load_notebook_entry(DEFAULT_NOTEBOOK_ID)
+    stored_body = str(getattr(note, "body", "") or "")
+    body_value = stored_body or _default_notebook_markdown()
+    if NOTEBOOK_BODY_STATE_KEY not in st.session_state:
+        st.session_state[NOTEBOOK_BODY_STATE_KEY] = body_value
+    updated_at = getattr(note, "updated_at", None)
+
+    editor_col, preview_col = st.columns([0.8, 1.4], gap="large")
+    with editor_col:
+        _render_card_section_header("Markdown 編輯", "收窄編輯區，把主要視線留給右側預覽。")
+        body = st.text_area(
+            "筆記內容",
+            height=720,
+            key=NOTEBOOK_BODY_STATE_KEY,
+        )
+        submitted = st.button("儲存筆記", key="notebook_save_button", use_container_width=True)
+        if submitted:
+            try:
+                writer(note_id=DEFAULT_NOTEBOOK_ID, body=body)
+                st.success("筆記已儲存。")
+                st.rerun()
+            except Exception as exc:
+                st.warning(f"筆記儲存失敗：{exc}")
+
+    with preview_col:
+        _render_card_section_header("GitHub 預覽", "主閱讀區加寬，較適合長文整理與檢視。")
+        preview_html = _render_notebook_markdown_html(
+            str(st.session_state.get(NOTEBOOK_BODY_STATE_KEY, body_value) or body_value)
+        )
+        st.markdown(
+            f"<div class='notebook-preview'><div class='github-markdown-body'>{preview_html}</div></div>",
+            unsafe_allow_html=True,
+        )
+        if updated_at is not None:
+            st.caption(f"最近儲存時間：{updated_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
+
+
 def _build_message_board_threads(entries: list[Any]) -> list[dict[str, Any]]:
     roots: list[Any] = []
     replies_by_parent: dict[str, list[Any]] = {}
@@ -2475,6 +2688,54 @@ def _build_message_board_threads(entries: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _render_message_board_manage_entry(
+    *,
+    entry: Any,
+    writer_update: Any,
+    writer_delete: Any,
+    title: str,
+) -> None:
+    message_id = str(getattr(entry, "message_id", "") or "").strip()
+    if not message_id:
+        return
+    updated_at = getattr(entry, "updated_at", None)
+    created_at = getattr(entry, "created_at", None)
+    if updated_at is not None and created_at is not None and updated_at > created_at:
+        st.caption(f"最後修改：{updated_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
+    with st.expander(title, expanded=False):
+        body = st.text_area(
+            "內容",
+            value=str(getattr(entry, "body", "") or ""),
+            height=180,
+            key=f"message_manage_body_{message_id}",
+        )
+        action_cols = st.columns(2, gap="small")
+        if action_cols[0].button("儲存修改", key=f"message_update_{message_id}", width="stretch"):
+            text = str(body or "").strip()
+            if not text:
+                st.warning("請先輸入內容。")
+            else:
+                try:
+                    updated = bool(writer_update(message_id=message_id, body=text))
+                    if not updated:
+                        st.warning("找不到要修改的留言。")
+                    else:
+                        st.success("留言已更新。")
+                        st.rerun()
+                except Exception as exc:
+                    st.warning(f"留言更新失敗：{exc}")
+        if action_cols[1].button("刪除留言", key=f"message_delete_{message_id}", width="stretch"):
+            try:
+                deleted = int(writer_delete(message_id=message_id) or 0)
+                if deleted <= 0:
+                    st.warning("找不到要刪除的留言。")
+                else:
+                    st.success("留言已刪除。")
+                    st.rerun()
+            except Exception as exc:
+                st.warning(f"留言刪除失敗：{exc}")
+
+
 def _render_message_board_view():
     st.markdown(
         """
@@ -2491,8 +2752,8 @@ def _render_message_board_view():
             border: 1px solid #d0d7de !important;
             border-radius: 10px !important;
             color: #1f2328 !important;
-            font-size: 1.02rem !important;
-            line-height: 1.7 !important;
+            font-size: 24px !important;
+            line-height: 1.75 !important;
             padding: 1rem 1.05rem !important;
             font-family: "Noto Sans TC", "PingFang TC", "Segoe UI", sans-serif !important;
         }
@@ -2525,8 +2786,8 @@ def _render_message_board_view():
         }
         .message-board-body {
             color: #1f2328;
-            font-size: 1.02rem;
-            line-height: 1.8;
+            font-size: 24px;
+            line-height: 1.75;
             white-space: normal;
         }
         .message-board-replies {
@@ -2564,6 +2825,8 @@ def _render_message_board_view():
     )
     store = _history_store()
     writer = getattr(store, "save_message_board_entry", None)
+    updater = getattr(store, "update_message_board_entry", None)
+    deleter = getattr(store, "delete_message_board_entry", None)
     if not callable(writer):
         st.error("目前 store 未提供留言板寫入 API。")
         return
@@ -2619,6 +2882,13 @@ def _render_message_board_view():
                 ),
                 unsafe_allow_html=True,
             )
+            if callable(updater) and callable(deleter):
+                _render_message_board_manage_entry(
+                    entry=root,
+                    writer_update=updater,
+                    writer_delete=deleter,
+                    title="修改 / 刪除這則留言",
+                )
             if replies:
                 st.markdown("<div class='message-board-replies'>", unsafe_allow_html=True)
                 st.markdown(
@@ -2638,6 +2908,13 @@ def _render_message_board_view():
                         ),
                         unsafe_allow_html=True,
                     )
+                    if callable(updater) and callable(deleter):
+                        _render_message_board_manage_entry(
+                            entry=reply,
+                            writer_update=updater,
+                            writer_delete=deleter,
+                            title="修改 / 刪除這則回覆",
+                        )
                 st.markdown("</div>", unsafe_allow_html=True)
             with st.expander("回覆這則留言", expanded=False):
                 with st.form(f"message_board_reply_{root_id}", clear_on_submit=True):
@@ -2719,8 +2996,11 @@ def _render_app_title() -> None:
     st.markdown(
         (
             "<div class='site-title-wrap'>"
+            "<div class='site-title-main'>"
             "<span class='site-title-mark'>股</span>"
             "<span class='site-title-text'>海明威ETF釣魚研究所</span>"
+            "</div>"
+            "<a class='site-title-game-link' href='http://192.168.15.9:5173' target='_blank' rel='noopener noreferrer'>釣魚遊戲</a>"
             "</div>"
         ),
         unsafe_allow_html=True,
@@ -4097,10 +4377,18 @@ def _inject_ui_styles():
         .site-title-wrap {{
             display: flex;
             align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
             gap: 0.48rem;
             margin: 0.1rem 0 0.35rem 0;
             color: {text_color};
             font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Segoe UI", sans-serif;
+        }}
+        .site-title-main {{
+            display: flex;
+            align-items: center;
+            gap: 0.48rem;
+            min-width: 0;
         }}
         .site-title-mark {{
             display: inline-flex;
@@ -4120,6 +4408,25 @@ def _inject_ui_styles():
             font-weight: 800;
             line-height: 1.08;
             letter-spacing: 0.01em;
+        }}
+        .site-title-game-link {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 2.55rem;
+            padding: 0.58rem 1rem;
+            border-radius: 999px;
+            border: 1px solid {control_border};
+            background: {control_bg};
+            color: {text_color} !important;
+            font-size: 0.98rem;
+            font-weight: 700;
+            text-decoration: none !important;
+            white-space: nowrap;
+        }}
+        .site-title-game-link:hover {{
+            border-color: {accent};
+            color: {accent} !important;
         }}
         .crisp-table-wrap {{
             border: 1px solid {card_border};
@@ -13373,6 +13680,7 @@ def main():
         "00735 熱力圖": _render_00735_heatmap_view,
         "0050 熱力圖": _render_0050_heatmap_view,
         "0052 熱力圖": _render_0052_heatmap_view,
+        "筆記本": _render_notebook_view,
         "留言板": _render_message_board_view,
         "資料庫檢視": _render_db_browser_view,
         "新手教學": _render_tutorial_view,
