@@ -560,13 +560,15 @@ def _resolve_tw_etf_super_export_file_name(
         token = _normalize_trade_date_token(candidate)
         if token:
             return f"tw_etf_super_export_{token}.csv"
-    if isinstance(export_frame, pd.DataFrame) and not export_frame.empty and "日期" in export_frame.columns:
+    if (
+        isinstance(export_frame, pd.DataFrame)
+        and not export_frame.empty
+        and "日期" in export_frame.columns
+    ):
         series = export_frame.get("日期")
         if isinstance(series, pd.Series):
             valid_tokens = [
-                token
-                for token in series.map(_normalize_trade_date_token).tolist()
-                if token
+                token for token in series.map(_normalize_trade_date_token).tolist() if token
             ]
             if valid_tokens:
                 return f"tw_etf_super_export_{max(valid_tokens)}.csv"
