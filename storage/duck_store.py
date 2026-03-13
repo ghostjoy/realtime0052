@@ -307,9 +307,7 @@ class DuckHistoryStore:
         row = conn.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table}").fetchone()
         return int(row[0] or 1)
 
-    def _table_has_column(
-        self, conn: duckdb.DuckDBPyConnection, table: str, column: str
-    ) -> bool:
+    def _table_has_column(self, conn: duckdb.DuckDBPyConnection, table: str, column: str) -> bool:
         rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
         target = str(column or "").strip().lower()
         return any(str(row[1] or "").strip().lower() == target for row in rows)
@@ -317,7 +315,9 @@ class DuckHistoryStore:
     def _ensure_notebook_schema(self, conn: duckdb.DuckDBPyConnection) -> None:
         if not self._table_has_column(conn, "notebook_entries", "title"):
             conn.execute("ALTER TABLE notebook_entries ADD COLUMN title VARCHAR")
-            conn.execute("UPDATE notebook_entries SET title='未命名筆記' WHERE COALESCE(title, '') = ''")
+            conn.execute(
+                "UPDATE notebook_entries SET title='未命名筆記' WHERE COALESCE(title, '') = ''"
+            )
 
     def _init_db(self):
         with self._connect_ctx() as conn:

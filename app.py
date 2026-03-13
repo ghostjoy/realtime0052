@@ -2776,7 +2776,12 @@ def _render_notebook_view():
     creator = getattr(store, "create_notebook_entry", None)
     writer = getattr(store, "save_notebook_entry", None)
     deleter = getattr(store, "delete_notebook_entry", None)
-    if not callable(lister) or not callable(creator) or not callable(writer) or not callable(deleter):
+    if (
+        not callable(lister)
+        or not callable(creator)
+        or not callable(writer)
+        or not callable(deleter)
+    ):
         st.error("目前 store 未提供完整的筆記本 CRUD API。")
         return
 
@@ -2832,7 +2837,9 @@ def _render_notebook_view():
     with left_col:
         _render_card_section_header("筆記清單", "點選左欄切換，中間維持預覽為主。")
         action_cols = st.columns(3, gap="small")
-        if action_cols[0].button("新增筆記", key="notebook_create_button", use_container_width=True):
+        if action_cols[0].button(
+            "新增筆記", key="notebook_create_button", use_container_width=True
+        ):
             if has_unsaved:
                 st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "目前有未儲存變更，請先儲存或取消。"
                 st.rerun()
@@ -2891,7 +2898,9 @@ def _render_notebook_view():
                         if new_note_id:
                             st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = new_note_id
                             st.session_state[NOTEBOOK_EDIT_ON_LOAD_STATE_KEY] = True
-                            st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "筆記已刪除，已補上一篇新筆記。"
+                            st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = (
+                                "筆記已刪除，已補上一篇新筆記。"
+                            )
                     st.rerun()
                 st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "刪除筆記失敗。"
                 st.rerun()
@@ -2919,7 +2928,9 @@ def _render_notebook_view():
                 )
                 if clicked and entry_id != selected_note_id:
                     if has_unsaved:
-                        st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "目前有未儲存變更，請先儲存或取消。"
+                        st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = (
+                            "目前有未儲存變更，請先儲存或取消。"
+                        )
                     else:
                         st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = entry_id
                         st.session_state.pop(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, None)
@@ -2985,9 +2996,10 @@ def _render_notebook_view():
                 key="notebook_cancel_edit_button",
                 use_container_width=True,
             ):
-                st.session_state[NOTEBOOK_TITLE_STATE_KEY] = str(
-                    st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, "") or ""
-                ).strip() or _default_notebook_title()
+                st.session_state[NOTEBOOK_TITLE_STATE_KEY] = (
+                    str(st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, "") or "").strip()
+                    or _default_notebook_title()
+                )
                 st.session_state[NOTEBOOK_BODY_STATE_KEY] = str(
                     st.session_state.get(NOTEBOOK_LAST_SAVED_BODY_STATE_KEY, "") or ""
                 )
@@ -3006,7 +3018,9 @@ def _render_notebook_view():
         if is_editing:
             current_title = str(st.session_state.get(NOTEBOOK_TITLE_STATE_KEY, "") or "").strip()
             current_body = str(st.session_state.get(NOTEBOOK_BODY_STATE_KEY, "") or "")
-            saved_title = str(st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, "") or "").strip()
+            saved_title = str(
+                st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, "") or ""
+            ).strip()
             saved_body = str(st.session_state.get(NOTEBOOK_LAST_SAVED_BODY_STATE_KEY, "") or "")
             if (not current_title and saved_title) or (not current_body and saved_body):
                 _restore_notebook_editor_from_saved_state()
