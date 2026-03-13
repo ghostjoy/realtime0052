@@ -88,6 +88,10 @@
 - 新增 `scripts/backfill_daily_vwap.py`：可對現有 `daily_bars` 做一次性 `vwap` 回填，支援 DuckDB/Parquet 與 legacy SQLite。
 
 ### Changed
+- `筆記本` 卡片頁改為三欄版面：
+  - 左欄顯示可切換的筆記清單，支援新增 / 改名 / 刪除多篇筆記
+  - 中欄改為預覽與編輯整合，預設直接顯示預覽，按下 `編輯` 才切到編輯模式
+  - DuckDB `notebook_entries` 升級支援獨立筆記標題與多筆筆記列表
 - Auto: updated README.md, app.py, storage/duck_store.py, storage/history_store.py, tests/test_active_etf_page.py, tests/test_duck_store.py [id:f1b8fd428f]
 - `台股 ETF 全類型總表` 的「超級大表匯出」區塊調整：
   - 只保留單一「下載超級大表 CSV」按鈕，移除「一鍵下載並開啟 Google Sheets」。

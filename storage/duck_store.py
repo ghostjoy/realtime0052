@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -306,6 +307,18 @@ class DuckHistoryStore:
         row = conn.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table}").fetchone()
         return int(row[0] or 1)
 
+    def _table_has_column(
+        self, conn: duckdb.DuckDBPyConnection, table: str, column: str
+    ) -> bool:
+        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+        target = str(column or "").strip().lower()
+        return any(str(row[1] or "").strip().lower() == target for row in rows)
+
+    def _ensure_notebook_schema(self, conn: duckdb.DuckDBPyConnection) -> None:
+        if not self._table_has_column(conn, "notebook_entries", "title"):
+            conn.execute("ALTER TABLE notebook_entries ADD COLUMN title VARCHAR")
+            conn.execute("UPDATE notebook_entries SET title='未命名筆記' WHERE COALESCE(title, '') = ''")
+
     def _init_db(self):
         with self._connect_ctx() as conn:
             conn.execute(
@@ -484,6 +497,7 @@ class DuckHistoryStore:
                 CREATE TABLE IF NOT EXISTS notebook_entries (
                     id BIGINT,
                     note_id VARCHAR,
+                    title VARCHAR,
                     body VARCHAR,
                     created_at VARCHAR,
                     updated_at VARCHAR,
@@ -648,6 +662,7 @@ class DuckHistoryStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tw_etf_mis_daily_code_date ON tw_etf_mis_daily(etf_code, trade_date)"
             )
+            self._ensure_notebook_schema(conn)
 
     def _default_legacy_sqlite_path(self) -> Path:
         env = str(os.getenv("REALTIME0052_DB_PATH", "")).strip()
@@ -4041,8 +4056,61 @@ class DuckHistoryStore:
             )
         return delete_count
 
-    def save_notebook_entry(self, *, note_id: str = "default", body: str) -> str:
+    @staticmethod
+    def _default_notebook_title(title: object, *, note_id: object = "") -> str:
+        text = str(title or "").strip()
+        if text:
+            return text
+        note_key = str(note_id or "").strip()
+        return note_key or "未命名筆記"
+
+    def create_notebook_entry(self, *, title: str = "未命名筆記", body: str = "") -> str:
+        note_key = uuid.uuid4().hex
+        title_text = self._default_notebook_title(title, note_id=note_key)
+        text = str(body or "")
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        with self._connect_ctx() as conn:
+            rid = self._next_id(conn, "notebook_entries")
+            conn.execute(
+                """
+                INSERT INTO notebook_entries(
+                    id, note_id, title, body, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (rid, note_key, title_text, text, now_iso, now_iso),
+            )
+        return note_key
+
+    def list_notebook_entries(self, *, limit: int = 200) -> list[NotebookEntry]:
+        safe_limit = max(1, int(limit or 200))
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT note_id, title, body, created_at, updated_at
+                FROM notebook_entries
+                ORDER BY updated_at DESC, created_at DESC, note_id ASC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+        now = datetime.now(tz=timezone.utc)
+        return [
+            NotebookEntry(
+                note_id=self._normalize_text(row[0]) or uuid.uuid4().hex,
+                title=self._default_notebook_title(row[1], note_id=row[0]),
+                body=str(row[2] or ""),
+                created_at=self._parse_iso_datetime(row[3]) or now,
+                updated_at=self._parse_iso_datetime(row[4]) or now,
+            )
+            for row in rows
+        ]
+
+    def save_notebook_entry(self, *, note_id: str = "default", title: str = "", body: str) -> str:
         note_key = self._normalize_text(note_id) or "default"
+        title_text = self._default_notebook_title(title, note_id=note_key)
         text = str(body or "")
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         with self._connect_ctx() as conn:
@@ -4055,21 +4123,33 @@ class DuckHistoryStore:
                 conn.execute(
                     """
                     INSERT INTO notebook_entries(
-                        id, note_id, body, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?)
+                        id, note_id, title, body, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?)
                     """,
-                    (rid, note_key, text, now_iso, now_iso),
+                    (rid, note_key, title_text, text, now_iso, now_iso),
                 )
             else:
                 conn.execute(
                     """
                     UPDATE notebook_entries
-                    SET body=?, updated_at=?
+                    SET title=?, body=?, updated_at=?
                     WHERE note_id=?
                     """,
-                    (text, now_iso, note_key),
+                    (title_text, text, now_iso, note_key),
                 )
         return note_key
+
+    def delete_notebook_entry(self, *, note_id: str = "default") -> bool:
+        note_key = self._normalize_text(note_id) or "default"
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM notebook_entries WHERE note_id=?",
+                (note_key,),
+            ).fetchone()
+            if row is None or int(row[0] or 0) <= 0:
+                return False
+            conn.execute("DELETE FROM notebook_entries WHERE note_id=?", (note_key,))
+        return True
 
     def load_notebook_entry(self, *, note_id: str = "default") -> NotebookEntry | None:
         note_key = self._normalize_text(note_id) or "default"
@@ -4077,7 +4157,7 @@ class DuckHistoryStore:
         try:
             row = conn.execute(
                 """
-                SELECT note_id, body, created_at, updated_at
+                SELECT note_id, title, body, created_at, updated_at
                 FROM notebook_entries
                 WHERE note_id=?
                 """,
@@ -4090,9 +4170,10 @@ class DuckHistoryStore:
         now = datetime.now(tz=timezone.utc)
         return NotebookEntry(
             note_id=self._normalize_text(row[0]) or note_key,
-            body=str(row[1] or ""),
-            created_at=self._parse_iso_datetime(row[2]) or now,
-            updated_at=self._parse_iso_datetime(row[3]) or now,
+            title=self._default_notebook_title(row[1], note_id=row[0]),
+            body=str(row[2] or ""),
+            created_at=self._parse_iso_datetime(row[3]) or now,
+            updated_at=self._parse_iso_datetime(row[4]) or now,
         )
 
     def save_rotation_run(

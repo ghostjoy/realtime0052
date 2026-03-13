@@ -148,6 +148,7 @@ class MessageBoardEntry:
 @dataclass(frozen=True)
 class NotebookEntry:
     note_id: str
+    title: str
     body: str
     created_at: datetime
     updated_at: datetime

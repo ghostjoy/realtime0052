@@ -2296,8 +2296,17 @@ DEFAULT_ACTIVE_PAGE = "台股 ETF 全類型總表"
 DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
 CLIENT_VISIT_SESSION_KEY = "client_visit_session_id"
-DEFAULT_NOTEBOOK_ID = "default"
 NOTEBOOK_BODY_STATE_KEY = "notebook_markdown_body"
+NOTEBOOK_TITLE_STATE_KEY = "notebook_title"
+NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY = "notebook_selected_note_id"
+NOTEBOOK_IS_EDITING_STATE_KEY = "notebook_is_editing"
+NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY = "notebook_last_saved_title"
+NOTEBOOK_LAST_SAVED_BODY_STATE_KEY = "notebook_last_saved_body"
+NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY = "notebook_last_loaded_note_id"
+NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY = "notebook_pending_delete_note_id"
+NOTEBOOK_EDIT_ON_LOAD_STATE_KEY = "notebook_edit_on_load"
+NOTEBOOK_NOTICE_STATE_KEY = "notebook_notice"
+NOTEBOOK_SUCCESS_STATE_KEY = "notebook_success"
 
 
 def _runtime_page_cards() -> list[dict[str, str]]:
@@ -2492,7 +2501,53 @@ print("hello notebook")
 """
 
 
-def _load_notebook_entry(note_id: str = DEFAULT_NOTEBOOK_ID) -> Any | None:
+def _default_notebook_title() -> str:
+    return "未命名筆記"
+
+
+def _notebook_entry_title(note: object) -> str:
+    title = str(getattr(note, "title", "") or "").strip()
+    if title:
+        return title
+    note_id = str(getattr(note, "note_id", "") or "").strip()
+    return note_id or _default_notebook_title()
+
+
+def _list_notebook_entries(limit: int = 200) -> list[Any]:
+    store = _history_store()
+    loader = getattr(store, "list_notebook_entries", None)
+    if not callable(loader):
+        fallback = _load_notebook_entry("default")
+        return [fallback] if fallback is not None else []
+    try:
+        return list(loader(limit=limit))
+    except Exception:
+        return []
+
+
+def _create_notebook_entry(title: str, body: str) -> str | None:
+    store = _history_store()
+    writer = getattr(store, "create_notebook_entry", None)
+    if not callable(writer):
+        return None
+    try:
+        return str(writer(title=title, body=body) or "").strip() or None
+    except Exception:
+        return None
+
+
+def _delete_notebook_entry(note_id: str) -> bool:
+    store = _history_store()
+    deleter = getattr(store, "delete_notebook_entry", None)
+    if not callable(deleter):
+        return False
+    try:
+        return bool(deleter(note_id=note_id))
+    except Exception:
+        return False
+
+
+def _load_notebook_entry(note_id: str) -> Any | None:
     store = _history_store()
     loader = getattr(store, "load_notebook_entry", None)
     if not callable(loader):
@@ -2501,6 +2556,64 @@ def _load_notebook_entry(note_id: str = DEFAULT_NOTEBOOK_ID) -> Any | None:
         return loader(note_id=note_id)
     except Exception:
         return None
+
+
+def _resolve_notebook_selected_id(entries: list[Any], selected_note_id: object) -> str:
+    note_ids = [
+        str(getattr(entry, "note_id", "") or "").strip()
+        for entry in entries
+        if str(getattr(entry, "note_id", "") or "").strip()
+    ]
+    current = str(selected_note_id or "").strip()
+    if current and current in note_ids:
+        return current
+    return note_ids[0] if note_ids else ""
+
+
+def _notebook_has_unsaved_changes_values(
+    current_title: object,
+    current_body: object,
+    saved_title: object,
+    saved_body: object,
+) -> bool:
+    return str(current_title or "").strip() != str(saved_title or "").strip() or str(
+        current_body or ""
+    ) != str(saved_body or "")
+
+
+def _notebook_has_unsaved_changes() -> bool:
+    return _notebook_has_unsaved_changes_values(
+        st.session_state.get(NOTEBOOK_TITLE_STATE_KEY, ""),
+        st.session_state.get(NOTEBOOK_BODY_STATE_KEY, ""),
+        st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, ""),
+        st.session_state.get(NOTEBOOK_LAST_SAVED_BODY_STATE_KEY, ""),
+    )
+
+
+def _prime_notebook_editor_state(note: object) -> None:
+    note_id = str(getattr(note, "note_id", "") or "").strip()
+    title = _notebook_entry_title(note)
+    body = str(getattr(note, "body", "") or "")
+    st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = note_id
+    st.session_state[NOTEBOOK_TITLE_STATE_KEY] = title
+    st.session_state[NOTEBOOK_BODY_STATE_KEY] = body
+    st.session_state[NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY] = title
+    st.session_state[NOTEBOOK_LAST_SAVED_BODY_STATE_KEY] = body
+    st.session_state[NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY] = note_id
+    st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = bool(
+        st.session_state.pop(NOTEBOOK_EDIT_ON_LOAD_STATE_KEY, False)
+    )
+    st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
+
+
+def _restore_notebook_editor_from_saved_state() -> None:
+    st.session_state[NOTEBOOK_TITLE_STATE_KEY] = (
+        str(st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, "") or "").strip()
+        or _default_notebook_title()
+    )
+    st.session_state[NOTEBOOK_BODY_STATE_KEY] = str(
+        st.session_state.get(NOTEBOOK_LAST_SAVED_BODY_STATE_KEY, "") or ""
+    )
 
 
 def _render_notebook_markdown_html(markdown_text: str) -> str:
@@ -2623,53 +2736,313 @@ def _render_notebook_view():
         .github-markdown-body table tr:nth-child(2n) {
             background: #f6f8fa;
         }
+        .notebook-sidebar-item {
+            padding-bottom: 0.65rem;
+            margin-bottom: 0.65rem;
+            border-bottom: 1px solid rgba(208, 215, 222, 0.7);
+        }
+        .notebook-sidebar-item:last-child {
+            border-bottom: 0;
+            margin-bottom: 0;
+        }
+        .notebook-sidebar-meta {
+            color: #57606a;
+            font-size: 0.84rem;
+            line-height: 1.45;
+        }
+        .notebook-preview-title {
+            color: #1f2328;
+            font-size: 1.55rem;
+            font-weight: 700;
+            line-height: 1.2;
+            margin-bottom: 0.35rem;
+        }
+        .notebook-preview-meta {
+            color: #57606a;
+            font-size: 0.9rem;
+            margin-bottom: 1.15rem;
+        }
+        .notebook-empty-right {
+            min-height: 760px;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
     st.subheader("筆記本")
-    st.caption("以 GitHub 文件頁風格顯示 markdown，內容會保存到 DuckDB。")
+    st.caption("左欄管理筆記，中欄預設直接預覽；按下編輯才切到編輯模式。")
     store = _history_store()
+    lister = getattr(store, "list_notebook_entries", None)
+    creator = getattr(store, "create_notebook_entry", None)
     writer = getattr(store, "save_notebook_entry", None)
-    if not callable(writer):
-        st.error("目前 store 未提供筆記本寫入 API。")
+    deleter = getattr(store, "delete_notebook_entry", None)
+    if not callable(lister) or not callable(creator) or not callable(writer) or not callable(deleter):
+        st.error("目前 store 未提供完整的筆記本 CRUD API。")
         return
 
-    note = _load_notebook_entry(DEFAULT_NOTEBOOK_ID)
-    stored_body = str(getattr(note, "body", "") or "")
-    body_value = stored_body or _default_notebook_markdown()
-    if NOTEBOOK_BODY_STATE_KEY not in st.session_state:
-        st.session_state[NOTEBOOK_BODY_STATE_KEY] = body_value
-    updated_at = getattr(note, "updated_at", None)
-
-    editor_col, preview_col = st.columns([0.8, 1.4], gap="large")
-    with editor_col:
-        _render_card_section_header("Markdown 編輯", "收窄編輯區，把主要視線留給右側預覽。")
-        body = st.text_area(
-            "筆記內容",
-            height=720,
-            key=NOTEBOOK_BODY_STATE_KEY,
+    entries = _list_notebook_entries(limit=200)
+    if not entries:
+        created_id = _create_notebook_entry(
+            title=_default_notebook_title(),
+            body=_default_notebook_markdown(),
         )
-        submitted = st.button("儲存筆記", key="notebook_save_button", use_container_width=True)
-        if submitted:
-            try:
-                writer(note_id=DEFAULT_NOTEBOOK_ID, body=body)
-                st.success("筆記已儲存。")
+        if not created_id:
+            st.error("無法建立預設筆記。")
+            return
+        st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = created_id
+        st.session_state[NOTEBOOK_EDIT_ON_LOAD_STATE_KEY] = True
+        st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "已建立第一篇筆記。"
+        st.rerun()
+
+    selected_note_id = _resolve_notebook_selected_id(
+        entries,
+        st.session_state.get(NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY, ""),
+    )
+    if not selected_note_id:
+        st.error("目前沒有可載入的筆記。")
+        return
+    st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = selected_note_id
+    note_map = {
+        str(getattr(entry, "note_id", "") or "").strip(): entry
+        for entry in entries
+        if str(getattr(entry, "note_id", "") or "").strip()
+    }
+    selected_note = _load_notebook_entry(selected_note_id) or note_map.get(selected_note_id)
+    if selected_note is None:
+        st.error("找不到目前選取的筆記。")
+        return
+    if (
+        str(st.session_state.get(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, "") or "").strip()
+        != selected_note_id
+    ):
+        _prime_notebook_editor_state(selected_note)
+
+    success_message = str(st.session_state.pop(NOTEBOOK_SUCCESS_STATE_KEY, "") or "").strip()
+    notice_message = str(st.session_state.get(NOTEBOOK_NOTICE_STATE_KEY, "") or "").strip()
+    if success_message:
+        st.success(success_message)
+    if notice_message:
+        st.warning(notice_message)
+
+    selected_updated_at = getattr(selected_note, "updated_at", None)
+    is_editing = bool(st.session_state.get(NOTEBOOK_IS_EDITING_STATE_KEY, False))
+    has_unsaved = _notebook_has_unsaved_changes()
+    left_col, center_col, right_col = st.columns([1.1, 2.2, 0.7], gap="large")
+
+    with left_col:
+        _render_card_section_header("筆記清單", "點選左欄切換，中間維持預覽為主。")
+        action_cols = st.columns(3, gap="small")
+        if action_cols[0].button("新增筆記", key="notebook_create_button", use_container_width=True):
+            if has_unsaved:
+                st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "目前有未儲存變更，請先儲存或取消。"
                 st.rerun()
-            except Exception as exc:
-                st.warning(f"筆記儲存失敗：{exc}")
+            created_id = _create_notebook_entry(
+                title=_default_notebook_title(),
+                body=_default_notebook_markdown(),
+            )
+            if created_id:
+                st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = created_id
+                st.session_state[NOTEBOOK_EDIT_ON_LOAD_STATE_KEY] = True
+                st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "已新增筆記。"
+                st.rerun()
+            st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "新增筆記失敗。"
+            st.rerun()
+        if action_cols[1].button("改名", key="notebook_rename_button", use_container_width=True):
+            _restore_notebook_editor_from_saved_state()
+            st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = True
+            st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
+            st.rerun()
+        if action_cols[2].button("刪除", key="notebook_delete_button", use_container_width=True):
+            if has_unsaved:
+                st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "目前有未儲存變更，請先儲存或取消。"
+                st.rerun()
+            st.session_state[NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY] = selected_note_id
 
-    with preview_col:
-        _render_card_section_header("GitHub 預覽", "主閱讀區加寬，較適合長文整理與檢視。")
-        preview_html = _render_notebook_markdown_html(
-            str(st.session_state.get(NOTEBOOK_BODY_STATE_KEY, body_value) or body_value)
+        pending_delete_id = str(
+            st.session_state.get(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, "") or ""
+        ).strip()
+        if pending_delete_id == selected_note_id:
+            st.warning(f"確定要刪除「{_notebook_entry_title(selected_note)}」嗎？")
+            confirm_cols = st.columns(2, gap="small")
+            if confirm_cols[0].button(
+                "確認刪除",
+                key="notebook_confirm_delete_button",
+                use_container_width=True,
+            ):
+                if _delete_notebook_entry(selected_note_id):
+                    remaining_entries = [
+                        entry
+                        for entry in entries
+                        if str(getattr(entry, "note_id", "") or "").strip() != selected_note_id
+                    ]
+                    st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
+                    st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
+                    st.session_state.pop(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, None)
+                    if remaining_entries:
+                        st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = str(
+                            getattr(remaining_entries[0], "note_id", "") or ""
+                        ).strip()
+                        st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "筆記已刪除。"
+                    else:
+                        new_note_id = _create_notebook_entry(
+                            title=_default_notebook_title(),
+                            body=_default_notebook_markdown(),
+                        )
+                        if new_note_id:
+                            st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = new_note_id
+                            st.session_state[NOTEBOOK_EDIT_ON_LOAD_STATE_KEY] = True
+                            st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "筆記已刪除，已補上一篇新筆記。"
+                    st.rerun()
+                st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "刪除筆記失敗。"
+                st.rerun()
+            if confirm_cols[1].button(
+                "取消刪除",
+                key="notebook_cancel_delete_button",
+                use_container_width=True,
+            ):
+                st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
+                st.rerun()
+
+        for entry in entries:
+            entry_id = str(getattr(entry, "note_id", "") or "").strip()
+            if not entry_id:
+                continue
+            entry_title = _notebook_entry_title(entry)
+            updated_at = getattr(entry, "updated_at", None)
+            with st.container():
+                is_selected = entry_id == selected_note_id
+                clicked = st.button(
+                    entry_title,
+                    key=f"notebook_select_{entry_id}",
+                    type="primary" if is_selected else "secondary",
+                    use_container_width=True,
+                )
+                if clicked and entry_id != selected_note_id:
+                    if has_unsaved:
+                        st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "目前有未儲存變更，請先儲存或取消。"
+                    else:
+                        st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = entry_id
+                        st.session_state.pop(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, None)
+                        st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
+                        st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
+                    st.rerun()
+                updated_label = "尚未儲存"
+                if updated_at is not None:
+                    updated_label = updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
+                st.markdown(
+                    f"<div class='notebook-sidebar-meta'>最近更新：{html.escape(updated_label)}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.divider()
+
+    with center_col:
+        _render_card_section_header(
+            "筆記內容",
+            "預設顯示預覽，只有按下編輯才切換成可修改模式。",
         )
-        st.markdown(
-            f"<div class='notebook-preview'><div class='github-markdown-body'>{preview_html}</div></div>",
-            unsafe_allow_html=True,
-        )
-        if updated_at is not None:
-            st.caption(f"最近儲存時間：{updated_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
+        action_cols = st.columns([1, 1, 1.4], gap="small")
+        if not is_editing:
+            if action_cols[0].button(
+                "編輯",
+                key="notebook_edit_button",
+                use_container_width=True,
+            ):
+                _restore_notebook_editor_from_saved_state()
+                st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = True
+                st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
+                st.rerun()
+                st.rerun()
+        else:
+            if action_cols[0].button(
+                "儲存",
+                key="notebook_save_button",
+                use_container_width=True,
+                type="primary",
+            ):
+                title_value = str(st.session_state.get(NOTEBOOK_TITLE_STATE_KEY, "") or "").strip()
+                body_value = str(st.session_state.get(NOTEBOOK_BODY_STATE_KEY, "") or "")
+                try:
+                    writer(
+                        note_id=selected_note_id,
+                        title=title_value or _default_notebook_title(),
+                        body=body_value,
+                    )
+                    st.session_state[NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY] = (
+                        title_value or _default_notebook_title()
+                    )
+                    st.session_state[NOTEBOOK_LAST_SAVED_BODY_STATE_KEY] = body_value
+                    st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = False
+                    st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
+                    st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
+                    st.session_state.pop(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, None)
+                    st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "筆記已儲存。"
+                    st.rerun()
+                except Exception as exc:
+                    st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = f"筆記儲存失敗：{exc}"
+                    st.rerun()
+            if action_cols[1].button(
+                "取消",
+                key="notebook_cancel_edit_button",
+                use_container_width=True,
+            ):
+                st.session_state[NOTEBOOK_TITLE_STATE_KEY] = str(
+                    st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, "") or ""
+                ).strip() or _default_notebook_title()
+                st.session_state[NOTEBOOK_BODY_STATE_KEY] = str(
+                    st.session_state.get(NOTEBOOK_LAST_SAVED_BODY_STATE_KEY, "") or ""
+                )
+                st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = False
+                st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
+                st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
+                st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "已還原為最近一次儲存內容。"
+                st.rerun()
+        if selected_updated_at is not None:
+            action_cols[2].caption(
+                f"最近儲存時間：{selected_updated_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        elif has_unsaved:
+            action_cols[2].caption("目前尚未儲存。")
+
+        if is_editing:
+            current_title = str(st.session_state.get(NOTEBOOK_TITLE_STATE_KEY, "") or "").strip()
+            current_body = str(st.session_state.get(NOTEBOOK_BODY_STATE_KEY, "") or "")
+            saved_title = str(st.session_state.get(NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY, "") or "").strip()
+            saved_body = str(st.session_state.get(NOTEBOOK_LAST_SAVED_BODY_STATE_KEY, "") or "")
+            if (not current_title and saved_title) or (not current_body and saved_body):
+                _restore_notebook_editor_from_saved_state()
+            st.text_input(
+                "筆記名稱",
+                key=NOTEBOOK_TITLE_STATE_KEY,
+                placeholder=_default_notebook_title(),
+            )
+            st.text_area(
+                "筆記內容",
+                height=720,
+                key=NOTEBOOK_BODY_STATE_KEY,
+            )
+        else:
+            title_html = html.escape(
+                str(st.session_state.get(NOTEBOOK_TITLE_STATE_KEY, "") or "").strip()
+                or _default_notebook_title()
+            )
+            body_text = str(st.session_state.get(NOTEBOOK_BODY_STATE_KEY, "") or "")
+            preview_html = _render_notebook_markdown_html(body_text)
+            if not body_text.strip():
+                preview_html = "<p>這篇筆記還沒有內容。</p>"
+            meta_label = "目前為預覽模式"
+            st.markdown(
+                (
+                    "<div class='notebook-preview'>"
+                    f"<div class='notebook-preview-title'>{title_html}</div>"
+                    f"<div class='notebook-preview-meta'>{html.escape(meta_label)}</div>"
+                    f"<div class='github-markdown-body'>{preview_html}</div>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+
+    with right_col:
+        st.markdown("<div class='notebook-empty-right'></div>", unsafe_allow_html=True)
 
 
 def _build_message_board_threads(entries: list[Any]) -> list[dict[str, Any]]:

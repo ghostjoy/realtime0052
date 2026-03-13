@@ -73,10 +73,13 @@ from app import (
     _load_tw_etf_daily_change_map,
     _load_tw_market_daily_return,
     _load_tw_market_return_between,
+    _notebook_has_unsaved_changes_values,
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
+    _resolve_notebook_selected_id,
     _resolve_tw_etf_super_export_file_name,
     _resolve_tw_symbol_names,
+    _restore_notebook_editor_from_saved_state,
     _snapshot_fallback_depth,
     _style_tw_today_move_table,
     _sync_tw_etf_all_types_export_sources,
@@ -96,6 +99,46 @@ from ui.helpers import (
 class ActiveEtfPageTests(unittest.TestCase):
     def test_default_active_page_is_tw_etf_summary(self):
         self.assertEqual(DEFAULT_ACTIVE_PAGE, "台股 ETF 全類型總表")
+
+    def test_resolve_notebook_selected_id_prefers_existing_selection(self):
+        entries = [
+            SimpleNamespace(note_id="n1"),
+            SimpleNamespace(note_id="n2"),
+        ]
+
+        selected = _resolve_notebook_selected_id(entries, "n2")
+
+        self.assertEqual(selected, "n2")
+
+    def test_resolve_notebook_selected_id_falls_back_to_first_entry(self):
+        entries = [
+            SimpleNamespace(note_id="n1"),
+            SimpleNamespace(note_id="n2"),
+        ]
+
+        selected = _resolve_notebook_selected_id(entries, "missing")
+
+        self.assertEqual(selected, "n1")
+
+    def test_notebook_unsaved_change_helper_detects_title_or_body_diff(self):
+        self.assertTrue(_notebook_has_unsaved_changes_values("A", "body", "B", "body"))
+        self.assertTrue(_notebook_has_unsaved_changes_values("A", "body1", "A", "body2"))
+        self.assertFalse(_notebook_has_unsaved_changes_values("A", "body", "A", "body"))
+
+    def test_restore_notebook_editor_from_saved_state(self):
+        with patch.dict(
+            app.st.session_state,
+            {
+                app.NOTEBOOK_LAST_SAVED_TITLE_STATE_KEY: "已儲存標題",
+                app.NOTEBOOK_LAST_SAVED_BODY_STATE_KEY: "已儲存內容",
+                app.NOTEBOOK_TITLE_STATE_KEY: "",
+                app.NOTEBOOK_BODY_STATE_KEY: "",
+            },
+            clear=True,
+        ):
+            _restore_notebook_editor_from_saved_state()
+            self.assertEqual(app.st.session_state[app.NOTEBOOK_TITLE_STATE_KEY], "已儲存標題")
+            self.assertEqual(app.st.session_state[app.NOTEBOOK_BODY_STATE_KEY], "已儲存內容")
 
     def test_filter_dataframe_by_keyword_matches_code_and_name(self):
         frame = pd.DataFrame(

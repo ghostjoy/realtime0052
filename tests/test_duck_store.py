@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import duckdb
 import pandas as pd
 
 from storage.duck_store import DuckHistoryStore
@@ -563,19 +564,92 @@ class DuckStoreTests(unittest.TestCase):
                 service=_NoopService(),
                 auto_migrate_legacy_sqlite=False,
             )
-            note_id = store.save_notebook_entry(note_id="default", body="# 測試筆記\n\n內容 A")
+            note_id = store.save_notebook_entry(
+                note_id="default",
+                title="研究筆記",
+                body="# 測試筆記\n\n內容 A",
+            )
             first = store.load_notebook_entry(note_id="default")
             self.assertEqual(note_id, "default")
             self.assertIsNotNone(first)
             assert first is not None
             self.assertEqual(first.note_id, "default")
+            self.assertEqual(first.title, "研究筆記")
             self.assertEqual(first.body, "# 測試筆記\n\n內容 A")
 
-            store.save_notebook_entry(note_id="default", body="# 測試筆記\n\n內容 B")
+            store.save_notebook_entry(
+                note_id="default",
+                title="研究筆記-更新",
+                body="# 測試筆記\n\n內容 B",
+            )
             second = store.load_notebook_entry(note_id="default")
             self.assertIsNotNone(second)
             assert second is not None
+            self.assertEqual(second.title, "研究筆記-更新")
             self.assertEqual(second.body, "# 測試筆記\n\n內容 B")
+
+    def test_list_create_and_delete_notebook_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            first_id = store.create_notebook_entry(title="第一篇", body="內容 A")
+            second_id = store.create_notebook_entry(title="第二篇", body="內容 B")
+            store.save_notebook_entry(note_id=first_id, title="第一篇-更新", body="內容 A2")
+
+            rows = store.list_notebook_entries(limit=10)
+            self.assertEqual([row.note_id for row in rows], [first_id, second_id])
+            self.assertEqual(rows[0].title, "第一篇-更新")
+            self.assertTrue(store.delete_notebook_entry(note_id=second_id))
+            remain = store.list_notebook_entries(limit=10)
+            self.assertEqual([row.note_id for row in remain], [first_id])
+
+    def test_notebook_schema_upgrade_adds_title_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "history.duckdb"
+            conn = duckdb.connect(str(db_path))
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE notebook_entries (
+                        id BIGINT,
+                        note_id VARCHAR,
+                        body VARCHAR,
+                        created_at VARCHAR,
+                        updated_at VARCHAR,
+                        UNIQUE(note_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO notebook_entries(id, note_id, body, created_at, updated_at)
+                    VALUES (1, 'legacy', '# 舊筆記', '2026-03-01T00:00:00+00:00', '2026-03-01T00:00:00+00:00')
+                    """
+                )
+            finally:
+                conn.close()
+
+            store = DuckHistoryStore(
+                db_path=str(db_path),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+            legacy = store.load_notebook_entry(note_id="legacy")
+            self.assertIsNotNone(legacy)
+            assert legacy is not None
+            self.assertEqual(legacy.title, "未命名筆記")
+            store.save_notebook_entry(note_id="legacy", title="補標題", body="# 新內容")
+            upgraded = store.load_notebook_entry(note_id="legacy")
+            self.assertIsNotNone(upgraded)
+            assert upgraded is not None
+            self.assertEqual(upgraded.title, "補標題")
 
     def test_clear_tw_etf_aum_history(self):
         with tempfile.TemporaryDirectory() as tmp:
