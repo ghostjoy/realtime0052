@@ -21,8 +21,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from markdown_it import MarkdownIt
 from plotly.subplots import make_subplots
+
+try:
+    from markdown_it import MarkdownIt
+except ModuleNotFoundError:  # pragma: no cover - fallback for stale environments
+    MarkdownIt = None
 
 from backtest import (
     ROTATION_DEFAULT_UNIVERSE,
@@ -298,6 +302,7 @@ def _filter_dataframe_by_keyword(
 
 def _clear_tw_etf_all_types_view_caches() -> None:
     _fetch_twse_snapshot_with_fallback.clear()
+    _fetch_twse_three_investors_with_fallback.clear()
     _build_tw_etf_top10_between.clear()
     _load_twii_twse_month_close_map.clear()
     _load_twii_twse_return_between.clear()
@@ -308,6 +313,7 @@ def _clear_tw_etf_all_types_view_caches() -> None:
     _load_tw_market_intraday_return.clear()
     _load_tw_market_daily_return.clear()
     _build_tw_etf_all_types_performance_table.clear()
+    _build_tw_etf_three_investors_overview.clear()
 
 
 def _build_tw_etf_all_types_main_table_view(
@@ -414,12 +420,15 @@ def _build_tw_etf_super_export_table(
     main_frame: pd.DataFrame,
     daily_market_frame: pd.DataFrame,
     mis_frame: pd.DataFrame,
+    three_investors_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     sources: list[tuple[str, pd.DataFrame]] = [
         ("main", main_frame),
         ("daily", daily_market_frame),
         ("mis", mis_frame),
     ]
+    if isinstance(three_investors_frame, pd.DataFrame):
+        sources.append(("three_investors", three_investors_frame))
     prepared: list[tuple[str, pd.DataFrame]] = []
     ordered_columns: list[str] = []
     for source_name, frame in sources:
@@ -542,6 +551,7 @@ def _resolve_tw_etf_super_export_file_name(
     main_meta: dict[str, object] | None = None,
     daily_market_meta: dict[str, object] | None = None,
     mis_meta: dict[str, object] | None = None,
+    three_investors_meta: dict[str, object] | None = None,
 ) -> str:
     meta_candidates: list[object] = []
     if isinstance(main_meta, dict):
@@ -556,6 +566,8 @@ def _resolve_tw_etf_super_export_file_name(
         meta_candidates.append(daily_market_meta.get("last_trade_date"))
     if isinstance(mis_meta, dict):
         meta_candidates.append(mis_meta.get("last_trade_date"))
+    if isinstance(three_investors_meta, dict):
+        meta_candidates.append(three_investors_meta.get("last_trade_date"))
     for candidate in meta_candidates:
         token = _normalize_trade_date_token(candidate)
         if token:
@@ -582,6 +594,7 @@ def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
         "main": {"status": "fallback", "used_trade_date": ""},
         "daily_market": {},
         "mis": {},
+        "three_investors": {},
         "aum_track": {},
         "issues": [],
     }
@@ -617,6 +630,21 @@ def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
     except Exception as exc:
         issues.append(f"mis: {exc}")
         summary["mis"] = {"status": "error", "issues": [str(exc)]}
+
+    try:
+        three_used_trade_date, three_frame = _fetch_twse_three_investors_with_fallback(
+            trade_token,
+            lookback_days=14,
+        )
+        three_status = "synced" if str(three_used_trade_date) == str(trade_token) else "fallback"
+        summary["three_investors"] = {
+            "status": three_status,
+            "used_trade_date": str(three_used_trade_date),
+            "row_count": int(len(three_frame)),
+        }
+    except Exception as exc:
+        issues.append(f"three_investors: {exc}")
+        summary["three_investors"] = {"status": "error", "issues": [str(exc)]}
 
     try:
         table_df, _ = _build_tw_etf_all_types_performance_table(
@@ -2617,6 +2645,15 @@ def _restore_notebook_editor_from_saved_state() -> None:
 
 
 def _render_notebook_markdown_html(markdown_text: str) -> str:
+    if MarkdownIt is None:
+        escaped = html.escape(str(markdown_text or ""))
+        paragraphs = [segment.strip() for segment in escaped.split("\n\n")]
+        html_blocks = []
+        for paragraph in paragraphs:
+            if not paragraph:
+                continue
+            html_blocks.append(f"<p>{paragraph.replace(chr(10), '<br>')}</p>")
+        return "".join(html_blocks)
     renderer = MarkdownIt(
         "gfm-like",
         {
@@ -2762,9 +2799,6 @@ def _render_notebook_view():
             font-size: 0.9rem;
             margin-bottom: 1.15rem;
         }
-        .notebook-empty-right {
-            min-height: 760px;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2832,14 +2866,11 @@ def _render_notebook_view():
     selected_updated_at = getattr(selected_note, "updated_at", None)
     is_editing = bool(st.session_state.get(NOTEBOOK_IS_EDITING_STATE_KEY, False))
     has_unsaved = _notebook_has_unsaved_changes()
-    left_col, center_col, right_col = st.columns([1.1, 2.2, 0.7], gap="large")
+    left_col, center_col = st.columns([1.05, 2.95], gap="large")
 
     with left_col:
         _render_card_section_header("筆記清單", "點選左欄切換，中間維持預覽為主。")
-        action_cols = st.columns(3, gap="small")
-        if action_cols[0].button(
-            "新增筆記", key="notebook_create_button", use_container_width=True
-        ):
+        if st.button("新增筆記", key="notebook_create_button", use_container_width=True):
             if has_unsaved:
                 st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "目前有未儲存變更，請先儲存或取消。"
                 st.rerun()
@@ -2854,63 +2885,6 @@ def _render_notebook_view():
                 st.rerun()
             st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "新增筆記失敗。"
             st.rerun()
-        if action_cols[1].button("改名", key="notebook_rename_button", use_container_width=True):
-            _restore_notebook_editor_from_saved_state()
-            st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = True
-            st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
-            st.rerun()
-        if action_cols[2].button("刪除", key="notebook_delete_button", use_container_width=True):
-            if has_unsaved:
-                st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "目前有未儲存變更，請先儲存或取消。"
-                st.rerun()
-            st.session_state[NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY] = selected_note_id
-
-        pending_delete_id = str(
-            st.session_state.get(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, "") or ""
-        ).strip()
-        if pending_delete_id == selected_note_id:
-            st.warning(f"確定要刪除「{_notebook_entry_title(selected_note)}」嗎？")
-            confirm_cols = st.columns(2, gap="small")
-            if confirm_cols[0].button(
-                "確認刪除",
-                key="notebook_confirm_delete_button",
-                use_container_width=True,
-            ):
-                if _delete_notebook_entry(selected_note_id):
-                    remaining_entries = [
-                        entry
-                        for entry in entries
-                        if str(getattr(entry, "note_id", "") or "").strip() != selected_note_id
-                    ]
-                    st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
-                    st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
-                    st.session_state.pop(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, None)
-                    if remaining_entries:
-                        st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = str(
-                            getattr(remaining_entries[0], "note_id", "") or ""
-                        ).strip()
-                        st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "筆記已刪除。"
-                    else:
-                        new_note_id = _create_notebook_entry(
-                            title=_default_notebook_title(),
-                            body=_default_notebook_markdown(),
-                        )
-                        if new_note_id:
-                            st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = new_note_id
-                            st.session_state[NOTEBOOK_EDIT_ON_LOAD_STATE_KEY] = True
-                            st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = (
-                                "筆記已刪除，已補上一篇新筆記。"
-                            )
-                    st.rerun()
-                st.session_state[NOTEBOOK_NOTICE_STATE_KEY] = "刪除筆記失敗。"
-                st.rerun()
-            if confirm_cols[1].button(
-                "取消刪除",
-                key="notebook_cancel_delete_button",
-                use_container_width=True,
-            ):
-                st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
-                st.rerun()
 
         for entry in entries:
             entry_id = str(getattr(entry, "note_id", "") or "").strip()
@@ -2934,7 +2908,6 @@ def _render_notebook_view():
                     else:
                         st.session_state[NOTEBOOK_SELECTED_NOTE_ID_STATE_KEY] = entry_id
                         st.session_state.pop(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, None)
-                        st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
                         st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
                     st.rerun()
                 updated_label = "尚未儲存"
@@ -2984,7 +2957,6 @@ def _render_notebook_view():
                     st.session_state[NOTEBOOK_LAST_SAVED_BODY_STATE_KEY] = body_value
                     st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = False
                     st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
-                    st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
                     st.session_state.pop(NOTEBOOK_LAST_LOADED_NOTE_ID_STATE_KEY, None)
                     st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "筆記已儲存。"
                     st.rerun()
@@ -3005,7 +2977,6 @@ def _render_notebook_view():
                 )
                 st.session_state[NOTEBOOK_IS_EDITING_STATE_KEY] = False
                 st.session_state.pop(NOTEBOOK_NOTICE_STATE_KEY, None)
-                st.session_state.pop(NOTEBOOK_PENDING_DELETE_NOTE_ID_STATE_KEY, None)
                 st.session_state[NOTEBOOK_SUCCESS_STATE_KEY] = "已還原為最近一次儲存內容。"
                 st.rerun()
         if selected_updated_at is not None:
@@ -3054,10 +3025,6 @@ def _render_notebook_view():
                 ),
                 unsafe_allow_html=True,
             )
-
-    with right_col:
-        st.markdown("<div class='notebook-empty-right'></div>", unsafe_allow_html=True)
-
 
 def _build_message_board_threads(entries: list[Any]) -> list[dict[str, Any]]:
     roots: list[Any] = []
@@ -4950,6 +4917,8 @@ def _render_page_cards_nav() -> str:
 
 
 TWSE_SNAPSHOT_DATASET_KEY = "twse_mi_index_allbut0999"
+TWSE_THREE_INVESTORS_DATASET_KEY = "twse_t86_three_investors"
+TWSE_THREE_INVESTORS_SOURCE = "twse_t86_three_investors"
 _TWSE_BG_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="twse-bg")
 _TWSE_BG_LOCK = threading.Lock()
 _TWSE_BG_INFLIGHT: set[str] = set()
@@ -4999,6 +4968,106 @@ def _twse_snapshot_from_payload(payload: object) -> pd.DataFrame:
     return frame[["code", "name", "open", "close"]]
 
 
+def _parse_twse_share_value(value: object) -> float | None:
+    text = str(value or "").strip().replace(",", "")
+    if text in {"", "--", "-"}:
+        return None
+    numeric = pd.to_numeric(text, errors="coerce")
+    if pd.isna(numeric):
+        return None
+    try:
+        return float(numeric)
+    except Exception:
+        return None
+
+
+def _twse_three_investors_from_payload(payload: object) -> pd.DataFrame:
+    if isinstance(payload, dict):
+        rows = payload.get("rows")
+    else:
+        rows = payload
+    if not isinstance(rows, list):
+        return pd.DataFrame(
+            columns=[
+                "code",
+                "name",
+                "foreign_buy_shares",
+                "foreign_sell_shares",
+                "foreign_net_shares",
+                "foreign_dealer_buy_shares",
+                "foreign_dealer_sell_shares",
+                "foreign_dealer_net_shares",
+                "investment_trust_buy_shares",
+                "investment_trust_sell_shares",
+                "investment_trust_net_shares",
+                "dealer_net_shares",
+                "dealer_self_buy_shares",
+                "dealer_self_sell_shares",
+                "dealer_self_net_shares",
+                "dealer_hedge_buy_shares",
+                "dealer_hedge_sell_shares",
+                "dealer_hedge_net_shares",
+                "total_net_shares",
+            ]
+        )
+    out_rows: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code", "")).strip().upper()
+        name = str(row.get("name", "")).strip()
+        if not code:
+            continue
+        out_rows.append(
+            {
+                "code": code,
+                "name": name or code,
+                "foreign_buy_shares": _parse_twse_share_value(row.get("foreign_buy_shares")),
+                "foreign_sell_shares": _parse_twse_share_value(row.get("foreign_sell_shares")),
+                "foreign_net_shares": _parse_twse_share_value(row.get("foreign_net_shares")),
+                "foreign_dealer_buy_shares": _parse_twse_share_value(
+                    row.get("foreign_dealer_buy_shares")
+                ),
+                "foreign_dealer_sell_shares": _parse_twse_share_value(
+                    row.get("foreign_dealer_sell_shares")
+                ),
+                "foreign_dealer_net_shares": _parse_twse_share_value(
+                    row.get("foreign_dealer_net_shares")
+                ),
+                "investment_trust_buy_shares": _parse_twse_share_value(
+                    row.get("investment_trust_buy_shares")
+                ),
+                "investment_trust_sell_shares": _parse_twse_share_value(
+                    row.get("investment_trust_sell_shares")
+                ),
+                "investment_trust_net_shares": _parse_twse_share_value(
+                    row.get("investment_trust_net_shares")
+                ),
+                "dealer_net_shares": _parse_twse_share_value(row.get("dealer_net_shares")),
+                "dealer_self_buy_shares": _parse_twse_share_value(
+                    row.get("dealer_self_buy_shares")
+                ),
+                "dealer_self_sell_shares": _parse_twse_share_value(
+                    row.get("dealer_self_sell_shares")
+                ),
+                "dealer_self_net_shares": _parse_twse_share_value(
+                    row.get("dealer_self_net_shares")
+                ),
+                "dealer_hedge_buy_shares": _parse_twse_share_value(
+                    row.get("dealer_hedge_buy_shares")
+                ),
+                "dealer_hedge_sell_shares": _parse_twse_share_value(
+                    row.get("dealer_hedge_sell_shares")
+                ),
+                "dealer_hedge_net_shares": _parse_twse_share_value(
+                    row.get("dealer_hedge_net_shares")
+                ),
+                "total_net_shares": _parse_twse_share_value(row.get("total_net_shares")),
+            }
+        )
+    return pd.DataFrame(out_rows)
+
+
 def _persist_twse_snapshot(
     *,
     date_token: str,
@@ -5032,6 +5101,49 @@ def _persist_twse_snapshot(
             quality_score=1.0 if not stale else 0.7,
             stale=bool(stale),
             raw_json={"dataset": TWSE_SNAPSHOT_DATASET_KEY, "rows": len(rows), "date": date_token},
+        )
+    except Exception:
+        return
+
+
+def _persist_twse_three_investors_snapshot(
+    *,
+    date_token: str,
+    frame: pd.DataFrame,
+    source: str,
+    stale: bool,
+) -> None:
+    if frame is None or frame.empty:
+        return
+    store = _history_store()
+    writer = getattr(store, "save_market_snapshot", None)
+    if not callable(writer):
+        return
+    rows = frame.to_dict(orient="records")
+    now_utc = datetime.now(tz=timezone.utc)
+    try:
+        asof_dt = datetime.strptime(str(date_token), "%Y%m%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        asof_dt = now_utc
+    freshness = max(0, int((now_utc - asof_dt).total_seconds()))
+    try:
+        writer(
+            dataset_key=TWSE_THREE_INVESTORS_DATASET_KEY,
+            market="TW",
+            symbol="ALL",
+            interval="1d",
+            source=source,
+            asof=asof_dt,
+            payload={"rows": rows, "date": date_token, "unit": "shares"},
+            freshness_sec=freshness,
+            quality_score=1.0 if not stale else 0.7,
+            stale=bool(stale),
+            raw_json={
+                "dataset": TWSE_THREE_INVESTORS_DATASET_KEY,
+                "rows": len(rows),
+                "date": date_token,
+                "unit": "shares",
+            },
         )
     except Exception:
         return
@@ -5079,6 +5191,52 @@ def _load_cached_twse_snapshot(
         if token > target_token:
             continue
         frame = _twse_snapshot_from_payload(row.get("payload"))
+        if not frame.empty:
+            return token, frame
+    return None
+
+
+def _load_cached_twse_three_investors(
+    *,
+    target_yyyymmdd: str,
+    lookback_days: int,
+) -> tuple[str, pd.DataFrame] | None:
+    store = _history_store()
+    loader = getattr(store, "load_market_snapshot_window", None)
+    if not callable(loader):
+        return None
+    try:
+        end_dt = datetime.strptime(target_yyyymmdd, "%Y%m%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+    start_dt = end_dt - pd.Timedelta(days=max(0, int(lookback_days) - 1))
+    try:
+        rows = loader(
+            dataset_key=TWSE_THREE_INVESTORS_DATASET_KEY,
+            market="TW",
+            symbol="ALL",
+            interval="1d",
+            asof_start=start_dt,
+            asof_end=end_dt,
+            limit=max(1, int(lookback_days)),
+        )
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        return None
+    target_token = str(target_yyyymmdd or "").strip()
+    if not re.fullmatch(r"\d{8}", target_token):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        asof = row.get("asof")
+        if not isinstance(asof, datetime):
+            continue
+        token = asof.astimezone(timezone.utc).strftime("%Y%m%d")
+        if token > target_token:
+            continue
+        frame = _twse_three_investors_from_payload(row.get("payload"))
         if not frame.empty:
             return token, frame
     return None
@@ -5159,6 +5317,88 @@ def _fetch_twse_snapshot_network_single(date_token: str) -> tuple[str, pd.DataFr
     return date_token, frame
 
 
+def _fetch_twse_three_investors_network_single(date_token: str) -> tuple[str, pd.DataFrame] | None:
+    import requests
+
+    try:
+        resp = requests.get(
+            "https://www.twse.com.tw/rwd/zh/fund/T86",
+            params={"response": "json", "date": date_token, "selectType": "ALLBUT0999"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+
+    if str(payload.get("stat", "")).strip().upper() != "OK":
+        return None
+    fields = payload.get("fields", [])
+    rows = payload.get("data", [])
+    if not isinstance(fields, list) or not isinstance(rows, list) or not rows:
+        return None
+
+    field_map = {
+        "證券代號": "code",
+        "證券名稱": "name",
+        "外陸資買進股數(不含外資自營商)": "foreign_buy_shares",
+        "外陸資賣出股數(不含外資自營商)": "foreign_sell_shares",
+        "外陸資買賣超股數(不含外資自營商)": "foreign_net_shares",
+        "外資自營商買進股數": "foreign_dealer_buy_shares",
+        "外資自營商賣出股數": "foreign_dealer_sell_shares",
+        "外資自營商買賣超股數": "foreign_dealer_net_shares",
+        "投信買進股數": "investment_trust_buy_shares",
+        "投信賣出股數": "investment_trust_sell_shares",
+        "投信買賣超股數": "investment_trust_net_shares",
+        "自營商買賣超股數": "dealer_net_shares",
+        "自營商買進股數(自行買賣)": "dealer_self_buy_shares",
+        "自營商賣出股數(自行買賣)": "dealer_self_sell_shares",
+        "自營商買賣超股數(自行買賣)": "dealer_self_net_shares",
+        "自營商買進股數(避險)": "dealer_hedge_buy_shares",
+        "自營商賣出股數(避險)": "dealer_hedge_sell_shares",
+        "自營商買賣超股數(避險)": "dealer_hedge_net_shares",
+        "三大法人買賣超股數": "total_net_shares",
+    }
+    index_map = {
+        str(field): idx for idx, field in enumerate(fields) if str(field) in field_map
+    }
+    if "證券代號" not in index_map or "證券名稱" not in index_map:
+        return None
+
+    out_rows: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        code_idx = index_map.get("證券代號", -1)
+        name_idx = index_map.get("證券名稱", -1)
+        if max(code_idx, name_idx) >= len(row):
+            continue
+        code = str(row[code_idx] or "").strip().upper()
+        name = str(row[name_idx] or "").strip()
+        if not code:
+            continue
+        item: dict[str, object] = {"code": code, "name": name or code}
+        for field, key in field_map.items():
+            idx = index_map.get(field)
+            if idx is None or idx >= len(row):
+                item[key] = None
+                continue
+            if key in {"code", "name"}:
+                continue
+            item[key] = _parse_twse_share_value(row[idx])
+        out_rows.append(item)
+    if not out_rows:
+        return None
+    frame = pd.DataFrame(out_rows)
+    _persist_twse_three_investors_snapshot(
+        date_token=date_token,
+        frame=frame,
+        source=TWSE_THREE_INVESTORS_SOURCE,
+        stale=False,
+    )
+    return date_token, frame
+
+
 def _queue_twse_snapshot_refresh(target_yyyymmdd: str) -> None:
     token = str(target_yyyymmdd or "").strip()
     if not re.fullmatch(r"\d{8}", token):
@@ -5225,6 +5465,48 @@ def _fetch_twse_snapshot_with_fallback(
         return result
 
     raise RuntimeError("TWSE snapshot fetch failed: " + " | ".join(errors[-5:]))
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_twse_three_investors_with_fallback(
+    target_yyyymmdd: str, lookback_days: int = 14
+) -> tuple[str, pd.DataFrame]:
+    target_dt = datetime.strptime(target_yyyymmdd, "%Y%m%d").date()
+    cached = _load_cached_twse_three_investors(
+        target_yyyymmdd=target_yyyymmdd,
+        lookback_days=lookback_days,
+    )
+    if cached is not None:
+        cached_token, _ = cached
+        if re.fullmatch(r"\d{8}", str(cached_token or "").strip()):
+            try:
+                cached_dt = datetime.strptime(str(cached_token), "%Y%m%d").date()
+            except Exception:
+                cached_dt = target_dt
+            if cached_dt < target_dt:
+                max_probe_days = min(max(1, int(lookback_days)), 5)
+                lag_days = min((target_dt - cached_dt).days, max_probe_days)
+                for offset in range(0, lag_days + 1):
+                    query_dt = target_dt - pd.Timedelta(days=offset)
+                    query_token = query_dt.strftime("%Y%m%d")
+                    if query_token <= str(cached_token):
+                        break
+                    result = _fetch_twse_three_investors_network_single(query_token)
+                    if result is not None:
+                        return result
+        return cached
+
+    errors: list[str] = []
+    for offset in range(max(1, int(lookback_days))):
+        query_dt = target_dt - pd.Timedelta(days=offset)
+        date_token = query_dt.strftime("%Y%m%d")
+        result = _fetch_twse_three_investors_network_single(date_token)
+        if result is None:
+            errors.append(f"{date_token}:fetch_failed")
+            continue
+        return result
+
+    raise RuntimeError("TWSE T86 fetch failed: " + " | ".join(errors[-5:]))
 
 
 TW_ETF_TYPE_WHITELIST: dict[str, str] = {
@@ -7873,6 +8155,185 @@ def _build_tw_etf_mis_overview(
     }
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _build_tw_etf_three_investors_overview(
+    *,
+    etf_codes: tuple[str, ...] = (),
+    lookback_days: int = 14,
+    top_n: int = 60,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    code_set = {
+        str(code).strip().upper()
+        for code in etf_codes
+        if str(code).strip() and not str(code).strip().startswith("^")
+    }
+    if not code_set:
+        code_set = set(_load_tw_etf_aum_snapshot_info().keys())
+    if not code_set:
+        return pd.DataFrame(), {
+            "last_trade_date": "",
+            "row_count": 0,
+            "symbol_count": 0,
+            "foreign_net_positive_count": 0,
+            "investment_trust_net_positive_count": 0,
+            "total_net_positive_count": 0,
+        }
+
+    target_token = _resolve_latest_tw_trade_day_token()
+    try:
+        used_trade_token, raw = _fetch_twse_three_investors_with_fallback(
+            target_token,
+            lookback_days=max(1, int(lookback_days)),
+        )
+    except Exception:
+        return pd.DataFrame(), {
+            "last_trade_date": "",
+            "row_count": 0,
+            "symbol_count": len(code_set),
+            "foreign_net_positive_count": 0,
+            "investment_trust_net_positive_count": 0,
+            "total_net_positive_count": 0,
+        }
+
+    if raw.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": str(used_trade_token),
+            "row_count": 0,
+            "symbol_count": len(code_set),
+            "foreign_net_positive_count": 0,
+            "investment_trust_net_positive_count": 0,
+            "total_net_positive_count": 0,
+        }
+
+    filtered = raw.copy()
+    filtered["code"] = filtered.get("code", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
+    filtered = filtered[filtered["code"].isin(code_set)].copy()
+    if filtered.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": str(used_trade_token),
+            "row_count": 0,
+            "symbol_count": len(code_set),
+            "foreign_net_positive_count": 0,
+            "investment_trust_net_positive_count": 0,
+            "total_net_positive_count": 0,
+        }
+
+    filtered["代碼"] = filtered["code"]
+    filtered["ETF"] = filtered["name"].astype(str).str.strip()
+    filtered["類型"] = [
+        _classify_tw_etf(name=str(name), code=str(code))
+        for name, code in zip(filtered["ETF"], filtered["代碼"], strict=False)
+    ]
+
+    display_map = {
+        "foreign_buy_shares": "外資買進(張)",
+        "foreign_sell_shares": "外資賣出(張)",
+        "foreign_net_shares": "外資淨買賣超(張)",
+        "foreign_dealer_buy_shares": "外資自營商買進(張)",
+        "foreign_dealer_sell_shares": "外資自營商賣出(張)",
+        "foreign_dealer_net_shares": "外資自營商淨買賣超(張)",
+        "investment_trust_buy_shares": "投信買進(張)",
+        "investment_trust_sell_shares": "投信賣出(張)",
+        "investment_trust_net_shares": "投信淨買賣超(張)",
+        "dealer_self_buy_shares": "自營商買進(自行)(張)",
+        "dealer_self_sell_shares": "自營商賣出(自行)(張)",
+        "dealer_self_net_shares": "自營商淨買賣超(自行)(張)",
+        "dealer_hedge_buy_shares": "自營商買進(避險)(張)",
+        "dealer_hedge_sell_shares": "自營商賣出(避險)(張)",
+        "dealer_hedge_net_shares": "自營商淨買賣超(避險)(張)",
+        "dealer_net_shares": "自營商淨買賣超(合計)(張)",
+        "total_net_shares": "三大法人合計淨買賣超(張)",
+    }
+    for source_col, display_col in display_map.items():
+        numeric = pd.to_numeric(filtered.get(source_col), errors="coerce") / 1000.0
+        filtered[display_col] = _truncate_series(numeric, digits=2)
+
+    filtered = filtered.sort_values(["代碼", "ETF"], ascending=[True, True], na_position="last")
+    filtered = filtered.reset_index(drop=True)
+    filtered.insert(0, "編號", range(1, len(filtered) + 1))
+    filtered["資料日期"] = pd.to_datetime(str(used_trade_token), format="%Y%m%d", errors="coerce")
+    filtered["資料日期"] = filtered["資料日期"].dt.strftime("%Y-%m-%d").fillna("—")
+    if top_n > 0:
+        filtered = filtered.head(max(1, int(top_n))).copy()
+
+    out = filtered[
+        [
+            "編號",
+            "資料日期",
+            "代碼",
+            "ETF",
+            "類型",
+            *display_map.values(),
+        ]
+    ].reset_index(drop=True)
+    return out, {
+        "last_trade_date": pd.to_datetime(str(used_trade_token), format="%Y%m%d", errors="coerce")
+        .strftime("%Y-%m-%d")
+        if str(used_trade_token).strip()
+        else "",
+        "row_count": int(len(out)),
+        "symbol_count": len(code_set),
+        "foreign_net_positive_count": int(
+            (pd.to_numeric(out.get("外資淨買賣超(張)"), errors="coerce") > 0).sum()
+        ),
+        "investment_trust_net_positive_count": int(
+            (pd.to_numeric(out.get("投信淨買賣超(張)"), errors="coerce") > 0).sum()
+        ),
+        "total_net_positive_count": int(
+            (pd.to_numeric(out.get("三大法人合計淨買賣超(張)"), errors="coerce") > 0).sum()
+        ),
+    }
+
+
+def _load_latest_twse_three_investors_for_symbol(
+    symbol: str,
+    *,
+    lookback_days: int = 14,
+) -> dict[str, object]:
+    token = str(symbol or "").strip().upper()
+    if not token:
+        return {}
+    try:
+        trade_token = _resolve_latest_tw_trade_day_token()
+        used_trade_token, frame = _fetch_twse_three_investors_with_fallback(
+            trade_token,
+            lookback_days=max(1, int(lookback_days)),
+        )
+    except Exception:
+        return {}
+    if frame.empty or "code" not in frame.columns:
+        return {}
+    matched = frame[frame["code"].astype(str).str.strip().str.upper() == token]
+    if matched.empty:
+        return {}
+    row = matched.iloc[0]
+
+    def _shares_to_lots(column: str) -> float | None:
+        value = _safe_float(row.get(column))
+        if value is None:
+            return None
+        return _truncate_value(float(value) / 1000.0, digits=2)
+
+    return {
+        "symbol": token,
+        "name": str(row.get("name") or token).strip(),
+        "data_date": pd.to_datetime(str(used_trade_token), format="%Y%m%d", errors="coerce")
+        .strftime("%Y-%m-%d")
+        if str(used_trade_token).strip()
+        else "",
+        "source": "TWSE T86",
+        "unit": "張",
+        "foreign_buy_lots": _shares_to_lots("foreign_buy_shares"),
+        "foreign_sell_lots": _shares_to_lots("foreign_sell_shares"),
+        "foreign_net_lots": _shares_to_lots("foreign_net_shares"),
+        "investment_trust_buy_lots": _shares_to_lots("investment_trust_buy_shares"),
+        "investment_trust_sell_lots": _shares_to_lots("investment_trust_sell_shares"),
+        "investment_trust_net_lots": _shares_to_lots("investment_trust_net_shares"),
+        "dealer_net_lots": _shares_to_lots("dealer_net_shares"),
+        "total_net_lots": _shares_to_lots("total_net_shares"),
+    }
+
+
 def _normalize_constituent_symbol(symbol: object, tw_code: object) -> str:
     code_token = str(tw_code or "").strip().upper()
     if re.fullmatch(r"\d{4,6}[A-Z]?", code_token):
@@ -9121,17 +9582,158 @@ def _render_tw_etf_all_types_view():
                 "欄位說明：`申贖差額(萬)` 為與前日已發行受益單位差異數；`折溢價(%)` 以市價相對預估 NAV 揭露。"
             )
 
+        st.markdown("#### 官方三大法人籌碼總表")
+        three_investors_refresh = st.button(
+            "更新官方三大法人",
+            key="tw_etf_three_investors_refresh",
+            width="stretch",
+        )
+        three_investors_sync_summary: dict[str, object] = (
+            dict(export_refresh_summary.get("three_investors", {}))
+            if isinstance(export_refresh_summary.get("three_investors", {}), dict)
+            else {}
+        )
+        etf_codes = tuple(
+            sorted(
+                {
+                    str(code).strip().upper()
+                    for code in table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist()
+                    if str(code).strip() and not str(code).strip().startswith("^")
+                }
+            )
+        )
+        if three_investors_refresh:
+            try:
+                _fetch_twse_three_investors_with_fallback.clear()
+                _build_tw_etf_three_investors_overview.clear()
+                with st.spinner("同步 TWSE 官方三大法人中..."):
+                    used_trade_token, refreshed_frame = _fetch_twse_three_investors_with_fallback(
+                        _resolve_latest_tw_trade_day_token(),
+                        lookback_days=14,
+                    )
+                three_investors_sync_summary = {
+                    "status": (
+                        "synced"
+                        if str(used_trade_token) == str(_resolve_latest_tw_trade_day_token())
+                        else "fallback"
+                    ),
+                    "used_trade_date": pd.to_datetime(
+                        str(used_trade_token), format="%Y%m%d", errors="coerce"
+                    ).strftime("%Y-%m-%d")
+                    if str(used_trade_token).strip()
+                    else "",
+                    "row_count": int(len(refreshed_frame)),
+                }
+            except Exception as exc:
+                st.warning(f"同步官方三大法人失敗：{exc}")
+        three_investors_df, three_investors_meta = _build_tw_etf_three_investors_overview(
+            etf_codes=etf_codes,
+            lookback_days=14,
+            top_n=0,
+        )
+        three_investors_health = _build_data_health(
+            as_of=three_investors_meta.get("last_trade_date", ""),
+            data_sources=[_store_data_source(store, "market_snapshots")],
+            source_chain=[TWSE_THREE_INVESTORS_SOURCE],
+        )
+        _render_data_health_caption("官方三大法人資料健康度", three_investors_health)
+        if three_investors_sync_summary:
+            sync_status = str(three_investors_sync_summary.get("status") or "unknown")
+            sync_used_trade_date = str(
+                three_investors_sync_summary.get("used_trade_date") or ""
+            ).strip()
+            sync_used_trade_text = (
+                f" / used_trade_date={sync_used_trade_date}" if sync_used_trade_date else ""
+            )
+            st.caption(
+                "同步摘要："
+                f" status={sync_status}"
+                f"{sync_used_trade_text}"
+                f" / row_count={int(three_investors_sync_summary.get('row_count') or 0)}"
+            )
+        st.caption("資料來源：TWSE `T86` 三大法人買賣超日報（上市證券單日全市場資料）。")
+        three_investors_last_date = str(three_investors_meta.get("last_trade_date", "")).strip()
+        if not three_investors_last_date:
+            st.caption("目前只讀本地快取；尚未建立快取時，請手動按「更新官方三大法人」。")
+        else:
+            st.caption(
+                f"目前顯示本地快取：{three_investors_last_date}。如需抓最新官方資料，請手動按「更新官方三大法人」。"
+            )
+        st.caption("欄位單位：張（原始官方單位為股，畫面已換算為張；1 張 = 1,000 股）。")
+        st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
+        if three_investors_df.empty:
+            st.info("尚無官方三大法人本地快取；按「更新官方三大法人」後才會建立。")
+        else:
+            tm1, tm2, tm3, tm4 = st.columns(4)
+            tm1.metric("當日ETF檔數", str(len(three_investors_df)))
+            tm2.metric(
+                "外資淨買超檔數",
+                str(int(three_investors_meta.get("foreign_net_positive_count") or 0)),
+            )
+            tm3.metric(
+                "投信淨買超檔數",
+                str(int(three_investors_meta.get("investment_trust_net_positive_count") or 0)),
+            )
+            tm4.metric(
+                "三大法人合計淨買超檔數",
+                str(int(three_investors_meta.get("total_net_positive_count") or 0)),
+            )
+
+            three_investors_drilldown_enabled = _render_table_drilldown_toggle_inline(
+                scope="tw_etf_three_investors",
+                label="官方三大法人點擊導流",
+                default=True,
+            )
+            three_investors_search = st.text_input(
+                "搜尋官方三大法人",
+                value="",
+                key="tw_etf_three_investors_search",
+                placeholder="輸入 ETF 代碼、名稱或類型",
+            )
+            filtered_three_investors_df = _filter_dataframe_by_keyword(
+                three_investors_df,
+                keyword=three_investors_search,
+                columns=["代碼", "ETF", "類型"],
+            )
+            three_investors_display = filtered_three_investors_df
+            three_investors_link_config: dict[str, object] = {}
+            if three_investors_drilldown_enabled:
+                three_investors_display, three_investors_heatmap_cfg = (
+                    _decorate_tw_etf_name_heatmap_links(filtered_three_investors_df)
+                )
+                three_investors_display, three_investors_code_cfg = (
+                    _decorate_dataframe_backtest_links(three_investors_display)
+                )
+                if isinstance(three_investors_code_cfg, dict):
+                    three_investors_link_config.update(three_investors_code_cfg)
+                if isinstance(three_investors_heatmap_cfg, dict):
+                    three_investors_link_config.update(three_investors_heatmap_cfg)
+            if three_investors_search:
+                st.caption(
+                    f"搜尋結果：{len(filtered_three_investors_df)} / {len(three_investors_df)}"
+                )
+            st.dataframe(
+                three_investors_display,
+                width="stretch",
+                hide_index=True,
+                height=scroll_height,
+                column_config=three_investors_link_config if three_investors_link_config else None,
+                disable_backtest_drilldown=True,
+            )
+
         st.markdown("#### 超級大表匯出")
         super_export_df = _build_tw_etf_super_export_table(
             main_frame=table_view_df,
             daily_market_frame=daily_market_df,
             mis_frame=mis_df,
+            three_investors_frame=three_investors_df,
         )
         export_file_name = _resolve_tw_etf_super_export_file_name(
             export_frame=super_export_df,
             main_meta=meta,
             daily_market_meta=daily_market_meta,
             mis_meta=mis_meta,
+            three_investors_meta=three_investors_meta,
         )
         export_csv_bytes = _build_tw_etf_super_export_csv_bytes(super_export_df)
         quick_export_slot.download_button(

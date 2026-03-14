@@ -19,6 +19,7 @@
 - `0050 熱力圖`：0050 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `0052 熱力圖`：0052 成分股逐檔回測、相對大盤超額報酬熱力圖
 - `筆記本`：GitHub 風格 markdown 多筆筆記卡，左欄清單切換，中欄整合預覽/編輯，內容保存到 DuckDB
+- `即時看盤`（台股）新增可選 `FinMind` 研究資料卡：可顯示公司基本資料、月營收、近期新聞與法人籌碼摘要
 - `00910 / 00935 / 00993A / 0050 / 0052` 熱力圖頁：頁首統一顯示「官方編製/管理規則摘要」與來源連結
 - `資料庫檢視`：查看 DuckDB 內各資料表筆數、欄位結構與分頁資料
 - `新手教學`：技術面與回測參數白話解釋、常見誤區、建議操作流程
@@ -302,6 +303,24 @@ export FUGLE_WS_URL="wss://your-relay-or-proxy-endpoint"
 ```
 
 更多細節請看：`FUGLE_MCP_GUIDE.md`
+
+若要啟用 `FinMind`（台股研究資料增強：公司資料 / 月營收 / 新聞 / 法人籌碼），請設定：
+
+```bash
+export FINMIND_API_TOKEN="your_finmind_token"
+```
+
+若你不想每次 export，也可把 token 放到預設檔案（會自動讀）：
+
+```text
+~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/finmindkey
+```
+
+也可用環境變數改成其他檔案路徑：
+
+```bash
+export FINMIND_API_TOKEN_FILE="/your/path/finmindkey"
+```
 
 若要手動指定 DuckDB 路徑（會覆蓋預設 iCloud/本地判斷），可設定：
 

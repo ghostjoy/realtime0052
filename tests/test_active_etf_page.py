@@ -44,6 +44,7 @@ from app import (
     _build_tw_etf_mis_overview,
     _build_tw_etf_super_export_csv_bytes,
     _build_tw_etf_super_export_table,
+    _build_tw_etf_three_investors_overview,
     _build_tw_etf_top10_between,
     _build_two_etf_aggressive_picks,
     _classify_issue_level,
@@ -241,11 +242,25 @@ class ActiveEtfPageTests(unittest.TestCase):
                 },
             ]
         )
+        three_investors = pd.DataFrame(
+            [
+                {
+                    "編號": 1,
+                    "資料日期": "2026-03-10",
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "外資買進(張)": 7260.3,
+                    "外資賣出(張)": 108760.4,
+                    "三大法人合計淨買賣超(張)": -120452.27,
+                }
+            ]
+        )
 
         out = _build_tw_etf_super_export_table(
             main_frame=main,
             daily_market_frame=daily,
             mis_frame=mis,
+            three_investors_frame=three_investors,
         )
 
         self.assertEqual(list(out["代碼"]), ["^TWII", "0050", "00999"])
@@ -255,6 +270,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(row_0050["收盤"]), 200.0)
         self.assertEqual(float(row_0050["折溢價(%)"]), 0.23)
         self.assertEqual(float(row_0050["成交金額(億)"]), 123.0)
+        self.assertEqual(float(row_0050["外資買進(張)"]), 7260.3)
+        self.assertEqual(float(row_0050["三大法人合計淨買賣超(張)"]), -120452.27)
         self.assertEqual(str(row_0050["ETF"]), "元大台灣50")
         self.assertEqual(str(row_00999["ETF"]), "測試ETF")
         self.assertEqual(str(row_00999["YTD績效(%)"]), "-")
@@ -303,6 +320,13 @@ class ActiveEtfPageTests(unittest.TestCase):
                 return_value={"requested_days": 1, "synced_days": 1},
             ) as mis_mock,
             patch(
+                "app._fetch_twse_three_investors_with_fallback",
+                return_value=(
+                    "20260309",
+                    pd.DataFrame([{"code": "0050", "name": "元大台灣50"}]),
+                ),
+            ) as three_mock,
+            patch(
                 "app._build_tw_etf_all_types_performance_table",
                 return_value=(
                     pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
@@ -327,10 +351,12 @@ class ActiveEtfPageTests(unittest.TestCase):
         main_sync_mock.assert_called_once_with("20260309")
         daily_mock.assert_called_once_with(store=fake_store, lookback_days=14, force=True)
         mis_mock.assert_called_once_with(store=fake_store, force=True)
+        three_mock.assert_called_once_with("20260309", lookback_days=14)
         perf_mock.assert_called_once()
         aum_map_mock.assert_called_once_with("20260309")
         aum_rows_mock.assert_called_once()
         self.assertEqual(out.get("main", {}).get("status"), "synced")
+        self.assertEqual(out.get("three_investors", {}).get("status"), "synced")
         self.assertEqual(out.get("aum_track", {}).get("status"), "synced")
         self.assertEqual(out.get("issues"), [])
 
@@ -2606,6 +2632,57 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "已發行單位(萬)"].iloc[0]), 135000.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "折溢價(%)"].iloc[0]), 2.89)
         self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
+
+    def test_build_tw_etf_three_investors_overview(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "code": "0050",
+                    "name": "元大台灣50",
+                    "foreign_buy_shares": 7260307.0,
+                    "foreign_sell_shares": 108760405.0,
+                    "foreign_net_shares": -101500098.0,
+                    "foreign_dealer_buy_shares": 0.0,
+                    "foreign_dealer_sell_shares": 0.0,
+                    "foreign_dealer_net_shares": 0.0,
+                    "investment_trust_buy_shares": 3540000.0,
+                    "investment_trust_sell_shares": 326000.0,
+                    "investment_trust_net_shares": 3214000.0,
+                    "dealer_net_shares": -22166179.0,
+                    "dealer_self_buy_shares": 2009851.0,
+                    "dealer_self_sell_shares": 1175000.0,
+                    "dealer_self_net_shares": 834851.0,
+                    "dealer_hedge_buy_shares": 30660906.0,
+                    "dealer_hedge_sell_shares": 53661936.0,
+                    "dealer_hedge_net_shares": -23001030.0,
+                    "total_net_shares": -120452277.0,
+                },
+                {
+                    "code": "2330",
+                    "name": "台積電",
+                    "foreign_buy_shares": 1.0,
+                    "foreign_sell_shares": 2.0,
+                    "foreign_net_shares": -1.0,
+                    "total_net_shares": -1.0,
+                },
+            ]
+        )
+        with patch(
+            "app._fetch_twse_three_investors_with_fallback",
+            return_value=("20260310", raw),
+        ):
+            out, meta = _build_tw_etf_three_investors_overview(
+                etf_codes=("0050", "0052"),
+                lookback_days=14,
+                top_n=0,
+            )
+
+        self.assertEqual(list(out["代碼"]), ["0050"])
+        self.assertEqual(str(out.loc[0, "資料日期"]), "2026-03-10")
+        self.assertEqual(float(out.loc[0, "外資買進(張)"]), 7260.3)
+        self.assertEqual(float(out.loc[0, "投信淨買賣超(張)"]), 3214.0)
+        self.assertEqual(float(out.loc[0, "三大法人合計淨買賣超(張)"]), -120452.27)
+        self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-10")
 
     def test_with_tw_today_fields_only_backfills_missing_open(self):
         frame = pd.DataFrame(

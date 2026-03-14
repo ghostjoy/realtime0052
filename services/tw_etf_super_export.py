@@ -133,6 +133,7 @@ def _sync_tw_etf_super_export_sources(
         "main": {"status": "fallback", "used_trade_date": ""},
         "daily_market": {},
         "mis": {},
+        "three_investors": {},
         "issues": [],
     }
     issues: list[str] = []
@@ -171,6 +172,27 @@ def _sync_tw_etf_super_export_sources(
     except Exception as exc:
         issues.append(f"mis: {exc}")
         summary["mis"] = {"status": "error", "issues": [str(exc)]}
+
+    fetch_three_investors = getattr(app_module, "_fetch_twse_three_investors_with_fallback", None)
+    if callable(fetch_three_investors):
+        try:
+            used_trade_date, three_frame = _call_app_quiet(
+                fetch_three_investors,
+                trade_token,
+                lookback_days=max(1, int(daily_lookback_days)),
+            )
+            summary["three_investors"] = {
+                "status": "synced" if str(used_trade_date) == str(trade_token) else "fallback",
+                "used_trade_date": pd.to_datetime(
+                    str(used_trade_date), format="%Y%m%d", errors="coerce"
+                ).strftime("%Y-%m-%d")
+                if str(used_trade_date).strip()
+                else "",
+                "row_count": int(len(three_frame)),
+            }
+        except Exception as exc:
+            issues.append(f"three_investors: {exc}")
+            summary["three_investors"] = {"status": "error", "issues": [str(exc)]}
 
     _clear_export_related_caches(app_module)
     summary["issues"] = issues
@@ -287,12 +309,15 @@ def build_tw_etf_super_export_table(
     main_frame: pd.DataFrame,
     daily_market_frame: pd.DataFrame,
     mis_frame: pd.DataFrame,
+    three_investors_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     sources: list[tuple[str, pd.DataFrame]] = [
         ("main", main_frame),
         ("daily", daily_market_frame),
         ("mis", mis_frame),
     ]
+    if isinstance(three_investors_frame, pd.DataFrame):
+        sources.append(("three_investors", three_investors_frame))
     prepared: list[tuple[str, pd.DataFrame]] = []
     ordered_columns: list[str] = []
     for source_name, frame in sources:
@@ -422,6 +447,7 @@ def export_tw_etf_super_table_artifact(
     build_performance_table = app_module._build_tw_etf_all_types_performance_table
     build_daily_market_overview = app_module._build_tw_etf_daily_market_overview
     build_mis_overview = app_module._build_tw_etf_mis_overview
+    build_three_investors_overview = app_module._build_tw_etf_three_investors_overview
     resolve_latest_trade_day_token = app_module._resolve_latest_tw_trade_day_token
     periods = resolve_tw_etf_super_export_periods(
         ytd_start=ytd_start,
@@ -451,11 +477,27 @@ def export_tw_etf_super_table_artifact(
         build_mis_overview,
         top_n=0,
     )
+    etf_codes = tuple(
+        sorted(
+            {
+                str(code).strip().upper()
+                for code in table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist()
+                if str(code).strip() and not str(code).strip().startswith("^")
+            }
+        )
+    )
+    three_investors_df, three_investors_meta = _call_app_quiet(
+        build_three_investors_overview,
+        etf_codes=etf_codes,
+        lookback_days=max(1, int(daily_lookback_days)),
+        top_n=0,
+    )
     main_frame = build_tw_etf_all_types_main_export_frame(table_df=table_df, meta=main_meta)
     super_export_df = build_tw_etf_super_export_table(
         main_frame=main_frame,
         daily_market_frame=daily_market_df,
         mis_frame=mis_df,
+        three_investors_frame=three_investors_df,
     )
     if super_export_df.empty:
         raise RuntimeError("no super export data generated")
@@ -472,6 +514,7 @@ def export_tw_etf_super_table_artifact(
         "main_meta": dict(main_meta or {}),
         "daily_market_meta": dict(daily_market_meta or {}),
         "mis_meta": dict(mis_meta or {}),
+        "three_investors_meta": dict(three_investors_meta or {}),
         "csv_sha256": csv_sha256,
     }
     run_id = ""

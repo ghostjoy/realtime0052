@@ -23,6 +23,8 @@ class BacktestStateKeys:
     use_split_adjustment: str = "bt_use_split_adjustment"
     auto_detect_split: str = "bt_auto_detect_split"
     use_total_return_adjustment: str = "bt_use_total_return_adjustment"
+    chip_filter_enabled: str = "bt_chip_filter_enabled"
+    chip_filter_mode: str = "bt_chip_filter_mode"
     invest_start_mode: str = "bt_invest_start_mode"
     invest_start_date: str = "bt_invest_start_date"
     invest_start_k: str = "bt_invest_start_k"

@@ -40,6 +40,7 @@ class BacktestExecutionInput:
     objective: str
     initial_capital: float
     cost_model: CostModel
+    signal_filters: dict[str, pd.Series] | None = None
 
 
 @dataclass(frozen=True)
@@ -410,6 +411,7 @@ def execute_backtest_run(
     strategy = str(config.strategy or "")
     initial_capital = float(config.initial_capital)
     strategy_params = config.strategy_params if isinstance(config.strategy_params, dict) else {}
+    signal_filters = config.signal_filters if isinstance(config.signal_filters, dict) else None
     if bool(config.enable_walk_forward):
         if mode == "單一標的":
             symbol = list(bars_by_symbol.keys())[0]
@@ -462,6 +464,7 @@ def execute_backtest_run(
             strategy_params=strategy_params,
             cost_model=config.cost_model,
             initial_capital=initial_capital,
+            signal_filter=(signal_filters or {}).get(symbol),
         )
         return {
             "mode": "single",
@@ -477,6 +480,7 @@ def execute_backtest_run(
         strategy_params=strategy_params,
         cost_model=config.cost_model,
         initial_capital=initial_capital,
+        signal_filters=signal_filters,
     )
     return {
         "mode": "portfolio",

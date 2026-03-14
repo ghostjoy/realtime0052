@@ -10,7 +10,43 @@
 
 ## [Unreleased]
 
+### Fixed
+- 修正 `筆記本` 頁面缺少 `markdown-it-py` 依賴時的啟動錯誤：
+  - `pyproject.toml` 補上 `markdown-it-py`
+  - 既有虛擬環境尚未同步依賴時，筆記預覽改以安全的簡易 HTML fallback 顯示，避免 `ModuleNotFoundError: markdown_it` 直接中斷整個 app
+- 調整 `筆記本` 版面與操作：
+  - 內容區改為左右兩欄，移除最右側留白欄位，讓筆記內容區更寬
+  - 移除左欄 `改名` 與 `刪除` 按鈕，保留 `新增筆記`
+
 ### Added
+- `回測工作台` 新增歷史對齊的 `Chip` 分數與法人籌碼判讀：
+  - 法人籌碼改為使用 `<= 回放日` 最近可得的歷史資料，不再用最新日資料解釋過去走勢
+  - `指標判讀 / 波段結論 / 判斷表 / 打分數 / 股癌風格敘述` 全部納入籌碼資訊
+  - 打分數區新增 `Chip`，維持 `Trend / Momentum / Risk` 原定義不變
+- `台股 ETF 全類型總表` 新增「官方三大法人籌碼總表」：
+  - 採 TWSE `T86` 官方三大法人日報，獨立成一張可搜尋、可導流的大表
+  - 保留 `外資 / 外資自營商 / 投信 / 自營商(自行/避險/合計) / 三大法人合計` 的完整 `買進 / 賣出 / 淨買賣超`
+  - 原始官方單位為股，畫面與匯出統一換算為 `張`
+- `一鍵下載超級大表 CSV` 新增整合官方三大法人完整欄位
+- 新增 `FinMind` 可選研究資料整合：
+  - 新增 `providers/tw_finmind.py`，支援 `FINMIND_API_TOKEN` 與 iCloud 預設 key 檔 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/finmindkey`
+  - `MarketDataService` 新增台股研究資料快取與摘要組裝，支援 `TaiwanStockInfo / TaiwanStockMonthRevenue / TaiwanStockNews / TaiwanStockInstitutionalInvestorsBuySell`
+  - `即時看盤` 台股模式新增 `FinMind` 研究資料卡，顯示公司資料、月營收、近期新聞與法人籌碼
+- `回測工作台` 的 `指標判讀 / 波段結論 / 判斷表` 新增 `FinMind` 研究面補充：
+  - 僅套用於台股單一標的，且不改動回測分數與交易規則
+  - 補充最新月營收 `YoY / MoM`、最新法人籌碼摘要與近期新聞背景
+  - 明確標示 `FinMind` 內容使用最新可得資料，不隨回放日期回溯
+
+### Changed
+- `回測工作台` 的研究面補充調整為：
+  - 月營收與新聞維持使用最新可得資料
+  - 法人籌碼改由歷史對齊 `FinMind` 籌碼摘要主導
+  - `籌碼逆風` 時只做 `status/action` 一級下修，不讓籌碼單獨蓋掉技術面
+- `回測工作台` 的法人判斷表改用 `張` 顯示，並明確註明 `1 張 = 1,000 股`
+- `回測工作台` 新增可選 `法人籌碼進場濾網`：
+  - 僅套用於台股單一標的一般回測，先不支援 Walk-Forward
+  - 採 `entry-only` 設計，只過濾進場，不額外強制出場
+  - 歷史法人資料用 `FinMind` 對齊回測日期，避免用最新籌碼污染歷史回測結果
 - 新增 `筆記本` 卡片頁：
   - 支援 DuckDB 持久化保存單一本地 markdown 筆記
   - 預覽區採 GitHub 風格排版，編輯器與預覽預設字級為 `18px`

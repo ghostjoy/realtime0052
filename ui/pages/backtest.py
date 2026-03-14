@@ -78,6 +78,7 @@ REQUIRED_RUNTIME_NAMES = (
     "_history_store",
     "_infer_market_target_from_symbols",
     "_load_cached_backtest_payload",
+    "_load_latest_twse_three_investors_for_symbol",
     "_load_twii_twse_month_close_map",
     "_market_service",
     "_metrics_to_rows",
@@ -112,6 +113,7 @@ _format_tw_symbol_with_name: Any = None
 _history_store: Any = None
 _infer_market_target_from_symbols: Any = None
 _load_cached_backtest_payload: Any = None
+_load_latest_twse_three_investors_for_symbol: Any = None
 _load_twii_twse_month_close_map: Any = None
 _market_service: Any = None
 _metrics_to_rows: Any = None
@@ -129,6 +131,765 @@ _ui_palette: Any = None
 
 def configure_runtime(values: Mapping[str, Any]) -> None:
     configure_module_runtime(globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__)
+
+
+def _to_optional_float(value: object) -> float | None:
+    num = pd.to_numeric(value, errors="coerce")
+    if pd.isna(num):
+        return None
+    try:
+        return float(num)
+    except Exception:
+        return None
+
+
+def _parse_finmind_date(value: object) -> pd.Timestamp | None:
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    try:
+        return pd.Timestamp(ts)
+    except Exception:
+        return None
+
+
+def _fmt_plain_num(value: float | None, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):.{int(digits)}f}"
+
+
+def _fmt_plain_pct(value: float | None, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value) * 100:.{int(digits)}f}%"
+
+
+def _fmt_plain_lots(value: float | None, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):+,.{int(digits)}f}張"
+
+
+def _finmind_institutional_bucket(name: object) -> str | None:
+    token = str(name or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if token in {"foreign_investor", "foreign_dealer_self"} or "foreign" in token:
+        return "外資"
+    if token == "investment_trust" or "trust" in token:
+        return "投信"
+    if token in {"dealer_self", "dealer_hedging", "dealer"} or "dealer" in token:
+        return "自營商"
+    return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_finmind_institutional_history(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, object]]:
+    service = _market_service()
+    client = getattr(service, "tw_finmind", None)
+    if client is None or not bool(getattr(client, "enabled", False)):
+        return []
+    try:
+        rows = client.fetch_institutional_investors(
+            str(symbol or "").strip().upper(),
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception:
+        return []
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _normalize_finmind_institutional_history_rows(rows: object) -> pd.DataFrame:
+    payload = rows if isinstance(rows, list) else []
+    normalized: list[dict[str, object]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        parsed_date = _parse_finmind_date(row.get("date"))
+        bucket = _finmind_institutional_bucket(row.get("name") or row.get("institutional_investors"))
+        if parsed_date is None or bucket is None:
+            continue
+        buy = _to_optional_float(row.get("buy"))
+        sell = _to_optional_float(row.get("sell"))
+        buy_sell = _to_optional_float(row.get("buy_sell"))
+        if buy is None and sell is None and buy_sell is None:
+            continue
+        net_shares = buy_sell if buy_sell is not None else (float(buy or 0.0) - float(sell or 0.0))
+        normalized.append(
+            {
+                "date": pd.Timestamp(parsed_date).tz_localize(None).normalize(),
+                "bucket": bucket,
+                "net_lots": float(net_shares) / 1000.0,
+            }
+        )
+    if not normalized:
+        return pd.DataFrame(columns=["date", "bucket", "net_lots"])
+    return pd.DataFrame(normalized)
+
+
+def _build_tw_chip_history_frame(
+    symbol: str,
+    bars: pd.DataFrame,
+) -> tuple[pd.DataFrame | None, dict[str, object]]:
+    if not isinstance(bars, pd.DataFrame) or bars.empty:
+        return None, {"enabled": False, "reason": "empty_bars"}
+    index = pd.DatetimeIndex(bars.index).sort_values()
+    if len(index) == 0:
+        return None, {"enabled": False, "reason": "empty_index"}
+    start_date = pd.Timestamp(index.min()).date().isoformat()
+    end_date = pd.Timestamp(index.max()).date().isoformat()
+    rows = _load_finmind_institutional_history(symbol, start_date, end_date)
+    if not rows:
+        return None, {"enabled": False, "reason": "no_chip_history"}
+
+    chip_df = _normalize_finmind_institutional_history_rows(rows)
+    if chip_df.empty:
+        return None, {"enabled": False, "reason": "no_normalized_chip_history"}
+
+    grouped = (
+        chip_df.groupby(["date", "bucket"], as_index=False)["net_lots"].sum().pivot(
+            index="date", columns="bucket", values="net_lots"
+        )
+    )
+    grouped = grouped.reindex(columns=["外資", "投信", "自營商"]).fillna(0.0).sort_index()
+    grouped["三大法人合計"] = grouped.sum(axis=1)
+    grouped["近3日法人合計"] = grouped["三大法人合計"].rolling(3, min_periods=1).sum()
+    grouped["近5日法人合計"] = grouped["三大法人合計"].rolling(5, min_periods=1).sum()
+    grouped["資料日期"] = pd.DatetimeIndex(grouped.index).tz_localize(None).normalize()
+
+    aligned_index = pd.DatetimeIndex(index).tz_localize(None).normalize()
+    aligned = grouped.reindex(aligned_index, method="ffill")
+    aligned.index = index
+    aligned["資料日期"] = pd.to_datetime(aligned.get("資料日期"), errors="coerce")
+    coverage_pct = (
+        float(pd.to_datetime(aligned["資料日期"], errors="coerce").notna().mean() * 100.0)
+        if len(aligned)
+        else 0.0
+    )
+    return aligned, {
+        "enabled": True,
+        "start_date": start_date,
+        "end_date": end_date,
+        "coverage_pct": coverage_pct,
+        "history_rows": int(len(grouped)),
+        "aligned_rows": int(len(aligned)),
+    }
+
+
+def _build_tw_chip_filter_series(
+    symbol: str,
+    bars: pd.DataFrame,
+    *,
+    filter_mode: str,
+) -> tuple[pd.Series | None, dict[str, object]]:
+    aligned, meta = _build_tw_chip_history_frame(symbol, bars)
+    if aligned is None or aligned.empty:
+        return None, meta
+    index = pd.DatetimeIndex(aligned.index)
+    gate_source = aligned.reindex(columns=["外資", "投信", "自營商", "三大法人合計"]).fillna(0.0)
+    mode = str(filter_mode or "標準").strip()
+    if mode == "寬鬆":
+        gate = (gate_source["三大法人合計"] > 0).astype(int)
+    elif mode == "嚴格":
+        gate = (
+            (gate_source["三大法人合計"] > 0)
+            & (gate_source["外資"] > 0)
+            & (gate_source["投信"] > 0)
+        ).astype(int)
+    else:
+        mode = "標準"
+        gate = (
+            (gate_source["三大法人合計"] > 0)
+            & ((gate_source["外資"] > 0) | (gate_source["投信"] > 0))
+        ).astype(int)
+    gate.index = index
+    gate_meta = {
+        **meta,
+        "mode": mode,
+        "allowed_entry_days": int(gate.sum()),
+        "total_days": int(len(gate)),
+    }
+    return gate.astype(int), gate_meta
+
+
+def _build_tw_chip_replay_insight(
+    chip_history: pd.DataFrame | None,
+    replay_ts: object,
+) -> dict[str, object]:
+    if chip_history is None or not isinstance(chip_history, pd.DataFrame) or chip_history.empty:
+        return {
+            "enabled": False,
+            "caption": "法人籌碼資料不足，本次仍以技術面為主。",
+            "indicator_lines": [],
+            "conclusion_lines": [],
+            "decision_rows": [],
+            "chip_state": "資料不足",
+            "chip_score": None,
+            "asof_date_text": "—",
+        }
+    replay_key = pd.Timestamp(replay_ts)
+    if replay_key.tzinfo is None:
+        replay_key = replay_key.tz_localize("UTC")
+    if replay_key not in chip_history.index:
+        return {
+            "enabled": False,
+            "caption": "法人籌碼資料不足，本次仍以技術面為主。",
+            "indicator_lines": [],
+            "conclusion_lines": [],
+            "decision_rows": [],
+            "chip_state": "資料不足",
+            "chip_score": None,
+            "asof_date_text": "—",
+        }
+    snapshot = chip_history.loc[replay_key]
+    if isinstance(snapshot, pd.DataFrame):
+        snapshot = snapshot.iloc[-1]
+    asof_date = pd.to_datetime(snapshot.get("資料日期"), errors="coerce")
+    foreign_lots = _to_optional_float(snapshot.get("外資"))
+    trust_lots = _to_optional_float(snapshot.get("投信"))
+    dealer_lots = _to_optional_float(snapshot.get("自營商"))
+    total_lots = _to_optional_float(snapshot.get("三大法人合計"))
+    rolling_3d_total_lots = _to_optional_float(snapshot.get("近3日法人合計"))
+    rolling_5d_total_lots = _to_optional_float(snapshot.get("近5日法人合計"))
+    if pd.isna(asof_date) or all(
+        value is None
+        for value in (
+            foreign_lots,
+            trust_lots,
+            dealer_lots,
+            total_lots,
+            rolling_3d_total_lots,
+            rolling_5d_total_lots,
+        )
+    ):
+        return {
+            "enabled": False,
+            "caption": "法人籌碼資料不足，本次仍以技術面為主。",
+            "indicator_lines": [],
+            "conclusion_lines": [],
+            "decision_rows": [],
+            "chip_state": "資料不足",
+            "chip_score": None,
+            "asof_date_text": "—",
+        }
+
+    chip_score = 50.0
+    for value, positive_weight, negative_weight in (
+        (total_lots, 20.0, -20.0),
+        (foreign_lots, 15.0, -15.0),
+        (trust_lots, 10.0, -10.0),
+        (dealer_lots, 5.0, -5.0),
+        (rolling_3d_total_lots, 10.0, -10.0),
+    ):
+        if value is None:
+            continue
+        if value > 0:
+            chip_score += positive_weight
+        elif value < 0:
+            chip_score += negative_weight
+    chip_score_int = int(max(0, min(100, round(chip_score))))
+    chip_state = "籌碼中性"
+    if (
+        total_lots is not None
+        and total_lots > 0
+        and rolling_3d_total_lots is not None
+        and rolling_3d_total_lots > 0
+        and ((foreign_lots is not None and foreign_lots > 0) or (trust_lots is not None and trust_lots > 0))
+    ):
+        chip_state = "籌碼順風"
+    elif (
+        total_lots is not None
+        and total_lots < 0
+        and rolling_3d_total_lots is not None
+        and rolling_3d_total_lots < 0
+        and foreign_lots is not None
+        and foreign_lots < 0
+    ):
+        chip_state = "籌碼逆風"
+
+    if chip_state == "籌碼順風":
+        chip_meaning = "法人有在抬轎，但抬轎不代表閉眼追價，位置還是要對。"
+    elif chip_state == "籌碼逆風":
+        chip_meaning = "法人沒站這邊，反彈可以有，硬要講主升段就太早。"
+    else:
+        chip_meaning = "法人沒明顯表態，這種盤最容易自己腦補行情。"
+    asof_date_text = pd.Timestamp(asof_date).strftime("%Y-%m-%d")
+
+    def _chip_decision_row(
+        label: str,
+        value: float | None,
+        *,
+        bullish_text: str,
+        bearish_text: str,
+    ) -> tuple[str, str, str, str]:
+        if value is None:
+            return (label, _tf_text(None), "資料不足", "中性（資料不足）")
+        if value > 0:
+            meaning = bullish_text
+        elif value < 0:
+            meaning = bearish_text
+        else:
+            meaning = "中性"
+        return (label, _tf_text(value > 0), f"{asof_date_text}={_fmt_plain_lots(value)}", meaning)
+
+    return {
+        "enabled": True,
+        "caption": "法人籌碼與 Chip 分數使用 <= 回放日 最近可得資料，單位為張（1 張 = 1,000 股）。",
+        "indicator_lines": [
+            (
+                f"籌碼：{asof_date_text} 外資 {_fmt_plain_lots(foreign_lots)} / "
+                f"投信 {_fmt_plain_lots(trust_lots)} / 自營商 {_fmt_plain_lots(dealer_lots)} / "
+                f"合計 {_fmt_plain_lots(total_lots)}。"
+            ),
+            (
+                f"籌碼延續：近3日合計 {_fmt_plain_lots(rolling_3d_total_lots)} / "
+                f"近5日合計 {_fmt_plain_lots(rolling_5d_total_lots)}，目前判定 `{chip_state}`。"
+            ),
+        ],
+        "conclusion_lines": [
+            f"籌碼判斷：{chip_state}（Chip {chip_score_int}/100，資料日期 {asof_date_text}）。",
+            f"籌碼對波段意義：{chip_meaning}",
+        ],
+        "decision_rows": [
+            _chip_decision_row(
+                "外資淨買賣超 > 0 ?",
+                foreign_lots,
+                bullish_text="加分（外資站多方）",
+                bearish_text="提醒（外資偏空）",
+            ),
+            _chip_decision_row(
+                "投信淨買賣超 > 0 ?",
+                trust_lots,
+                bullish_text="加分（投信有承接）",
+                bearish_text="提醒（投信未承接）",
+            ),
+            _chip_decision_row(
+                "自營商淨買賣超 > 0 ?",
+                dealer_lots,
+                bullish_text="加分（短線籌碼偏多）",
+                bearish_text="提醒（短線籌碼偏空）",
+            ),
+            _chip_decision_row(
+                "三大法人合計 > 0 ?",
+                total_lots,
+                bullish_text="加分（法人合力偏多）",
+                bearish_text="提醒（法人合力偏空）",
+            ),
+            _chip_decision_row(
+                "近3日法人合計 > 0 ?",
+                rolling_3d_total_lots,
+                bullish_text="加分（短波段籌碼延續）",
+                bearish_text="提醒（短波段籌碼轉弱）",
+            ),
+            (
+                "Chip 分數 >= 65 ?",
+                _tf_text(chip_score_int >= 65),
+                f"Chip={chip_score_int}/100",
+                "加分（籌碼順風）" if chip_score_int >= 65 else "提醒（籌碼未達順風標準）",
+            ),
+        ],
+        "chip_state": chip_state,
+        "chip_score": chip_score_int,
+        "chip_score_label": "順風" if chip_score_int >= 65 else ("逆風" if chip_score_int < 40 else "中性"),
+        "asof_date_text": asof_date_text,
+    }
+
+
+def _tf_text(flag: bool | None) -> str:
+    if flag is None:
+        return "N/A"
+    return "True" if bool(flag) else "False"
+
+
+def _summarize_finmind_month_revenue(rows: object) -> dict[str, object]:
+    payload = rows if isinstance(rows, list) else []
+    normalized: list[dict[str, object]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        parsed_date = _parse_finmind_date(row.get("date"))
+        if parsed_date is None:
+            revenue_year = pd.to_numeric(row.get("revenue_year"), errors="coerce")
+            revenue_month = pd.to_numeric(row.get("revenue_month"), errors="coerce")
+            if pd.notna(revenue_year) and pd.notna(revenue_month):
+                parsed_date = _parse_finmind_date(
+                    f"{int(revenue_year):04d}-{int(revenue_month):02d}-01"
+                )
+        revenue = _to_optional_float(row.get("revenue"))
+        if parsed_date is None or revenue is None:
+            continue
+        normalized.append({"date": parsed_date, "revenue": revenue})
+    if not normalized:
+        return {
+            "line": "FinMind：最新月營收資料不足。",
+            "signal_text": "資料不足",
+            "latest_date_text": "—",
+            "latest_revenue_text": "—",
+            "yoy": None,
+            "mom": None,
+            "decision_rows": [
+                ("最新月營收 YoY > 0 ?", _tf_text(None), "資料不足", "中性（資料不足）"),
+                ("最新月營收 MoM > 0 ?", _tf_text(None), "資料不足", "中性（資料不足）"),
+            ],
+        }
+
+    revenue_df = pd.DataFrame(normalized).sort_values("date").drop_duplicates(subset=["date"])
+    latest = revenue_df.iloc[-1]
+    latest_date = pd.Timestamp(latest["date"])
+    latest_revenue = float(latest["revenue"])
+    prev_month = revenue_df.iloc[-2] if len(revenue_df) >= 2 else None
+    prev_year_rows = revenue_df[
+        (revenue_df["date"].dt.year == (latest_date.year - 1))
+        & (revenue_df["date"].dt.month == latest_date.month)
+    ]
+    prev_year = prev_year_rows.iloc[-1] if not prev_year_rows.empty else None
+
+    def _pct_change(previous_row: object) -> float | None:
+        if previous_row is None or not isinstance(previous_row, pd.Series):
+            return None
+        base = _to_optional_float(previous_row.get("revenue"))
+        if base is None or base == 0:
+            return None
+        return (latest_revenue - float(base)) / float(base)
+
+    yoy = _pct_change(prev_year)
+    mom = _pct_change(prev_month)
+    if yoy is not None and yoy > 0 and mom is not None and mom > 0:
+        signal_text = "營收動能延續"
+    elif yoy is not None and yoy > 0 and mom is not None and mom <= 0:
+        signal_text = "年增仍在，但短月動能放緩"
+    elif yoy is not None and yoy <= 0 and mom is not None and mom > 0:
+        signal_text = "短月回升，但年增未轉正"
+    elif yoy is not None and yoy <= 0:
+        signal_text = "營收面未提供順風"
+    elif mom is not None and mom > 0:
+        signal_text = "短月營收回升"
+    elif mom is not None and mom <= 0:
+        signal_text = "短月營收放緩"
+    else:
+        signal_text = "資料不足"
+
+    yoy_row = (
+        "最新月營收 YoY > 0 ?",
+        _tf_text(yoy > 0 if yoy is not None else None),
+        f"YoY={_fmt_plain_pct(yoy)}",
+        "加分（年增延續）"
+        if yoy is not None and yoy > 0
+        else ("提醒（基本面未順風）" if yoy is not None else "中性（資料不足）"),
+    )
+    mom_row = (
+        "最新月營收 MoM > 0 ?",
+        _tf_text(mom > 0 if mom is not None else None),
+        f"MoM={_fmt_plain_pct(mom)}",
+        "加分（短月動能改善）"
+        if mom is not None and mom > 0
+        else ("提醒（短月動能放緩）" if mom is not None else "中性（資料不足）"),
+    )
+    return {
+        "line": (
+            f"FinMind：最新月營收 {latest_date.strftime('%Y-%m')} "
+            f"{latest_revenue / 1e8:.2f} 億，YoY={_fmt_plain_pct(yoy)}，MoM={_fmt_plain_pct(mom)}，"
+            f"{signal_text}。"
+        ),
+        "signal_text": signal_text,
+        "latest_date_text": latest_date.strftime("%Y-%m"),
+        "latest_revenue_text": f"{latest_revenue / 1e8:.2f} 億",
+        "yoy": yoy,
+        "mom": mom,
+        "decision_rows": [yoy_row, mom_row],
+    }
+
+
+def _summarize_finmind_institutional(rows: object) -> dict[str, object]:
+    payload = rows if isinstance(rows, list) else []
+    latest_rows: list[dict[str, object]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        parsed_date = _parse_finmind_date(row.get("date"))
+        if parsed_date is None:
+            continue
+        name = str(row.get("name") or row.get("institutional_investors") or "").strip()
+        buy = _to_optional_float(row.get("buy"))
+        sell = _to_optional_float(row.get("sell"))
+        buy_sell = _to_optional_float(row.get("buy_sell"))
+        if buy is None and sell is None and buy_sell is None:
+            continue
+        net = buy_sell if buy_sell is not None else (float(buy or 0.0) - float(sell or 0.0))
+        latest_rows.append(
+            {
+                "date": parsed_date,
+                "name": name,
+                "buy": float(buy or 0.0),
+                "sell": float(sell or 0.0),
+                "net": float(net),
+            }
+        )
+    if not latest_rows:
+        return {
+            "line": "FinMind：最新法人籌碼資料不足。",
+            "signal_text": "資料不足",
+            "decision_row": ("最新法人籌碼偏多 ?", _tf_text(None), "資料不足", "中性（資料不足）"),
+        }
+
+    latest_date = max(pd.Timestamp(row["date"]) for row in latest_rows)
+    latest_day_rows = [row for row in latest_rows if pd.Timestamp(row["date"]) == latest_date]
+
+    def _bucket(name: str) -> str | None:
+        token = str(name or "").strip().lower().replace(" ", "_")
+        token = token.replace("-", "_")
+        if token in {"foreign_investor", "foreign_dealer_self"} or "foreign" in token:
+            return "外資"
+        if token == "investment_trust" or "trust" in token:
+            return "投信"
+        if token in {"dealer_self", "dealer_hedging", "dealer"} or "dealer" in token:
+            return "自營商"
+        return None
+
+    category_net = {"外資": 0.0, "投信": 0.0, "自營商": 0.0}
+    category_seen = {"外資": False, "投信": False, "自營商": False}
+    fallback_rows: list[tuple[str, float]] = []
+    total_gross = 0.0
+    total_net = 0.0
+    for row in latest_day_rows:
+        net = float(row["net"])
+        total_net += net
+        total_gross += abs(net)
+        name = str(row["name"] or "").strip()
+        bucket = _bucket(name)
+        if bucket is not None:
+            category_net[bucket] += net
+            category_seen[bucket] = True
+        else:
+            fallback_rows.append((name or "未知法人", net))
+
+    neutral_threshold = max(1000.0, total_gross * 0.02)
+    if total_net > neutral_threshold:
+        signal_text = "籌碼偏多"
+        decision_flag = True
+        decision_meaning = "加分（籌碼偏多）"
+    elif total_net < -neutral_threshold:
+        signal_text = "籌碼偏空"
+        decision_flag = False
+        decision_meaning = "提醒（籌碼偏空）"
+    else:
+        signal_text = "籌碼中性"
+        decision_flag = False
+        decision_meaning = "中性（籌碼未明顯表態）"
+
+    summary_parts: list[str] = []
+    if any(category_seen.values()):
+        for label in ("外資", "投信", "自營商"):
+            if category_seen[label]:
+                summary_parts.append(f"{label} {category_net[label]:+,.0f}")
+    elif fallback_rows:
+        top_rows = sorted(fallback_rows, key=lambda item: abs(float(item[1])), reverse=True)[:2]
+        summary_parts.extend([f"{name} {net:+,.0f}" for name, net in top_rows])
+    summary_text = " / ".join(summary_parts) if summary_parts else "資料不足"
+    return {
+        "line": (
+            f"FinMind：最新法人籌碼 {latest_date.strftime('%Y-%m-%d')}，"
+            f"{summary_text}，合計 {total_net:+,.0f}，{signal_text}。"
+        ),
+        "signal_text": signal_text,
+        "decision_row": (
+            "最新法人籌碼偏多 ?",
+            _tf_text(decision_flag),
+            f"最新日合計={total_net:+,.0f}",
+            decision_meaning,
+        ),
+    }
+
+
+def _summarize_twse_three_investors(snapshot: object) -> dict[str, object]:
+    payload = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
+    data_date = str(payload.get("data_date") or "").strip()
+    foreign_net = _to_optional_float(payload.get("foreign_net_lots"))
+    trust_net = _to_optional_float(payload.get("investment_trust_net_lots"))
+    dealer_net = _to_optional_float(payload.get("dealer_net_lots"))
+    total_net = _to_optional_float(payload.get("total_net_lots"))
+    if not data_date or all(value is None for value in (foreign_net, trust_net, dealer_net, total_net)):
+        return {
+            "available": False,
+            "line": "",
+            "signal_text": "資料不足",
+            "decision_rows": [],
+        }
+
+    values = [abs(float(value)) for value in (foreign_net, trust_net, dealer_net) if value is not None]
+    gross = float(sum(values))
+    total_value = float(total_net or 0.0)
+    neutral_threshold = max(1.0, gross * 0.02)
+    if total_net is not None and total_value > neutral_threshold:
+        signal_text = "籌碼偏多"
+    elif total_net is not None and total_value < -neutral_threshold:
+        signal_text = "籌碼偏空"
+    else:
+        signal_text = "籌碼中性"
+
+    def _decision_row(label: str, value: float | None) -> tuple[str, str, str, str]:
+        if value is None:
+            return (label, _tf_text(None), "資料不足", "中性（資料不足）")
+        meaning = "加分（偏多）" if value > 0 else ("提醒（偏空）" if value < 0 else "中性")
+        return (label, _tf_text(value > 0), f"{data_date}={_fmt_plain_lots(value)}", meaning)
+
+    return {
+        "available": True,
+        "line": (
+            f"TWSE：最新三大法人 {data_date}，外資 {_fmt_plain_lots(foreign_net)} / "
+            f"投信 {_fmt_plain_lots(trust_net)} / 自營商 {_fmt_plain_lots(dealer_net)} / "
+            f"合計 {_fmt_plain_lots(total_net)}，{signal_text}。"
+        ),
+        "signal_text": signal_text,
+        "decision_rows": [
+            _decision_row("外資淨買賣超 > 0 ?", foreign_net),
+            _decision_row("投信淨買賣超 > 0 ?", trust_net),
+            _decision_row("自營商淨買賣超 > 0 ?", dealer_net),
+            _decision_row("三大法人合計 > 0 ?", total_net),
+        ],
+    }
+
+
+def _summarize_finmind_news(rows: object) -> dict[str, object]:
+    payload = rows if isinstance(rows, list) else []
+    normalized: list[tuple[pd.Timestamp, str]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or row.get("headline") or "").strip()
+        parsed_date = _parse_finmind_date(row.get("date") or row.get("publish_at"))
+        if not title:
+            continue
+        normalized.append((parsed_date or pd.Timestamp.min, title))
+    if not normalized:
+        return {"line": "FinMind：近期新聞資料不足。", "titles": []}
+    normalized.sort(key=lambda item: item[0], reverse=True)
+    titles = [title for _, title in normalized[:3]]
+    return {
+        "line": f"FinMind：新聞僅作事件背景，最近事件：{'；'.join(titles)}。",
+        "titles": titles,
+    }
+
+
+def _build_finmind_backtest_insight(
+    research: dict[str, object] | None,
+    official_institutional: dict[str, object] | None = None,
+    *,
+    include_institutional: bool = True,
+) -> dict[str, object]:
+    payload = dict(research or {})
+    official_summary = _summarize_twse_three_investors(official_institutional)
+    research_enabled = bool(payload.get("enabled", False))
+    allow_institutional = bool(include_institutional)
+    institutional_available = allow_institutional and bool(official_summary.get("available", False))
+    if not research_enabled and not institutional_available:
+        return {
+            "enabled": False,
+            "caption": "研究資料未啟用，本次仍以技術面為主。",
+            "indicator_lines": [],
+            "conclusion_lines": [],
+            "decision_rows": [],
+        }
+
+    revenue_summary = (
+        _summarize_finmind_month_revenue(payload.get("month_revenue"))
+        if research_enabled
+        else None
+    )
+    finmind_institutional_summary = (
+        _summarize_finmind_institutional(payload.get("institutional_investors"))
+        if research_enabled and allow_institutional
+        else None
+    )
+    news_summary = _summarize_finmind_news(payload.get("news")) if research_enabled else None
+    institutional_summary = (
+        official_summary
+        if institutional_available
+        else (
+            finmind_institutional_summary
+            if allow_institutional and isinstance(finmind_institutional_summary, dict)
+            else {"line": "", "signal_text": "資料不足", "decision_rows": []}
+        )
+    )
+    indicator_lines: list[str] = []
+    if isinstance(revenue_summary, dict):
+        indicator_lines.append(str(revenue_summary.get("line") or "FinMind：最新月營收資料不足。"))
+    if allow_institutional and str(institutional_summary.get("line") or "").strip():
+        indicator_lines.append(str(institutional_summary.get("line") or ""))
+    if isinstance(news_summary, dict):
+        indicator_lines.append(str(news_summary.get("line") or "FinMind：近期新聞資料不足。"))
+
+    revenue_signal = (
+        str(revenue_summary.get("signal_text") or "資料不足")
+        if isinstance(revenue_summary, dict)
+        else "資料不足"
+    )
+    institution_signal = (
+        str(institutional_summary.get("signal_text") or "資料不足") if allow_institutional else "資料不足"
+    )
+    if not research_enabled and institutional_available:
+        research_conclusion = f"研究面補充：官方三大法人顯示 {institution_signal}，本次以技術面搭配籌碼方向輔助判讀。"
+    elif not allow_institutional and revenue_signal == "資料不足":
+        research_conclusion = "研究面補充：研究資料不足，本次仍以技術面為主。"
+    elif not allow_institutional and "動能延續" in revenue_signal:
+        research_conclusion = "研究面補充：最新營收維持正向，基本面至少不是逆風。"
+    elif not allow_institutional and revenue_signal in {"營收面未提供順風", "短月回升，但年增未轉正"}:
+        research_conclusion = "研究面補充：基本面還沒完全站穩，技術面再漂亮也別自動腦補成一路噴。"
+    elif not allow_institutional:
+        research_conclusion = f"研究面補充：{revenue_signal}。"
+    elif revenue_signal == "資料不足" and institution_signal == "資料不足":
+        research_conclusion = "研究面補充：FinMind 研究資料不足，本次仍以技術面為主。"
+    elif "動能延續" in revenue_signal and institution_signal == "籌碼偏多":
+        research_conclusion = "研究面補充：最新營收與法人同步偏正向，技術面以外有額外順風。"
+    elif "年增仍在" in revenue_signal and institution_signal != "籌碼偏空":
+        research_conclusion = "研究面補充：營收面仍正向，但短月動能放緩，較適合配合技術面確認。"
+    elif institution_signal == "籌碼偏空":
+        research_conclusion = "研究面補充：法人沒有同步站在多方，若只靠技術面反彈要更重視停損。"
+    elif revenue_signal in {"營收面未提供順風", "短月回升，但年增未轉正"}:
+        research_conclusion = "研究面補充：基本面仍未完全轉強，較適合把反彈視為觀察而不是追價。"
+    else:
+        research_conclusion = f"研究面補充：{revenue_signal}，{institution_signal}。"
+
+    news_titles = news_summary.get("titles") if isinstance(news_summary, dict) else []
+    news_lines = news_titles if isinstance(news_titles, list) else []
+    conclusion_lines = [research_conclusion]
+    if news_lines:
+        conclusion_lines.append(f"事件背景：{'；'.join(str(title) for title in news_lines if str(title).strip())}")
+    elif research_enabled:
+        conclusion_lines.append("事件背景：近期新聞資料不足。")
+
+    decision_rows: list[tuple[str, str, str, str]] = []
+    if isinstance(revenue_summary, dict):
+        decision_rows.extend(
+            [
+                row
+                for row in list(revenue_summary.get("decision_rows") or [])
+                if isinstance(row, tuple) and len(row) == 4
+            ]
+        )
+    if allow_institutional:
+        official_rows = institutional_summary.get("decision_rows")
+        if isinstance(official_rows, list) and official_rows:
+            decision_rows.extend(
+                [row for row in official_rows if isinstance(row, tuple) and len(row) == 4]
+            )
+        else:
+            decision_row = institutional_summary.get("decision_row")
+            if isinstance(decision_row, tuple) and len(decision_row) == 4:
+                decision_rows.append(decision_row)
+    return {
+        "enabled": True,
+        "caption": "研究面補充使用最新可得資料，不隨回放日期回溯。"
+        if not allow_institutional
+        else "研究面補充使用最新可得資料，不隨回放日期回溯；法人籌碼優先採 TWSE 官方三大法人，單位為張（1 張 = 1,000 股）。",
+        "indicator_lines": indicator_lines,
+        "conclusion_lines": conclusion_lines,
+        "decision_rows": decision_rows,
+    }
 
 
 def _render_backtest_view():
@@ -398,6 +1159,34 @@ def _render_backtest_view():
         strategy_params = {"buy_below": float(buy_below), "sell_above": float(sell_above)}
     else:
         strategy_params = {}
+    strategy_params_cache = dict(strategy_params) if isinstance(strategy_params, dict) else {}
+
+    chip_filter_enabled = False
+    chip_filter_mode = "標準"
+    chip_filter_applicable = market_selector in {"TW", "OTC"} and len(symbols) == 1
+    if chip_filter_applicable:
+        st.markdown("#### 法人籌碼規則")
+        cf1, cf2 = st.columns(2)
+        chip_filter_enabled = cf1.checkbox(
+            "納入法人籌碼進場濾網",
+            value=False,
+            key=BT_KEYS.chip_filter_enabled,
+            help="只影響進場允許，不額外強制出場；需有 FinMind 歷史法人資料。",
+        )
+        chip_filter_mode = cf2.selectbox(
+            "濾網強度",
+            options=["寬鬆", "標準", "嚴格"],
+            index=1,
+            key=BT_KEYS.chip_filter_mode,
+            disabled=not chip_filter_enabled,
+            help="寬鬆=三大法人合計轉正；標準=合計轉正且外資或投信至少一方轉正；嚴格=合計、外資、投信都轉正。",
+        )
+        st.caption("法人濾網 v1 採 entry-only：用來過濾進場，不改原策略的出場條件。")
+    if chip_filter_enabled:
+        strategy_params_cache["chip_filter_enabled"] = 1.0
+        strategy_params_cache["chip_filter_mode"] = float(
+            {"寬鬆": 1, "標準": 2, "嚴格": 3}.get(chip_filter_mode, 2)
+        )
 
     auto_cost = st.checkbox(
         "自動套用市場成本參數（台/美股）",
@@ -467,6 +1256,9 @@ def _render_backtest_view():
     )
     if strategy == "buy_hold" and enable_wf:
         st.info("`buy_hold` 不需參數挑選，已自動以一般回測模式執行。")
+        enable_wf = False
+    if chip_filter_enabled and enable_wf:
+        st.info("法人籌碼濾網 v1 暫不支援 Walk-Forward，已自動改為一般回測模式。")
         enable_wf = False
     train_ratio = wf2.slider(
         "Train 比例",
@@ -599,7 +1391,7 @@ def _render_backtest_view():
         train_ratio=float(train_ratio),
         objective=objective,
         initial_capital=float(initial_capital),
-        strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+        strategy_params=strategy_params_cache,
         fee_rate=float(fee_rate),
         sell_tax=float(sell_tax),
         slippage=float(slippage),
@@ -808,12 +1600,34 @@ def _render_backtest_view():
             )
         return
 
+    signal_filters: dict[str, pd.Series] | None = None
+    chip_filter_meta: dict[str, object] = {"enabled": False}
+    if chip_filter_enabled and market_selector in {"TW", "OTC"} and len(bars_by_symbol) == 1:
+        chip_symbol = next(iter(bars_by_symbol.keys()))
+        chip_series, chip_filter_meta = _build_tw_chip_filter_series(
+            chip_symbol,
+            bars_by_symbol[chip_symbol],
+            filter_mode=chip_filter_mode,
+        )
+        if isinstance(chip_series, pd.Series):
+            signal_filters = {chip_symbol: chip_series}
+            st.caption(
+                "法人籌碼進場濾網："
+                f" mode={str(chip_filter_meta.get('mode') or chip_filter_mode)}"
+                f" / coverage={float(chip_filter_meta.get('coverage_pct') or 0.0):.1f}%"
+                f" / allowed_entry_days={int(chip_filter_meta.get('allowed_entry_days') or 0)}"
+                f" / total_days={int(chip_filter_meta.get('total_days') or 0)}"
+            )
+        else:
+            st.warning("法人籌碼濾網已開啟，但目前無法取得可回測的歷史法人資料，本次未套用。")
+            chip_filter_enabled = False
+
     run_params_base = build_backtest_run_params_base(
         market=market_selector,
         mode=mode,
         symbols=list(symbols),
         strategy=strategy,
-        strategy_params=strategy_params if isinstance(strategy_params, dict) else {},
+        strategy_params=strategy_params_cache,
         start_date=start_date,
         end_date=end_date,
         enable_walk_forward=bool(enable_wf),
@@ -880,8 +1694,11 @@ def _render_backtest_view():
                         objective=objective,
                         initial_capital=float(initial_capital),
                         cost_model=cost_model,
+                        signal_filters=signal_filters,
                     ),
                 )
+                if chip_filter_enabled:
+                    run_payload["chip_filter"] = dict(chip_filter_meta)
                 perf_timer.mark("backtest_executed")
         except Exception as exc:
             st.error(f"回測失敗：{exc}")
@@ -906,6 +1723,7 @@ def _render_backtest_view():
                 "metrics": summary_metrics,
                 "walk_forward": enable_wf,
                 "objective": objective if enable_wf else None,
+                "chip_filter": chip_filter_meta if chip_filter_enabled else None,
             },
         )
         replay_payload = _serialize_backtest_run_payload(run_payload)
@@ -923,6 +1741,15 @@ def _render_backtest_view():
     result = payload["result"]
     run_initial_capital = float(payload.get("initial_capital", initial_capital))
     bars_by_symbol = payload["bars_by_symbol"]
+    payload_chip_filter = payload.get("chip_filter")
+    if isinstance(payload_chip_filter, dict) and payload_chip_filter.get("enabled"):
+        st.caption(
+            "本次回測已套用法人籌碼進場濾網："
+            f" mode={str(payload_chip_filter.get('mode') or '標準')}"
+            f" / coverage={float(payload_chip_filter.get('coverage_pct') or 0.0):.1f}%"
+            f" / allowed_entry_days={int(payload_chip_filter.get('allowed_entry_days') or 0)}"
+            f" / total_days={int(payload_chip_filter.get('total_days') or 0)}"
+        )
     selected_symbols = list(bars_by_symbol.keys())
     multi_symbol_compare = len(selected_symbols) > 1
     tw_name_map: dict[str, str] = {}
@@ -1220,6 +2047,34 @@ def _render_backtest_view():
             return
     focus_ind = add_indicators(focus_bars)
     focus_result = result.component_results[focus_symbol] if is_portfolio else result
+    finmind_backtest_insight = {
+        "enabled": False,
+        "caption": "",
+        "indicator_lines": [],
+        "conclusion_lines": [],
+        "decision_rows": [],
+    }
+    chip_history = None
+    chip_history_meta: dict[str, object] = {"enabled": False}
+    if market_selector in {"TW", "OTC"} and len(symbols) == 1:
+        try:
+            chip_history, chip_history_meta = _build_tw_chip_history_frame(focus_symbol, focus_bars)
+        except Exception:
+            chip_history = None
+            chip_history_meta = {"enabled": False, "reason": "chip_history_error"}
+        try:
+            finmind_backtest_insight = _build_finmind_backtest_insight(
+                service.get_tw_research_context(focus_symbol),
+                include_institutional=False,
+            )
+        except Exception:
+            finmind_backtest_insight = {
+                "enabled": False,
+                "caption": "研究資料暫時不可用，本次仍以技術面為主。",
+                "indicator_lines": [],
+                "conclusion_lines": [],
+                "decision_rows": [],
+            }
 
     def _load_twii_overlay_from_twse(start: datetime, end: datetime) -> pd.DataFrame:
         loader = _load_twii_twse_month_close_map
@@ -1464,13 +2319,28 @@ def _render_backtest_view():
             st.caption("技術快照完整指標：資料不足。")
             return
         row_pos = min(max(int(idx_now), 0), len(ind_now.index) - 1)
+        replay_ts = pd.Timestamp(ind_now.index[row_pos])
         row = ind_now.iloc[row_pos]
-        row_dt = pd.Timestamp(ind_now.index[row_pos]).strftime("%Y-%m-%d")
+        row_dt = replay_ts.strftime("%Y-%m-%d")
         snapshot_data: dict[str, object] = {}
         for col in indicator_snapshot_cols:
             value = pd.to_numeric(row.get(col), errors="coerce")
             snapshot_data[col] = float(value) if pd.notna(value) else np.nan
         snapshot_df = pd.DataFrame([snapshot_data])
+        chip_replay_insight = (
+            _build_tw_chip_replay_insight(chip_history, replay_ts)
+            if market_selector in {"TW", "OTC"} and len(symbols) == 1
+            else {
+                "enabled": False,
+                "caption": "",
+                "indicator_lines": [],
+                "conclusion_lines": [],
+                "decision_rows": [],
+                "chip_state": "資料不足",
+                "chip_score": None,
+                "asof_date_text": "—",
+            }
+        )
 
         close = _to_float(snapshot_data.get("close"))
         sma_5 = _to_float(snapshot_data.get("sma_5"))
@@ -1753,6 +2623,12 @@ def _render_backtest_view():
             action_label = "突破追價（少量）"
         else:
             action_label = "觀望"
+        chip_score_int = chip_replay_insight.get("chip_score")
+        if isinstance(chip_score_int, (int, float)) and int(chip_score_int) < 40:
+            if status_label in {"可佈局", "避免追高"}:
+                status_label = "觀望"
+            if action_label != "觀望":
+                action_label = "觀望"
 
         entry_anchor_name = ""
         entry_anchor = None
@@ -1817,6 +2693,8 @@ def _render_backtest_view():
             risk_warnings.append("疑似假突破（站上上軌但動能未同步）")
         if atr_ratio is not None and atr_ratio > atr_high_vol_ratio:
             risk_warnings.append("ATR/Close 偏高，波動過大")
+        if chip_replay_insight.get("chip_state") == "籌碼逆風":
+            risk_warnings.append("法人籌碼逆風，反彈視角偏短打")
         if not risk_warnings:
             risk_warnings.append("目前未觸發主要過熱警示，仍需控倉")
 
@@ -1917,6 +2795,24 @@ def _render_backtest_view():
             "| 條件 | 目前結果 | 解釋 | 對波段意義 |",
             "|---|---|---|---|",
         ]
+        chip_decision_rows = chip_replay_insight.get("decision_rows", [])
+        if isinstance(chip_decision_rows, list):
+            decision_rows.extend(
+                [
+                    row
+                    for row in chip_decision_rows
+                    if isinstance(row, tuple) and len(row) == 4
+                ]
+            )
+        finmind_decision_rows = finmind_backtest_insight.get("decision_rows", [])
+        if isinstance(finmind_decision_rows, list):
+            decision_rows.extend(
+                [
+                    row
+                    for row in finmind_decision_rows
+                    if isinstance(row, tuple) and len(row) == 4
+                ]
+            )
         decision_md_lines.extend([f"| {c} | {r} | {e} | {m} |" for c, r, e, m in decision_rows])
 
         symbol_title = str(focus_symbol or "").strip().upper() or "UNKNOWN"
@@ -1940,47 +2836,83 @@ def _render_backtest_view():
         else:
             trend_advice = "盤整"
 
+        chip_state_text = str(chip_replay_insight.get("chip_state") or "資料不足")
+        chip_score_display = (
+            f"{int(chip_score_int)}/100"
+            if isinstance(chip_score_int, (int, float))
+            else "資料不足"
+        )
+        if chip_state_text == "籌碼順風":
+            chip_clause = "籌碼有人抬，但有人抬不代表你可以閉眼追，追在爛位置一樣是自己坑自己。"
+        elif chip_state_text == "籌碼逆風":
+            chip_clause = "法人根本沒站這邊，硬做就是拿停損去換教訓，這種單你要做也只能當短打。"
+        elif chip_state_text == "籌碼中性":
+            chip_clause = "籌碼沒明顯表態，這種盤最會騙人，你以為快噴了，結果只是自己腦補。"
+        else:
+            chip_clause = "籌碼資料不夠，少拿感覺補證據，先看技術面跟風控。"
         gail_style = (
-            f"盤面現在是 `{trend_advice}` 結構，動能分數 {momentum_score_int}/100，風險分數 {risk_score_int}/100。"
-            f"策略上偏向 `{action_label}`，不是叫你看到紅K就梭哈。"
-            f" 先看 `{entry_zone_text}` 這段能不能站穩，再用 `{stop_text}` 做風險上限，"
-            "守紀律比猜高點低點重要。"
+            f"盤面現在是 `{trend_advice}` 結構，動能 {momentum_score_int}/100，風險 {risk_score_int}/100，"
+            f"籌碼 {chip_score_display}。策略上偏向 `{action_label}`，{chip_clause}"
+            f" 先看 `{entry_zone_text}` 這段能不能站穩，再用 `{stop_text}` 把風險上限鎖死，"
+            "守紀律比亂講信仰有用。"
         )
 
         st.markdown("#### 技術快照完整指標表格")
         st.caption(
             f"資料日期：{row_dt} | 焦點標的：{_tw_label(focus_symbol) or str(focus_symbol)}（隨回放位置同步）"
         )
+        chip_caption = str(chip_replay_insight.get("caption") or "").strip()
+        if chip_caption:
+            st.caption(chip_caption)
+        elif market_selector in {"TW", "OTC"} and len(symbols) == 1 and not bool(chip_history_meta.get("enabled", False)):
+            st.caption("法人籌碼資料不足，本次仍以技術面為主。")
+        finmind_caption = str(finmind_backtest_insight.get("caption") or "").strip()
+        if finmind_caption:
+            st.caption(finmind_caption)
         st.dataframe(snapshot_df.round(4), width="stretch", hide_index=True)
         st.markdown(f"# {symbol_title} {row_dt}")
         st.markdown("## 指標判讀")
-        st.markdown(
-            "\n".join(
-                [
-                    f"- 趨勢/均線：{trend_line}。目前判定 `{trend_state}`。",
-                    f"- RSI(14)：{_fmt_num(rsi_14)}（{rsi_text}）。",
-                    f"- KD：K={_fmt_num(stoch_k)} / D={_fmt_num(stoch_d)}，{kd_relation}，{kd_zone_text}。",
-                    f"- MFI(14)：{_fmt_num(mfi_14)}（{mfi_text}）。",
-                    f"- MACD：{macd_line}",
-                    f"- 布林：{bb_zone_text}（mid={_fmt_num(bb_mid)}, upper={_fmt_num(bb_upper)}, lower={_fmt_num(bb_lower)}）。",
-                    f"- VWAP：{vwap_text}（vwap={_fmt_num(vwap)}, gap={_fmt_pct(vwap_gap_pct)}）。",
-                    f"- ATR：atr_14={_fmt_num(atr_14)}，{atr_text}（ATR/close={_fmt_pct(atr_ratio)}）。",
-                ]
+        indicator_lines = [
+            f"- 趨勢/均線：{trend_line}。目前判定 `{trend_state}`。",
+            f"- RSI(14)：{_fmt_num(rsi_14)}（{rsi_text}）。",
+            f"- KD：K={_fmt_num(stoch_k)} / D={_fmt_num(stoch_d)}，{kd_relation}，{kd_zone_text}。",
+            f"- MFI(14)：{_fmt_num(mfi_14)}（{mfi_text}）。",
+            f"- MACD：{macd_line}",
+            f"- 布林：{bb_zone_text}（mid={_fmt_num(bb_mid)}, upper={_fmt_num(bb_upper)}, lower={_fmt_num(bb_lower)}）。",
+            f"- VWAP：{vwap_text}（vwap={_fmt_num(vwap)}, gap={_fmt_pct(vwap_gap_pct)}）。",
+            f"- ATR：atr_14={_fmt_num(atr_14)}，{atr_text}（ATR/close={_fmt_pct(atr_ratio)}）。",
+        ]
+        chip_indicator_lines = chip_replay_insight.get("indicator_lines", [])
+        if isinstance(chip_indicator_lines, list):
+            indicator_lines.extend(
+                [f"- {str(line).strip()}" for line in chip_indicator_lines if str(line).strip()]
             )
-        )
+        finmind_indicator_lines = finmind_backtest_insight.get("indicator_lines", [])
+        if isinstance(finmind_indicator_lines, list):
+            indicator_lines.extend(
+                [f"- {str(line).strip()}" for line in finmind_indicator_lines if str(line).strip()]
+            )
+        st.markdown("\n".join(indicator_lines))
         st.markdown("## 波段結論（只給可執行建議，不空泛）")
-        st.markdown(
-            "\n".join(
-                [
-                    f"- 趨勢狀態：{trend_state}",
-                    f"- 建議動作：{action_label}",
-                    f"- 進場參考區：{entry_zone_text}",
-                    f"- 停損參考：{stop_text}",
-                    f"- 續抱/出場條件：{hold_exit_text}",
-                    f"- 風險提醒：{'；'.join(risk_warnings)}",
-                ]
+        conclusion_lines = [
+            f"- 趨勢狀態：{trend_state}",
+            f"- 建議動作：{action_label}",
+            f"- 進場參考區：{entry_zone_text}",
+            f"- 停損參考：{stop_text}",
+            f"- 續抱/出場條件：{hold_exit_text}",
+            f"- 風險提醒：{'；'.join(risk_warnings)}",
+        ]
+        chip_conclusion_lines = chip_replay_insight.get("conclusion_lines", [])
+        if isinstance(chip_conclusion_lines, list):
+            conclusion_lines.extend(
+                [f"- {str(line).strip()}" for line in chip_conclusion_lines if str(line).strip()]
             )
-        )
+        finmind_conclusion_lines = finmind_backtest_insight.get("conclusion_lines", [])
+        if isinstance(finmind_conclusion_lines, list):
+            conclusion_lines.extend(
+                [f"- {str(line).strip()}" for line in finmind_conclusion_lines if str(line).strip()]
+            )
+        st.markdown("\n".join(conclusion_lines))
         st.markdown("## 判斷表（Decision Table）")
         st.markdown("\n".join(decision_md_lines))
         st.markdown("## 打分數（0-100）")
@@ -1990,6 +2922,7 @@ def _render_backtest_view():
                     f"- Trend：{trend_score_int}/100",
                     f"- Momentum：{momentum_score_int}/100",
                     f"- Risk：{risk_score_int}/100（分數越高代表風險越高）",
+                    f"- Chip：{chip_score_display}",
                     f"- 總結狀態：**{status_label}**",
                 ]
             )

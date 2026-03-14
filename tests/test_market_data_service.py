@@ -73,6 +73,7 @@ class _FakeMetadataStore:
     def __init__(self, seed: dict[tuple[str, str], dict[str, object]] | None = None):
         self.seed = seed or {}
         self.upserted: list[dict[str, object]] = []
+        self.snapshots: list[dict[str, object]] = []
 
     def load_symbol_metadata(self, symbols: list[str], market: str):
         out: dict[str, dict[str, object]] = {}
@@ -97,6 +98,50 @@ class _FakeMetadataStore:
             self.seed[(market, symbol)] = existing
             self.upserted.append(dict(row))
         return len(rows)
+
+    def save_market_snapshot(
+        self,
+        *,
+        dataset_key: str,
+        market: str,
+        symbol: str,
+        interval: str,
+        source: str,
+        asof,
+        payload,
+        freshness_sec=None,
+        quality_score=None,
+        stale=False,
+        raw_json=None,
+    ):
+        self.snapshots.append(
+            {
+                "dataset_key": dataset_key,
+                "market": market,
+                "symbol": symbol,
+                "interval": interval,
+                "source": source,
+                "as_of": asof,
+                "payload": payload,
+                "freshness_sec": freshness_sec,
+                "quality_score": quality_score,
+                "stale": stale,
+                "raw_json": raw_json,
+            }
+        )
+
+    def load_latest_market_snapshot(self, *, dataset_key: str, market: str = "", symbol: str = "", interval: str = ""):
+        for row in reversed(self.snapshots):
+            if str(row.get("dataset_key", "")) != str(dataset_key or ""):
+                continue
+            if market and str(row.get("market", "")) != str(market):
+                continue
+            if symbol and str(row.get("symbol", "")) != str(symbol):
+                continue
+            if interval and str(row.get("interval", "")) != str(interval):
+                continue
+            return dict(row)
+        return None
 
 
 class MarketDataServiceTests(unittest.TestCase):
@@ -341,6 +386,32 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertTrue(any(str(item.get("symbol", "")) == "2330" for item in metadata.upserted))
 
     @patch("requests.get")
+    def test_get_tw_symbol_names_uses_finmind_when_enabled(self, mock_get):
+        mock_get.side_effect = RuntimeError("should not call open api")
+        metadata = _FakeMetadataStore()
+        service = MarketDataService()
+        service.set_metadata_store(metadata)
+        service.tw_finmind.api_key = "finmind-key"
+        service.tw_finmind.fetch_stock_info = unittest.mock.MagicMock(
+            return_value=[
+                {
+                    "stock_id": "2330",
+                    "stock_name": "台積電",
+                    "industry_category": "半導體",
+                    "type": "twse",
+                }
+            ]
+        )
+
+        out = service.get_tw_symbol_names(["2330"])
+
+        self.assertEqual(out["2330"], "台積電")
+        self.assertTrue(
+            any(str(item.get("source", "")) == "finmind:TaiwanStockInfo" for item in metadata.upserted)
+        )
+        service.tw_finmind.fetch_stock_info.assert_called_once()
+
+    @patch("requests.get")
     def test_get_tw_symbol_names_fallback_profiles(self, mock_get):
         twse_resp = unittest.mock.MagicMock()
         twse_resp.raise_for_status.return_value = None
@@ -430,6 +501,64 @@ class MarketDataServiceTests(unittest.TestCase):
         out = service.get_tw_symbol_industries(["2330"])
         self.assertEqual(out["2330"], "24")
         mock_get.assert_not_called()
+
+    def test_get_tw_research_context_fetches_finmind_and_caches_snapshots(self):
+        metadata = _FakeMetadataStore()
+        service = MarketDataService()
+        service.set_metadata_store(metadata)
+        service.tw_finmind.api_key = "finmind-key"
+        service.tw_finmind.fetch_stock_info = unittest.mock.MagicMock(
+            return_value=[
+                {
+                    "stock_id": "2330",
+                    "stock_name": "台積電",
+                    "industry_category": "半導體",
+                    "type": "twse",
+                }
+            ]
+        )
+        service.tw_finmind.fetch_month_revenue = unittest.mock.MagicMock(
+            return_value=[
+                {"date": "2026-01-01", "stock_id": "2330", "revenue": 100000000},
+                {"date": "2026-02-01", "stock_id": "2330", "revenue": 120000000},
+            ]
+        )
+        service.tw_finmind.fetch_stock_news = unittest.mock.MagicMock(
+            return_value=[
+                {
+                    "date": "2026-03-14",
+                    "stock_id": "2330",
+                    "title": "台積電法說重點",
+                    "source": "測試新聞",
+                    "link": "https://example.com/news",
+                }
+            ]
+        )
+        service.tw_finmind.fetch_institutional_investors = unittest.mock.MagicMock(
+            return_value=[
+                {
+                    "date": "2026-03-14",
+                    "stock_id": "2330",
+                    "name": "Foreign_Investor",
+                    "buy": 1000,
+                    "sell": 800,
+                }
+            ]
+        )
+
+        context = service.get_tw_research_context("2330")
+
+        self.assertTrue(context["enabled"])
+        self.assertEqual(context["company_info"]["stock_name"], "台積電")
+        self.assertEqual(len(context["month_revenue"]), 2)
+        self.assertEqual(len(context["news"]), 1)
+        self.assertEqual(len(context["institutional_investors"]), 1)
+        self.assertGreaterEqual(len(metadata.snapshots), 3)
+        service.tw_finmind.fetch_month_revenue.assert_called_once()
+
+        context2 = service.get_tw_research_context("2330")
+        self.assertEqual(context2["company_info"]["stock_name"], "台積電")
+        service.tw_finmind.fetch_month_revenue.assert_called_once()
 
     @patch("yfinance.Ticker")
     def test_get_tw_etf_constituents_fallback(self, mock_ticker):

@@ -33,7 +33,10 @@ class BacktestEngineTests(unittest.TestCase):
             signal.iloc[45:70] = 1
             return signal
 
-        with patch("backtest.engine.STRATEGIES", {"test_strategy": custom_signal}):
+        with (
+            patch("backtest.engine.STRATEGIES", {"test_strategy": custom_signal}),
+            patch("backtest.engine.get_strategy_min_bars", return_value=2),
+        ):
             result = BacktestEngine().run(
                 bars=bars,
                 strategy_name="test_strategy",
@@ -69,6 +72,34 @@ class BacktestEngineTests(unittest.TestCase):
         bars = self._sample_bars(n=1)
         with self.assertRaises(ValueError):
             BacktestEngine().run(bars=bars, strategy_name="buy_hold")
+
+    def test_signal_filter_only_gates_entry(self):
+        bars = self._sample_bars(n=20)
+
+        def custom_signal(frame: pd.DataFrame):
+            signal = pd.Series(0, index=frame.index, dtype=int)
+            signal.iloc[2:10] = 1
+            return signal
+
+        gate = pd.Series(0, index=bars.index, dtype=int)
+        gate.iloc[4:] = 1
+        with (
+            patch("backtest.engine.STRATEGIES", {"test_strategy": custom_signal}),
+            patch("backtest.engine.get_strategy_min_bars", return_value=2),
+        ):
+            result = BacktestEngine().run(
+                bars=bars,
+                strategy_name="test_strategy",
+                strategy_params={},
+                cost_model=CostModel(fee_rate=0.0, sell_tax_rate=0.0, slippage_rate=0.0),
+                initial_capital=100_000.0,
+                signal_filter=gate,
+            )
+
+        self.assertEqual(int(result.signals.iloc[2]), 0)
+        self.assertEqual(int(result.signals.iloc[4]), 1)
+        self.assertEqual(int(result.signals.iloc[9]), 1)
+        self.assertEqual(int(result.signals.iloc[10]), 0)
 
     def test_daily_k_strategies_can_run(self):
         bars = self._sample_bars(n=220)

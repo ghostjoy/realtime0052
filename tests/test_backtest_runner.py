@@ -171,6 +171,7 @@ class BacktestRunnerTests(unittest.TestCase):
 
     def test_execute_backtest_run_single_and_portfolio(self):
         bars_map = {"0050": _bars(220, seed=21), "2330": _bars(220, seed=22)}
+        signal_filter = pd.Series(1, index=bars_map["0050"].index, dtype=int)
         config_single = BacktestExecutionInput(
             mode="單一標的",
             strategy="buy_hold",
@@ -180,6 +181,7 @@ class BacktestRunnerTests(unittest.TestCase):
             objective="sharpe",
             initial_capital=1_000_000.0,
             cost_model=CostModel(fee_rate=0.0, sell_tax_rate=0.0, slippage_rate=0.0),
+            signal_filters={"0050": signal_filter},
         )
         single_payload = execute_backtest_run(
             bars_by_symbol={"0050": bars_map["0050"]}, config=config_single

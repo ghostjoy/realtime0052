@@ -264,6 +264,108 @@ def _run_tw_live_refresh(
     return service.get_tw_live_context(symbol, yahoo_symbol, ticks=ticks, options=options)
 
 
+def _render_finmind_research_card(service, symbol: str) -> None:
+    st.markdown("#### FinMind 研究資料")
+    try:
+        research = service.get_tw_research_context(symbol)
+    except Exception as exc:
+        st.caption(f"FinMind 研究資料暫時不可用：{exc}")
+        return
+
+    if not bool(research.get("enabled", False)):
+        st.caption("未啟用 FinMind；設定 `FINMIND_API_TOKEN` 或預設 key 檔後會顯示研究資料。")
+        return
+
+    company_info = research.get("company_info")
+    company_row = company_info if isinstance(company_info, dict) else {}
+    company_name = str(company_row.get("stock_name") or company_row.get("name") or "").strip()
+    industry = str(company_row.get("industry_category") or company_row.get("industry") or "").strip()
+    market_type = str(company_row.get("type") or "").strip()
+    if company_name:
+        st.caption(
+            " / ".join([part for part in [company_name, industry, market_type] if part])
+        )
+    elif industry or market_type:
+        st.caption(" / ".join([part for part in [industry, market_type] if part]))
+
+    month_revenue = research.get("month_revenue")
+    revenue_rows = month_revenue if isinstance(month_revenue, list) else []
+    if revenue_rows:
+        revenue_df = pd.DataFrame(revenue_rows).copy()
+        revenue_df["date"] = pd.to_datetime(revenue_df.get("date"), errors="coerce")
+        revenue_df["revenue"] = pd.to_numeric(revenue_df.get("revenue"), errors="coerce")
+        revenue_df = revenue_df.dropna(subset=["date", "revenue"]).sort_values("date")
+        if not revenue_df.empty:
+            latest = revenue_df.iloc[-1]
+            latest_date = latest["date"]
+            latest_revenue = float(latest["revenue"])
+            prev_month = revenue_df.iloc[-2] if len(revenue_df) >= 2 else None
+            prev_year_rows = revenue_df[
+                revenue_df["date"] == (pd.Timestamp(latest_date) - pd.DateOffset(years=1))
+            ]
+            prev_year = prev_year_rows.iloc[-1] if not prev_year_rows.empty else None
+
+            def _pct_change(current: float, previous_row: object) -> str:
+                if previous_row is None or not isinstance(previous_row, pd.Series):
+                    return "—"
+                base = pd.to_numeric(previous_row.get("revenue"), errors="coerce")
+                if pd.isna(base) or float(base) == 0:
+                    return "—"
+                return f"{((current - float(base)) / float(base)) * 100.0:+.2f}%"
+
+            st.markdown("**月營收**")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("最新月份", pd.Timestamp(latest_date).strftime("%Y-%m"))
+            m2.metric("營收", f"{latest_revenue / 1e8:.2f} 億")
+            m3.metric("YoY", _pct_change(latest_revenue, prev_year))
+            st.caption(f"MoM：{_pct_change(latest_revenue, prev_month)}")
+
+    institutional = research.get("institutional_investors")
+    inst_rows = institutional if isinstance(institutional, list) else []
+    if inst_rows:
+        inst_df = pd.DataFrame(inst_rows).copy()
+        inst_df["date"] = pd.to_datetime(inst_df.get("date"), errors="coerce")
+        inst_df["buy"] = pd.to_numeric(inst_df.get("buy"), errors="coerce")
+        inst_df["sell"] = pd.to_numeric(inst_df.get("sell"), errors="coerce")
+        inst_df["net"] = inst_df["buy"].fillna(0.0) - inst_df["sell"].fillna(0.0)
+        inst_df = inst_df.dropna(subset=["date"]).sort_values("date", ascending=False)
+        if not inst_df.empty:
+            latest_date = inst_df["date"].max()
+            latest_inst = inst_df[inst_df["date"] == latest_date].copy()
+            latest_inst["name"] = latest_inst.get("name", "").astype(str)
+            latest_inst = latest_inst.sort_values("net", ascending=False).head(5)
+            if not latest_inst.empty:
+                st.markdown("**法人籌碼**")
+                st.caption(f"最新日期：{pd.Timestamp(latest_date).strftime('%Y-%m-%d')}")
+                display = latest_inst[["name", "buy", "sell", "net"]].rename(
+                    columns={"name": "法人", "buy": "買進", "sell": "賣出", "net": "買賣超"}
+                )
+                st.dataframe(display, width="stretch", hide_index=True)
+
+    news_rows_obj = research.get("news")
+    news_rows = news_rows_obj if isinstance(news_rows_obj, list) else []
+    if news_rows:
+        st.markdown("**近期新聞**")
+        for row in news_rows[:5]:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or row.get("headline") or "").strip()
+            link = str(row.get("link") or row.get("url") or "").strip()
+            source = str(row.get("source") or row.get("media") or "").strip()
+            date_text = str(row.get("date") or "").strip()
+            meta = " / ".join([part for part in [source, date_text] if part])
+            if title and link:
+                st.markdown(f"- [{title}]({link})")
+            elif title:
+                st.markdown(f"- {title}")
+            if meta:
+                st.caption(meta)
+
+    sources = research.get("sources")
+    if isinstance(sources, list) and sources:
+        st.caption(f"來源：{', '.join(str(item) for item in sources if str(item).strip())}")
+
+
 def _render_live_view():
     service = _market_service()
     store = _history_store()
@@ -648,6 +750,8 @@ def _render_live_view():
                         }
                     )
                     st.dataframe(ob, width="stretch", hide_index=True)
+                with st.container(border=True):
+                    _render_finmind_research_card(service, stock_id)
             elif ctx.fundamentals:
                 with st.container(border=True):
                     st.markdown("#### 基本面快照（Yahoo）")

@@ -18,6 +18,31 @@ class CostModel:
 
 
 class BacktestEngine:
+    @staticmethod
+    def _normalize_signal_filter(index: pd.Index, signal_filter: pd.Series | None) -> pd.Series | None:
+        if not isinstance(signal_filter, pd.Series):
+            return None
+        gate = pd.to_numeric(signal_filter, errors="coerce")
+        gate = gate.reindex(index).fillna(0.0)
+        gate = (gate > 0).astype(int)
+        return gate.reindex(index).fillna(0).astype(int)
+
+    @staticmethod
+    def _apply_entry_gate(signals: pd.Series, gate: pd.Series | None) -> pd.Series:
+        if not isinstance(gate, pd.Series):
+            return signals.astype(int).clip(lower=0, upper=1)
+        out = pd.Series(0, index=signals.index, dtype=int)
+        in_position = False
+        for idx in signals.index:
+            target = int(signals.loc[idx]) if pd.notna(signals.loc[idx]) else 0
+            allow_entry = bool(int(gate.loc[idx])) if idx in gate.index else False
+            if not in_position:
+                in_position = bool(target == 1 and allow_entry)
+            elif target == 0:
+                in_position = False
+            out.loc[idx] = 1 if in_position else 0
+        return out.astype(int).clip(lower=0, upper=1)
+
     def run(
         self,
         bars: pd.DataFrame,
@@ -25,6 +50,7 @@ class BacktestEngine:
         strategy_params: dict[str, float] | None = None,
         cost_model: CostModel | None = None,
         initial_capital: float = 1_000_000.0,
+        signal_filter: pd.Series | None = None,
     ) -> BacktestResult:
         if strategy_name not in STRATEGIES:
             raise ValueError(f"unsupported strategy: {strategy_name}")
@@ -42,6 +68,8 @@ class BacktestEngine:
         signal_fn = STRATEGIES[strategy_name]
         signals = signal_fn(frame, **strategy_params).astype(int).reindex(frame.index).fillna(0)
         signals = signals.clip(lower=0, upper=1)
+        gate = self._normalize_signal_filter(frame.index, signal_filter)
+        signals = self._apply_entry_gate(signals, gate)
 
         cash = float(initial_capital)
         qty = 0.0
@@ -151,6 +179,7 @@ def run_backtest(
     strategy_params: dict[str, float] | None = None,
     cost_model: CostModel | None = None,
     initial_capital: float = 1_000_000.0,
+    signal_filter: pd.Series | None = None,
 ) -> BacktestResult:
     engine = BacktestEngine()
     return engine.run(
@@ -159,4 +188,5 @@ def run_backtest(
         strategy_params=strategy_params,
         cost_model=cost_model,
         initial_capital=initial_capital,
+        signal_filter=signal_filter,
     )

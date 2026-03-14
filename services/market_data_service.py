@@ -10,6 +10,7 @@ import pandas as pd
 from data_sources import TAIPEI_TZ
 from market_data_types import DataQuality, LiveContext, OhlcvSnapshot, QuoteSnapshot
 from providers import (
+    TwFinMindClient,
     TwFugleHistoricalProvider,
     TwFugleWebSocketProvider,
     TwMisProvider,
@@ -56,11 +57,18 @@ class _TtlCache:
         )
 
 
+FINMIND_STOCK_INFO_DATASET_KEY = "finmind:stock_info"
+FINMIND_MONTH_REVENUE_DATASET_KEY = "finmind:month_revenue"
+FINMIND_NEWS_DATASET_KEY = "finmind:news"
+FINMIND_INSTITUTIONAL_DATASET_KEY = "finmind:institutional_investors"
+
+
 class MarketDataService:
     def __init__(self):
         self.yahoo = UsYahooProvider()
         self.us_twelve = UsTwelveDataProvider()
         self.us_stooq = UsStooqProvider()
+        self.tw_finmind = TwFinMindClient()
         self.tw_fugle_rest = TwFugleHistoricalProvider()
         self.tw_fugle_ws = TwFugleWebSocketProvider()
         self.tw_mis = TwMisProvider()
@@ -174,6 +182,308 @@ class MarketDataService:
             upsert(rows)
         except Exception:
             pass
+
+    @staticmethod
+    def _normalize_market_snapshot_rows(value: object) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+        return [dict(row) for row in value if isinstance(row, dict)]
+
+    @staticmethod
+    def _snapshot_is_fresh(snapshot: dict[str, object] | None, *, max_age_sec: int) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        if bool(snapshot.get("stale", False)):
+            return False
+        freshness = snapshot.get("freshness_sec")
+        age_candidates: list[int] = []
+        now_utc = datetime.now(tz=timezone.utc)
+        for key in ("fetched_at", "asof"):
+            ts = snapshot.get(key)
+            if not isinstance(ts, datetime):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts = ts.astimezone(timezone.utc)
+            age_candidates.append(max(0, int((now_utc - ts).total_seconds())))
+        dynamic_age = min(age_candidates) if age_candidates else None
+        if isinstance(freshness, int) and dynamic_age is not None:
+            return (freshness + dynamic_age) <= max(0, int(max_age_sec))
+        if dynamic_age is not None:
+            return dynamic_age <= max(0, int(max_age_sec))
+        if isinstance(freshness, int):
+            return freshness <= max(0, int(max_age_sec))
+        return False
+
+    def _load_latest_dataset_snapshot(
+        self, *, dataset_key: str, symbol: str, interval: str, max_age_sec: int
+    ) -> list[dict[str, object]]:
+        store = getattr(self, "_metadata_store", None)
+        if store is None:
+            return []
+        loader = getattr(store, "load_latest_market_snapshot", None)
+        if not callable(loader):
+            return []
+        try:
+            snap = loader(dataset_key=dataset_key, market="TW", symbol=symbol, interval=interval)
+        except Exception:
+            return []
+        if not self._snapshot_is_fresh(snap, max_age_sec=max_age_sec):
+            return []
+        return self._normalize_market_snapshot_rows(snap.get("payload"))
+
+    def _persist_finmind_snapshot(
+        self,
+        *,
+        dataset_key: str,
+        symbol: str,
+        interval: str,
+        payload: list[dict[str, object]],
+        asof: datetime | None = None,
+    ) -> None:
+        if not payload:
+            return
+        self._save_market_snapshot(
+            dataset_key=dataset_key,
+            market="TW",
+            symbol=symbol,
+            interval=interval,
+            source="finmind",
+            asof=asof or datetime.now(tz=timezone.utc),
+            payload=payload,
+            freshness_sec=0,
+            quality_score=0.9,
+            stale=False,
+            raw_json={"rows": len(payload)},
+        )
+
+    @staticmethod
+    def _build_finmind_metadata_row(info: dict[str, object]) -> dict[str, object] | None:
+        symbol = str(info.get("stock_id") or info.get("data_id") or "").strip().upper()
+        if not symbol:
+            return None
+        exchange_raw = str(info.get("type") or info.get("market") or "").strip().lower()
+        exchange = ""
+        if "tpex" in exchange_raw or "otc" in exchange_raw:
+            exchange = "OTC"
+        elif "twse" in exchange_raw or "listed" in exchange_raw:
+            exchange = "TW"
+        elif exchange_raw:
+            exchange = exchange_raw.upper()
+        name = str(info.get("stock_name") or info.get("name") or "").strip()
+        industry = str(info.get("industry_category") or info.get("industry") or "").strip()
+        return {
+            "symbol": symbol,
+            "market": "TW",
+            "name": name,
+            "exchange": exchange,
+            "industry": industry,
+            "asset_type": "ETF" if "etf" in name.lower() else "stock",
+            "currency": "TWD",
+            "source": "finmind:TaiwanStockInfo",
+        }
+
+    def _get_finmind_stock_info_subset(self, symbols: list[str]) -> dict[str, dict[str, object]]:
+        normalized = []
+        for symbol in symbols:
+            token = str(symbol or "").strip().upper()
+            if token and token not in normalized:
+                normalized.append(token)
+        if not normalized or not bool(getattr(self.tw_finmind, "enabled", False)):
+            return {}
+
+        out: dict[str, dict[str, object]] = {}
+        unresolved: list[str] = []
+        for symbol in normalized:
+            cached_rows = self._load_latest_dataset_snapshot(
+                dataset_key=FINMIND_STOCK_INFO_DATASET_KEY,
+                symbol=symbol,
+                interval="metadata",
+                max_age_sec=86400,
+            )
+            if cached_rows:
+                out[symbol] = dict(cached_rows[0])
+            else:
+                unresolved.append(symbol)
+        if not unresolved:
+            return out
+
+        cache_key = "finmind:stock_info_map"
+        info_map = self.cache.get(cache_key)
+        if not isinstance(info_map, dict):
+            try:
+                rows = self.tw_finmind.fetch_stock_info()
+            except Exception:
+                return out
+            parsed_map: dict[str, dict[str, object]] = {}
+            for row in rows:
+                code = str(row.get("stock_id") or row.get("data_id") or "").strip().upper()
+                if not code:
+                    continue
+                parsed_map[code] = dict(row)
+            info_map = parsed_map
+            self.cache.set(cache_key, info_map, ttl_sec=21600)
+        for symbol in unresolved:
+            row = info_map.get(symbol)
+            if not isinstance(row, dict):
+                continue
+            row_obj = dict(row)
+            out[symbol] = row_obj
+            self._persist_finmind_snapshot(
+                dataset_key=FINMIND_STOCK_INFO_DATASET_KEY,
+                symbol=symbol,
+                interval="metadata",
+                payload=[row_obj],
+            )
+            metadata_row = self._build_finmind_metadata_row(row_obj)
+            if metadata_row is not None:
+                self._persist_symbol_metadata([metadata_row])
+        return out
+
+    def get_tw_research_context(self, symbol: str) -> dict[str, object]:
+        token = str(symbol or "").strip().upper()
+        if not token:
+            return {
+                "enabled": False,
+                "company_info": {},
+                "month_revenue": [],
+                "news": [],
+                "institutional_investors": [],
+                "sources": [],
+            }
+
+        if not bool(getattr(self.tw_finmind, "enabled", False)):
+            return {
+                "enabled": False,
+                "company_info": {},
+                "month_revenue": [],
+                "news": [],
+                "institutional_investors": [],
+                "sources": [],
+            }
+
+        cache_key = f"tw_research:{token}"
+        cached = self.cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+
+        now_utc = datetime.now(tz=timezone.utc)
+        sources: list[str] = []
+        try:
+            company_info = self._get_finmind_stock_info_subset([token]).get(token, {})
+        except Exception:
+            company_info = {}
+        if company_info:
+            sources.append("finmind:TaiwanStockInfo")
+
+        month_revenue = self._load_latest_dataset_snapshot(
+            dataset_key=FINMIND_MONTH_REVENUE_DATASET_KEY,
+            symbol=token,
+            interval="monthly",
+            max_age_sec=86400,
+        )
+        if not month_revenue:
+            try:
+                month_revenue = self.tw_finmind.fetch_month_revenue(
+                    token,
+                    start_date=(now_utc - timedelta(days=400)).date(),
+                )
+            except Exception:
+                month_revenue = []
+            if month_revenue:
+                revenue_sorted = sorted(
+                    month_revenue,
+                    key=lambda row: str(row.get("date") or ""),
+                )
+                self._persist_finmind_snapshot(
+                    dataset_key=FINMIND_MONTH_REVENUE_DATASET_KEY,
+                    symbol=token,
+                    interval="monthly",
+                    payload=revenue_sorted,
+                )
+                month_revenue = revenue_sorted
+        if month_revenue:
+            sources.append("finmind:TaiwanStockMonthRevenue")
+
+        news_rows = self._load_latest_dataset_snapshot(
+            dataset_key=FINMIND_NEWS_DATASET_KEY,
+            symbol=token,
+            interval="daily",
+            max_age_sec=1800,
+        )
+        if not news_rows:
+            fetched_news: list[dict[str, object]] = []
+            for offset_days in range(0, 3):
+                try:
+                    rows = self.tw_finmind.fetch_stock_news(
+                        token,
+                        start_date=(now_utc - timedelta(days=offset_days)).date(),
+                    )
+                except Exception:
+                    rows = []
+                if rows:
+                    fetched_news = rows
+                    break
+            if fetched_news:
+                fetched_news = sorted(
+                    fetched_news,
+                    key=lambda row: str(row.get("date") or row.get("publish_at") or ""),
+                    reverse=True,
+                )
+                self._persist_finmind_snapshot(
+                    dataset_key=FINMIND_NEWS_DATASET_KEY,
+                    symbol=token,
+                    interval="daily",
+                    payload=fetched_news,
+                )
+                news_rows = fetched_news
+        if news_rows:
+            sources.append("finmind:TaiwanStockNews")
+
+        institutional_rows = self._load_latest_dataset_snapshot(
+            dataset_key=FINMIND_INSTITUTIONAL_DATASET_KEY,
+            symbol=token,
+            interval="daily",
+            max_age_sec=3600,
+        )
+        if not institutional_rows:
+            try:
+                institutional_rows = self.tw_finmind.fetch_institutional_investors(
+                    token,
+                    start_date=(now_utc - timedelta(days=7)).date(),
+                    end_date=now_utc.date(),
+                )
+            except Exception:
+                institutional_rows = []
+            if institutional_rows:
+                institutional_rows = sorted(
+                    institutional_rows,
+                    key=lambda row: (
+                        str(row.get("date") or ""),
+                        str(row.get("name") or row.get("institutional_investors") or ""),
+                    ),
+                    reverse=True,
+                )
+                self._persist_finmind_snapshot(
+                    dataset_key=FINMIND_INSTITUTIONAL_DATASET_KEY,
+                    symbol=token,
+                    interval="daily",
+                    payload=institutional_rows,
+                )
+        if institutional_rows:
+            sources.append("finmind:TaiwanStockInstitutionalInvestorsBuySell")
+
+        result = {
+            "enabled": True,
+            "company_info": company_info,
+            "month_revenue": month_revenue,
+            "news": news_rows[:5],
+            "institutional_investors": institutional_rows,
+            "sources": sources,
+        }
+        self.cache.set(cache_key, result, ttl_sec=900)
+        return dict(result)
 
     @staticmethod
     def _quality(quote: QuoteSnapshot, fallback_depth: int, reason: str | None) -> DataQuality:
@@ -801,6 +1111,17 @@ class MarketDataService:
             for symbol in normalized
             if str(out.get(symbol, symbol)).strip().upper() == symbol
         }
+        if wanted:
+            finmind_rows = self._get_finmind_stock_info_subset(list(wanted))
+            for code, row in finmind_rows.items():
+                name = str(row.get("stock_name") or row.get("name") or "").strip()
+                if name:
+                    out[code] = name
+            wanted = {
+                symbol
+                for symbol in normalized
+                if str(out.get(symbol, symbol)).strip().upper() == symbol
+            }
         if not wanted:
             self.cache.set(cache_key, out, ttl_sec=21600)
             return out
@@ -958,6 +1279,13 @@ class MarketDataService:
             if industry:
                 out[symbol] = industry
         wanted = {symbol for symbol in normalized if not str(out.get(symbol, "")).strip()}
+        if wanted:
+            finmind_rows = self._get_finmind_stock_info_subset(list(wanted))
+            for code, row in finmind_rows.items():
+                industry = str(row.get("industry_category") or row.get("industry") or "").strip()
+                if industry:
+                    out[code] = industry
+            wanted = {symbol for symbol in normalized if not str(out.get(symbol, "")).strip()}
         if not wanted:
             self.cache.set(cache_key, out, ttl_sec=21600)
             return out

@@ -90,6 +90,7 @@ def run_portfolio_backtest(
     strategy_params: dict[str, float] | None = None,
     cost_model: CostModel | None = None,
     initial_capital: float = 1_000_000.0,
+    signal_filters: dict[str, pd.Series] | None = None,
 ) -> PortfolioBacktestResult:
     if not bars_by_symbol:
         raise ValueError("bars_by_symbol cannot be empty")
@@ -111,6 +112,7 @@ def run_portfolio_backtest(
             strategy_params=strategy_params,
             cost_model=cost_model,
             initial_capital=per_symbol_capital,
+            signal_filter=(signal_filters or {}).get(symbol),
         )
 
     return portfolio_from_components(
