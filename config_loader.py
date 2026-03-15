@@ -29,7 +29,10 @@ def _load_hydra_config() -> DictConfig | None:
     if not conf_dir.exists():
         return None
     if GlobalHydra is not None and GlobalHydra.instance().is_initialized():
-        GlobalHydra.instance().clear()
+        try:
+            return compose(config_name="config")
+        except Exception:
+            GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(conf_dir), version_base="1.3"):
         return compose(config_name="config")
 

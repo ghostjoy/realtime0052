@@ -59,6 +59,11 @@ def test_render_benchmark_lines_chart_uses_right_axis_for_second_series():
     assert fig.layout.yaxis2.side == "right"
     assert fig.layout.yaxis2.matches == "y"
     assert fig.data[1].yaxis == "y2"
+    assert fig.layout.xaxis.range is not None
+    assert pd.Timestamp(fig.layout.xaxis.range[1]) > idx[-1]
+    assert fig.layout.legend.x > 1.09
+    assert len(fig.layout.shapes) == 1
+    assert pd.Timestamp(fig.layout.shapes[0].x0) == idx[-1]
 
 
 def test_render_benchmark_lines_chart_adds_hidden_right_axis_mirror_for_single_series():
@@ -84,3 +89,8 @@ def test_render_benchmark_lines_chart_adds_hidden_right_axis_mirror_for_single_s
     assert fig.data[1].yaxis == "y2"
     assert fig.data[1].showlegend is False
     assert fig.data[1].hoverinfo == "skip"
+    assert fig.layout.xaxis.range is not None
+    assert pd.Timestamp(fig.layout.xaxis.range[1]) > idx[-1]
+    assert fig.layout.legend.x > 1.09
+    assert len(fig.layout.shapes) == 1
+    assert pd.Timestamp(fig.layout.shapes[0].x0) == idx[-1]

@@ -530,6 +530,11 @@ class ActiveEtfPageTests(unittest.TestCase):
         equity_max = max(float(strategy.max()), float(benchmark.max()))
         self.assertLess(float(fig.layout.yaxis2.range[0]), equity_min)
         self.assertGreater(float(fig.layout.yaxis2.range[1]), equity_max)
+        self.assertIsNotNone(fig.layout.xaxis.range)
+        assert fig.layout.xaxis.range is not None
+        self.assertGreater(pd.Timestamp(fig.layout.xaxis.range[1]), idx[-1])
+        self.assertEqual(len(fig.layout.shapes), 1)
+        self.assertEqual(pd.Timestamp(fig.layout.shapes[0].x0), idx[-1])
 
     def test_load_cached_twse_snapshot_skips_future_rows(self):
         fake_rows = [

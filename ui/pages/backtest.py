@@ -53,7 +53,12 @@ from services.backtest_runner import (
 from services.sync_orchestrator import sync_symbols_if_needed
 from state_keys import BT_KEYS
 from ui.charts import render_lightweight_kline_equity_chart
-from ui.core.charts import _render_benchmark_lines_chart, _render_indicator_panels
+from ui.core.charts import (
+    _plotly_datetime_axis_range_with_right_padding,
+    _plotly_right_edge_marker_x,
+    _render_benchmark_lines_chart,
+    _render_indicator_panels,
+)
 from ui.shared.perf import PerfTimer, perf_debug_enabled
 from ui.shared.runtime import configure_module_runtime
 from ui.shared.session_utils import ensure_defaults
@@ -3325,11 +3330,23 @@ def _render_backtest_view():
                 left_idx = max(0, left_idx)
             x_start = focus_bars.index[left_idx]
             x_end = focus_bars.index[right_idx]
-            fig.update_xaxes(range=[x_start, x_end], row=1, col=1)
-            fig.update_xaxes(range=[x_start, x_end], row=2, col=1)
-            panel_x_range = (pd.Timestamp(x_start), pd.Timestamp(x_end))
+            padded_x_range = _plotly_datetime_axis_range_with_right_padding(
+                bars_now.index,
+                x_start=x_start,
+                x_end=x_end,
+            )
+            applied_x_range = padded_x_range or (pd.Timestamp(x_start), pd.Timestamp(x_end))
+            fig.update_xaxes(range=list(applied_x_range), row=1, col=1)
+            fig.update_xaxes(range=list(applied_x_range), row=2, col=1)
+            panel_x_range = applied_x_range
         elif len(bars_now.index) >= 2:
-            panel_x_range = (pd.Timestamp(bars_now.index[0]), pd.Timestamp(bars_now.index[-1]))
+            padded_x_range = _plotly_datetime_axis_range_with_right_padding(bars_now.index)
+            if padded_x_range is not None:
+                fig.update_xaxes(range=list(padded_x_range), row=1, col=1)
+                fig.update_xaxes(range=list(padded_x_range), row=2, col=1)
+                panel_x_range = padded_x_range
+            else:
+                panel_x_range = (pd.Timestamp(bars_now.index[0]), pd.Timestamp(bars_now.index[-1]))
 
         fig.update_xaxes(gridcolor=str(palette["grid"]))
         fig.update_yaxes(gridcolor=str(palette["grid"]))
@@ -3344,6 +3361,22 @@ def _render_backtest_view():
             plot_bgcolor=str(palette["plot_bg"]),
             font=dict(color=str(palette["text_color"])),
         )
+        edge_marker_x = _plotly_right_edge_marker_x(bars_now.index)
+        if edge_marker_x is not None:
+            fig.add_shape(
+                type="line",
+                x0=edge_marker_x,
+                x1=edge_marker_x,
+                y0=0.0,
+                y1=1.0,
+                xref="x",
+                yref="paper",
+                line=dict(
+                    color=_to_rgba(str(palette.get("text_muted", palette["grid"])), 0.9),
+                    width=1,
+                    dash="dot",
+                ),
+            )
         _enable_plotly_draw_tools(fig)
         _apply_plotly_watermark(fig, text=playback_symbol_label, palette=palette)
         _apply_unified_benchmark_hover(fig, palette)

@@ -39,6 +39,62 @@ def configure_runtime(values: Mapping[str, Any]) -> None:
     configure_module_runtime(globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__)
 
 
+def _to_utc_timestamp(value: object) -> pd.Timestamp | None:
+    ts = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return pd.Timestamp(ts)
+
+
+def _plotly_datetime_axis_range_with_right_padding(
+    index_values: object,
+    *,
+    x_start: object | None = None,
+    x_end: object | None = None,
+    pad_ratio: float = 0.05,
+) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    idx = pd.to_datetime(index_values, utc=True, errors="coerce")
+    if not isinstance(idx, pd.DatetimeIndex):
+        idx = pd.DatetimeIndex(idx)
+    idx = idx.dropna().sort_values().unique()
+    if len(idx) == 0:
+        return None
+
+    range_start = _to_utc_timestamp(x_start) or pd.Timestamp(idx[0])
+    range_end = _to_utc_timestamp(x_end) or pd.Timestamp(idx[-1])
+    if range_end < range_start:
+        range_start, range_end = range_end, range_start
+
+    visible = idx[(idx >= range_start) & (idx <= range_end)]
+    if len(visible) == 0:
+        visible = idx
+    visible = pd.DatetimeIndex(visible).sort_values()
+    min_pad = pd.Timedelta(days=1)
+    if len(visible) >= 2:
+        deltas = visible.to_series().diff().dropna()
+        median_delta = deltas.median() if not deltas.empty else pd.NaT
+        if pd.isna(median_delta) or median_delta <= pd.Timedelta(0):
+            median_delta = min_pad
+        span = pd.Timestamp(visible[-1]) - pd.Timestamp(visible[0])
+        ratio_pad = span * float(max(pad_ratio, 0.0)) if span > pd.Timedelta(0) else median_delta
+        if ratio_pad <= pd.Timedelta(0):
+            ratio_pad = median_delta
+        right_pad = median_delta if median_delta >= ratio_pad else ratio_pad
+    else:
+        right_pad = min_pad
+    return (range_start, range_end + right_pad)
+
+
+def _plotly_right_edge_marker_x(index_values: object) -> pd.Timestamp | None:
+    idx = pd.to_datetime(index_values, utc=True, errors="coerce")
+    if not isinstance(idx, pd.DatetimeIndex):
+        idx = pd.DatetimeIndex(idx)
+    idx = idx.dropna().sort_values()
+    if len(idx) == 0:
+        return None
+    return pd.Timestamp(idx[-1])
+
+
 def _render_benchmark_lines_chart(
     *,
     lines: list[dict[str, Any]],
@@ -170,7 +226,8 @@ def _render_benchmark_lines_chart(
                 )
 
     legend_name_len = max((len(str(line.get("name", ""))) for line in lines), default=12)
-    legend_right_margin = int(min(420, max(190, legend_name_len * 7 + 40)))
+    axis_tick_gutter = 108
+    legend_right_margin = int(min(620, max(300, axis_tick_gutter + legend_name_len * 7 + 56)))
     fig.update_layout(
         height=height,
         margin=dict(l=12, r=legend_right_margin, t=36, b=12),
@@ -182,7 +239,7 @@ def _render_benchmark_lines_chart(
             orientation="v",
             y=1.0,
             yanchor="top",
-            x=1.01,
+            x=1.10,
             xanchor="left",
             bgcolor=_to_rgba(str(palette["paper_bg"]), 0.65),
             bordercolor=str(palette["grid"]),
@@ -212,6 +269,19 @@ def _render_benchmark_lines_chart(
             tickfont=dict(color=str(palette["text_color"])),
         ),
     )
+    x_range = _plotly_datetime_axis_range_with_right_padding(
+        [ts for _, series in plotted_series for ts in series.index]
+    )
+    if x_range is not None:
+        fig.update_xaxes(range=list(x_range))
+    edge_marker_x = _plotly_right_edge_marker_x([ts for _, series in plotted_series for ts in series.index])
+    if edge_marker_x is not None:
+        fig.add_vline(
+            x=edge_marker_x,
+            line_width=1,
+            line_dash="dot",
+            line_color=_to_rgba(str(palette["text_muted"]) if "text_muted" in palette else str(palette["grid"]), 0.9),
+        )
     _apply_unified_benchmark_hover(fig, palette)
     _enable_plotly_draw_tools(fig)
     if not str(watermark_text).strip():
@@ -576,4 +646,10 @@ def _render_indicator_panels(
     )
 
 
-__all__ = ["_render_benchmark_lines_chart", "_render_live_chart", "_render_indicator_panels"]
+__all__ = [
+    "_plotly_datetime_axis_range_with_right_padding",
+    "_plotly_right_edge_marker_x",
+    "_render_benchmark_lines_chart",
+    "_render_live_chart",
+    "_render_indicator_panels",
+]

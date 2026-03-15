@@ -52,7 +52,11 @@ def _chart_layout_options(palette: dict[str, object], *, height: int) -> dict[st
             "borderColor": grid,
             "scaleMargins": {"top": 0.08, "bottom": 0.12},
         },
-        "timeScale": {"borderColor": grid},
+        "timeScale": {
+            "borderColor": grid,
+            "rightOffset": 10,
+            "shiftVisibleRangeOnNewBar": False,
+        },
         "crosshair": {
             "vertLine": {
                 "color": grid,

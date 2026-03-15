@@ -11,6 +11,7 @@
 ## [Unreleased]
 
 ### Fixed
+- 修正 `Streamlit` 重跑時 `config_loader.py` 重複初始化 `Hydra` 造成的 `GlobalHydra is already initialized` 啟動錯誤
 - 修正 `筆記本` 頁面缺少 `markdown-it-py` 依賴時的啟動錯誤：
   - `pyproject.toml` 補上 `markdown-it-py`
   - 既有虛擬環境尚未同步依賴時，筆記預覽改以安全的簡易 HTML fallback 顯示，避免 `ModuleNotFoundError: markdown_it` 直接中斷整個 app
@@ -38,6 +39,10 @@
   - 明確標示 `FinMind` 內容使用最新可得資料，不隨回放日期回溯
 
 ### Changed
+- 右側價格軸圖表統一補上末端留白：
+  - `lightweight-charts` 新增 `timeScale.rightOffset`
+  - Plotly Benchmark/回測/ETF 焦點圖統一延伸右側時間軸，避免末端標籤與右側 Y 軸刻度重疊
+  - Plotly 共用線圖補上末端垂直虛線，並把右側 legend 再外推，讓資訊盒與右軸刻度分離
 - `回測工作台` 的研究面補充調整為：
   - 月營收與新聞維持使用最新可得資料
   - 法人籌碼改由歷史對齊 `FinMind` 籌碼摘要主導

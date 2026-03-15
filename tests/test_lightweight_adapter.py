@@ -49,6 +49,8 @@ class LightweightAdapterTests(unittest.TestCase):
         self.assertIsInstance(charts, list)
         assert isinstance(charts, list)
         self.assertEqual(charts[0]["series"][0]["type"], "Line")
+        self.assertEqual(charts[0]["chart"]["timeScale"]["rightOffset"], 10)
+        self.assertFalse(charts[0]["chart"]["timeScale"]["shiftVisibleRangeOnNewBar"])
 
     def test_render_live_chart_renders_price_and_volume_in_one_component(self):
         idx = pd.to_datetime(["2026-01-02", "2026-01-03"], utc=True)
@@ -92,6 +94,8 @@ class LightweightAdapterTests(unittest.TestCase):
         self.assertIsInstance(charts, list)
         assert isinstance(charts, list)
         self.assertEqual(len(charts), 2)
+        self.assertEqual(charts[0]["chart"]["timeScale"]["rightOffset"], 10)
+        self.assertEqual(charts[1]["chart"]["timeScale"]["rightOffset"], 10)
 
     def test_render_kline_equity_renders_price_and_equity_in_one_component(self):
         idx = pd.to_datetime(["2026-01-02", "2026-01-03"], utc=True)
@@ -151,6 +155,8 @@ class LightweightAdapterTests(unittest.TestCase):
         self.assertIsInstance(charts, list)
         assert isinstance(charts, list)
         self.assertEqual(len(charts), 2)
+        self.assertEqual(charts[0]["chart"]["timeScale"]["rightOffset"], 10)
+        self.assertEqual(charts[1]["chart"]["timeScale"]["rightOffset"], 10)
         price_series = charts[0]["series"]
         self.assertEqual(len(price_series), 2)
         self.assertEqual(price_series[0]["type"], "Candlestick")

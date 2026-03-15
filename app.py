@@ -4224,6 +4224,11 @@ def _build_tw_etf_heatmap_focus_plotly_figure(
     benchmark_symbol: str,
     palette: dict[str, object],
 ) -> go.Figure:
+    from ui.core.charts import (
+        _plotly_datetime_axis_range_with_right_padding,
+        _plotly_right_edge_marker_x,
+    )
+
     price_up_line = str(palette.get("price_up_line", palette.get("price_up", "#5FA783")))
     price_down_line = str(palette.get("price_down_line", palette.get("price_down", "#D78C95")))
     benchmark_color = _heatmap_focus_benchmark_color(palette)
@@ -4364,6 +4369,36 @@ def _build_tw_etf_heatmap_focus_plotly_figure(
         side="right",
         range=list(equity_range) if equity_range is not None else None,
     )
+    x_range = _plotly_datetime_axis_range_with_right_padding(
+        pd.Index(bars.index)
+        .append(pd.Index(strategy_equity.index))
+        .append(pd.Index(benchmark_equity.index))
+        .append(pd.Index(benchmark_overlay.index))
+    )
+    if x_range is not None:
+        fig_focus.update_xaxes(range=list(x_range), row=1, col=1)
+        fig_focus.update_xaxes(range=list(x_range), row=2, col=1)
+    edge_marker_x = _plotly_right_edge_marker_x(
+        pd.Index(bars.index)
+        .append(pd.Index(strategy_equity.index))
+        .append(pd.Index(benchmark_equity.index))
+        .append(pd.Index(benchmark_overlay.index))
+    )
+    if edge_marker_x is not None:
+        fig_focus.add_shape(
+            type="line",
+            x0=edge_marker_x,
+            x1=edge_marker_x,
+            y0=0.0,
+            y1=1.0,
+            xref="x",
+            yref="paper",
+            line={
+                "color": _to_rgba(str(palette.get("text_muted", palette["grid"])), 0.9),
+                "width": 1,
+                "dash": "dot",
+            },
+        )
     return fig_focus
 
 
