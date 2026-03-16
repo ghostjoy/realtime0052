@@ -39,6 +39,7 @@
   - 明確標示 `FinMind` 內容使用最新可得資料，不隨回放日期回溯
 
 ### Changed
+- `台股 ETF 全類型總表` 的「基金規模追蹤」顯示窗口由最近 `10` 交易日調整為最近 `240` 交易日，並統一更新表頭與說明文案
 - 右側價格軸圖表統一補上末端留白：
   - `lightweight-charts` 新增 `timeScale.rightOffset`
   - Plotly Benchmark/回測/ETF 焦點圖統一延伸右側時間軸，避免末端標籤與右側 Y 軸刻度重疊

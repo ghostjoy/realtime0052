@@ -2322,6 +2322,7 @@ PAGE_CARDS = [
 ]
 DEFAULT_ACTIVE_PAGE = "台股 ETF 全類型總表"
 DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
+TW_ETF_AUM_HISTORY_MAX_DATE_COLS = 240
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
 CLIENT_VISIT_SESSION_KEY = "client_visit_session_id"
 NOTEBOOK_BODY_STATE_KEY = "notebook_markdown_body"
@@ -6139,7 +6140,7 @@ def _build_tw_etf_aum_history_wide(
     history_df: pd.DataFrame,
     *,
     start_date: str | None = None,
-    max_date_cols: int = 10,
+    max_date_cols: int = TW_ETF_AUM_HISTORY_MAX_DATE_COLS,
 ) -> pd.DataFrame:
     if not isinstance(history_df, pd.DataFrame) or history_df.empty:
         return pd.DataFrame(columns=["編號", "台股代號", "ETF名稱"])
@@ -6185,7 +6186,7 @@ def _build_tw_etf_aum_history_wide(
     try:
         max_cols = int(max_date_cols)
     except Exception:
-        max_cols = 10
+        max_cols = TW_ETF_AUM_HISTORY_MAX_DATE_COLS
     if max_cols > 0 and len(date_cols) > max_cols:
         date_cols = date_cols[-max_cols:]
     out = pivot[["台股代號", "ETF名稱", *date_cols]].copy()
@@ -9828,7 +9829,7 @@ def _render_tw_etf_all_types_view():
         )
         history_wide = _build_tw_etf_aum_history_wide(
             history_df,
-            max_date_cols=10,
+            max_date_cols=TW_ETF_AUM_HISTORY_MAX_DATE_COLS,
         )
         history_drilldown_enabled = _render_table_drilldown_toggle_inline(
             scope="tw_etf_all_types_history",
@@ -9854,7 +9855,9 @@ def _render_tw_etf_all_types_view():
             )
         history_title_col, history_action_col = st.columns([5, 1])
         with history_title_col:
-            st.markdown("#### 基金規模追蹤（最近 10 交易日）")
+            st.markdown(
+                f"#### 基金規模追蹤（最近 {TW_ETF_AUM_HISTORY_MAX_DATE_COLS} 交易日）"
+            )
         with history_action_col:
             refresh_aum_track = st.button(
                 "更新規模追蹤",
@@ -9885,7 +9888,9 @@ def _render_tw_etf_all_types_view():
         st.caption(
             "欄位單位：億（整數顯示）；色塊規則：較前一日增加為淡綠、減少為淡紅，增減比例越大色階越明顯。"
         )
-        st.caption("資料庫採累積保存（不覆蓋）；畫面僅顯示最近 10 個交易日。")
+        st.caption(
+            f"資料庫採累積保存（不覆蓋）；畫面僅顯示最近 {TW_ETF_AUM_HISTORY_MAX_DATE_COLS} 個交易日。"
+        )
         aum_track_summary = (
             dict(export_refresh_summary.get("aum_track", {}))
             if isinstance(export_refresh_summary.get("aum_track", {}), dict)

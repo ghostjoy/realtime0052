@@ -17,6 +17,7 @@ from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
     DEFAULT_ACTIVE_PAGE,
+    TW_ETF_AUM_HISTORY_MAX_DATE_COLS,
     _append_missing_tw_etf_rows_from_aum_snapshot,
     _apply_unified_benchmark_hover,
     _attach_rank_movement_columns,
@@ -1050,6 +1051,27 @@ class ActiveEtfPageTests(unittest.TestCase):
         )
         self.assertEqual(int(out.iloc[0]["編號"]), 1)
         self.assertEqual(str(out.loc[out["台股代號"] == "0050", "ETF名稱"].iloc[0]), "元大台灣50")
+
+    def test_build_tw_etf_aum_history_wide_keeps_latest_240_trade_days(self):
+        trade_dates = pd.date_range("2025-01-01", periods=250, freq="B")
+        history = pd.DataFrame(
+            [
+                {
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_date": trade_date.strftime("%Y-%m-%d"),
+                    "aum_billion": 1000.0 + idx,
+                }
+                for idx, trade_date in enumerate(trade_dates)
+            ]
+        )
+
+        out = _build_tw_etf_aum_history_wide(history)
+
+        date_cols = [col for col in out.columns if col.endswith("(億)")]
+        self.assertEqual(len(date_cols), TW_ETF_AUM_HISTORY_MAX_DATE_COLS)
+        self.assertEqual(date_cols[0], f"{trade_dates[10].strftime('%Y-%m-%d')}(億)")
+        self.assertEqual(date_cols[-1], f"{trade_dates[-1].strftime('%Y-%m-%d')}(億)")
 
     def test_build_tw_etf_aum_rows_from_snapshot_info_keeps_k_suffix_codes(self):
         out = _build_tw_etf_aum_rows_from_snapshot_info(
