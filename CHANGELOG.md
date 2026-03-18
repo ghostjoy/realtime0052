@@ -32,6 +32,10 @@
   - 採 TWSE `T86` 官方三大法人日報，獨立成一張可搜尋、可導流的大表
   - 保留 `外資 / 外資自營商 / 投信 / 自營商(自行/避險/合計) / 三大法人合計` 的完整 `買進 / 賣出 / 淨買賣超`
   - 原始官方單位為股，畫面與匯出統一換算為 `張`
+- `台股 ETF 全類型總表` 新增「官方 ETF 融資融券總表」：
+  - 採 TWSE `marginTrading/MI_MARGN` 官方逐檔融資融券彙總，顯示最新可得快取日的上市 ETF 全表
+  - 保留完整官方欄位，並新增 `融資/融券淨變動`、`券資比(%)`、`融資/融券使用率(%)` 等衍生指標
+  - 納入 `全表更新` 與 `一鍵下載超級大表 CSV`
 - `一鍵下載超級大表 CSV` 新增整合官方三大法人完整欄位
 - 新增 `FinMind` 可選研究資料整合：
   - 新增 `providers/tw_finmind.py`，支援 `FINMIND_API_TOKEN` 與 iCloud 預設 key 檔 `~/Library/Mobile Documents/com~apple~CloudDocs/codexapp/finmindkey`

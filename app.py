@@ -108,6 +108,7 @@ from services.sync_orchestrator import (
 )
 from services.sync_orchestrator import sync_symbols_if_needed
 from services.tw_etf_daily_sync import TWSE_ETF_DAILY_SOURCE, sync_twse_etf_daily_market
+from services.tw_etf_margin_sync import TWSE_ETF_MARGIN_SOURCE, sync_twse_etf_margin_daily
 from services.tw_etf_mis_sync import TWSE_MIS_ETF_SOURCE, sync_twse_etf_mis_daily
 from state_keys import BT_KEYS
 from storage import HistoryStore
@@ -313,6 +314,7 @@ def _clear_tw_etf_all_types_view_caches() -> None:
     _load_tw_market_intraday_return.clear()
     _load_tw_market_daily_return.clear()
     _build_tw_etf_all_types_performance_table.clear()
+    _build_tw_etf_margin_overview.clear()
     _build_tw_etf_three_investors_overview.clear()
 
 
@@ -419,14 +421,17 @@ def _build_tw_etf_super_export_table(
     *,
     main_frame: pd.DataFrame,
     daily_market_frame: pd.DataFrame,
+    margin_frame: pd.DataFrame | None = None,
     mis_frame: pd.DataFrame,
     three_investors_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     sources: list[tuple[str, pd.DataFrame]] = [
         ("main", main_frame),
         ("daily", daily_market_frame),
-        ("mis", mis_frame),
     ]
+    if isinstance(margin_frame, pd.DataFrame):
+        sources.append(("margin", margin_frame))
+    sources.append(("mis", mis_frame))
     if isinstance(three_investors_frame, pd.DataFrame):
         sources.append(("three_investors", three_investors_frame))
     prepared: list[tuple[str, pd.DataFrame]] = []
@@ -550,6 +555,7 @@ def _resolve_tw_etf_super_export_file_name(
     export_frame: pd.DataFrame,
     main_meta: dict[str, object] | None = None,
     daily_market_meta: dict[str, object] | None = None,
+    margin_meta: dict[str, object] | None = None,
     mis_meta: dict[str, object] | None = None,
     three_investors_meta: dict[str, object] | None = None,
 ) -> str:
@@ -564,6 +570,8 @@ def _resolve_tw_etf_super_export_file_name(
         )
     if isinstance(daily_market_meta, dict):
         meta_candidates.append(daily_market_meta.get("last_trade_date"))
+    if isinstance(margin_meta, dict):
+        meta_candidates.append(margin_meta.get("last_trade_date"))
     if isinstance(mis_meta, dict):
         meta_candidates.append(mis_meta.get("last_trade_date"))
     if isinstance(three_investors_meta, dict):
@@ -593,6 +601,7 @@ def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
     summary: dict[str, object] = {
         "main": {"status": "fallback", "used_trade_date": ""},
         "daily_market": {},
+        "margin": {},
         "mis": {},
         "three_investors": {},
         "aum_track": {},
@@ -621,6 +630,16 @@ def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
     except Exception as exc:
         issues.append(f"daily_market: {exc}")
         summary["daily_market"] = {"status": "error", "issues": [str(exc)]}
+
+    try:
+        summary["margin"] = sync_twse_etf_margin_daily(
+            store=store,
+            lookback_days=14,
+            force=True,
+        )
+    except Exception as exc:
+        issues.append(f"margin: {exc}")
+        summary["margin"] = {"status": "error", "issues": [str(exc)]}
 
     try:
         summary["mis"] = sync_twse_etf_mis_daily(
@@ -8261,6 +8280,177 @@ def _build_tw_etf_daily_market_overview(
     }
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _build_tw_etf_margin_overview(
+    *,
+    top_n: int = 60,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    store = _history_store()
+    coverage = store.load_tw_etf_margin_daily_coverage()
+    last_date_raw = coverage.get("last_date") if isinstance(coverage, dict) else None
+    if last_date_raw is None:
+        return pd.DataFrame(), {
+            "last_trade_date": "",
+            "row_count": 0,
+            "trade_date_count": 0,
+            "symbol_count": 0,
+        }
+
+    last_trade_date = pd.Timestamp(last_date_raw).date()
+    raw = store.load_tw_etf_margin_daily(start=last_trade_date, end=last_trade_date)
+    if raw.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": last_trade_date.isoformat(),
+            "row_count": 0,
+            "trade_date_count": int(coverage.get("trade_date_count") or 0),
+            "symbol_count": int(coverage.get("symbol_count") or 0),
+        }
+
+    latest = raw.copy()
+    latest["trade_date"] = pd.to_datetime(latest["trade_date"], errors="coerce")
+    latest = (
+        latest.dropna(subset=["trade_date"])
+        .sort_values(["trade_date", "etf_code"])
+        .groupby("etf_code", group_keys=False)
+        .tail(1)
+        .reset_index(drop=True)
+    )
+    if latest.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": last_trade_date.isoformat(),
+            "row_count": 0,
+            "trade_date_count": int(coverage.get("trade_date_count") or 0),
+            "symbol_count": int(coverage.get("symbol_count") or 0),
+        }
+
+    latest["代碼"] = latest["etf_code"]
+    latest["ETF"] = latest["etf_name"]
+    latest["類型"] = [
+        _classify_tw_etf(name=str(name), code=str(code))
+        for name, code in zip(latest["ETF"], latest["代碼"], strict=False)
+    ]
+    latest["融資買進"] = latest["margin_buy"]
+    latest["融資賣出"] = latest["margin_sell"]
+    latest["融資現金償還"] = latest["margin_cash_redemption"]
+    latest["融資前日餘額"] = latest["margin_prev_balance"]
+    latest["融資今日餘額"] = latest["margin_balance"]
+    latest["融資淨變動(張)"] = (
+        pd.to_numeric(latest["margin_balance"], errors="coerce")
+        - pd.to_numeric(latest["margin_prev_balance"], errors="coerce")
+    )
+    latest["融資次日限額"] = latest["margin_next_limit"]
+    latest["融資使用率(%)"] = np.where(
+        pd.to_numeric(latest["margin_next_limit"], errors="coerce") > 0,
+        (
+            pd.to_numeric(latest["margin_balance"], errors="coerce")
+            / pd.to_numeric(latest["margin_next_limit"], errors="coerce")
+        )
+        * 100.0,
+        np.nan,
+    )
+    latest["融券買進"] = latest["short_buy"]
+    latest["融券賣出"] = latest["short_sell"]
+    latest["融券現券償還"] = latest["short_stock_redemption"]
+    latest["融券前日餘額"] = latest["short_prev_balance"]
+    latest["融券今日餘額"] = latest["short_balance"]
+    latest["融券淨變動(張)"] = (
+        pd.to_numeric(latest["short_balance"], errors="coerce")
+        - pd.to_numeric(latest["short_prev_balance"], errors="coerce")
+    )
+    latest["融券次日限額"] = latest["short_next_limit"]
+    latest["融券使用率(%)"] = np.where(
+        pd.to_numeric(latest["short_next_limit"], errors="coerce") > 0,
+        (
+            pd.to_numeric(latest["short_balance"], errors="coerce")
+            / pd.to_numeric(latest["short_next_limit"], errors="coerce")
+        )
+        * 100.0,
+        np.nan,
+    )
+    latest["券資比(%)"] = np.where(
+        pd.to_numeric(latest["margin_balance"], errors="coerce") > 0,
+        (
+            pd.to_numeric(latest["short_balance"], errors="coerce")
+            / pd.to_numeric(latest["margin_balance"], errors="coerce")
+        )
+        * 100.0,
+        np.nan,
+    )
+    latest["資券互抵"] = latest["offset_amount"]
+    latest["註記"] = latest["note"].fillna("").astype(str).str.strip().replace({"": "—"})
+    latest = latest.sort_values(
+        ["代碼", "ETF"], ascending=[True, True], na_position="last"
+    ).reset_index(drop=True)
+    latest.insert(0, "編號", range(1, len(latest) + 1))
+    if top_n > 0:
+        latest = latest.head(max(1, int(top_n))).copy()
+
+    for column in [
+        "融資買進",
+        "融資賣出",
+        "融資現金償還",
+        "融資前日餘額",
+        "融資今日餘額",
+        "融資淨變動(張)",
+        "融資次日限額",
+        "融券買進",
+        "融券賣出",
+        "融券現券償還",
+        "融券前日餘額",
+        "融券今日餘額",
+        "融券淨變動(張)",
+        "融券次日限額",
+        "資券互抵",
+    ]:
+        if column in latest.columns:
+            latest[column] = _truncate_integer_series(latest[column])
+    for column in ["融資使用率(%)", "融券使用率(%)", "券資比(%)"]:
+        if column in latest.columns:
+            latest[column] = _truncate_series(latest[column], digits=2)
+
+    out = latest[
+        [
+            "編號",
+            "代碼",
+            "ETF",
+            "類型",
+            "融資買進",
+            "融資賣出",
+            "融資現金償還",
+            "融資前日餘額",
+            "融資今日餘額",
+            "融資淨變動(張)",
+            "融資次日限額",
+            "融資使用率(%)",
+            "融券買進",
+            "融券賣出",
+            "融券現券償還",
+            "融券前日餘額",
+            "融券今日餘額",
+            "融券淨變動(張)",
+            "融券次日限額",
+            "融券使用率(%)",
+            "券資比(%)",
+            "資券互抵",
+            "註記",
+        ]
+    ].reset_index(drop=True)
+    short_ratio_alert_count = int(
+        (pd.to_numeric(out.get("券資比(%)"), errors="coerce") >= 10.0).sum()
+    )
+    total_margin_balance = float(pd.to_numeric(latest["融資今日餘額"], errors="coerce").sum())
+    total_short_balance = float(pd.to_numeric(latest["融券今日餘額"], errors="coerce").sum())
+    return out, {
+        "last_trade_date": last_trade_date.isoformat(),
+        "row_count": int(coverage.get("row_count") or 0),
+        "trade_date_count": int(coverage.get("trade_date_count") or 0),
+        "symbol_count": int(coverage.get("symbol_count") or 0),
+        "total_margin_balance": total_margin_balance,
+        "total_short_balance": total_short_balance,
+        "short_ratio_alert_count": short_ratio_alert_count,
+    }
+
+
 def _build_tw_etf_mis_overview(
     *,
     top_n: int = 60,
@@ -9677,6 +9867,125 @@ def _render_tw_etf_all_types_view():
                 "欄位說明：`量能異常(倍) = 今日成交股數 / 20日均成交股數`；`20日波動率(%)` 以日報酬標準差計算。"
             )
 
+        st.markdown("#### 官方 ETF 融資融券總表")
+        margin_refresh = st.button(
+            "更新官方融資融券",
+            key="tw_etf_margin_refresh",
+            width="stretch",
+        )
+        margin_sync_summary: dict[str, object] = (
+            dict(export_refresh_summary.get("margin", {}))
+            if isinstance(export_refresh_summary.get("margin", {}), dict)
+            else {}
+        )
+        margin_coverage = store.load_tw_etf_margin_daily_coverage()
+        margin_last_raw = margin_coverage.get("last_date") if isinstance(margin_coverage, dict) else None
+        margin_last_date = (
+            pd.Timestamp(margin_last_raw).date() if margin_last_raw is not None else None
+        )
+        if margin_refresh:
+            try:
+                with st.spinner("同步 TWSE 官方 ETF 融資融券中..."):
+                    margin_sync_summary = sync_twse_etf_margin_daily(
+                        store=store,
+                        lookback_days=14,
+                        force=bool(margin_refresh),
+                    )
+            except Exception as exc:
+                st.warning(f"同步官方 ETF 融資融券失敗：{exc}")
+        margin_df, margin_meta = _build_tw_etf_margin_overview(top_n=0)
+        margin_health = _build_data_health(
+            as_of=margin_meta.get("last_trade_date", ""),
+            data_sources=[_store_data_source(store, "tw_etf_margin_daily")],
+            source_chain=[TWSE_ETF_MARGIN_SOURCE],
+        )
+        _render_data_health_caption("官方融資融券資料健康度", margin_health)
+        if margin_sync_summary:
+            st.caption(
+                "同步摘要："
+                f" requested_days={int(margin_sync_summary.get('requested_days') or 0)}"
+                f" / synced_days={int(margin_sync_summary.get('synced_days') or 0)}"
+                f" / skipped_days={int(margin_sync_summary.get('skipped_days') or 0)}"
+                f" / empty_days={int(margin_sync_summary.get('empty_days') or 0)}"
+            )
+        margin_issues = margin_sync_summary.get("issues", [])
+        if isinstance(margin_issues, list) and margin_issues:
+            _render_sync_issues(
+                "官方 ETF 融資融券同步有部分錯誤，已保留既有本地資料",
+                margin_issues,
+                preview_limit=2,
+            )
+        st.caption(
+            "資料來源：TWSE `marginTrading/MI_MARGN` 官方融資融券彙總（上市 ETF 逐檔信用交易餘額）。"
+        )
+        if margin_last_date is None:
+            st.caption("目前只讀本地快取；尚未建立快取時，請手動按「更新官方融資融券」。")
+        else:
+            st.caption(
+                f"目前顯示本地快取：{margin_last_date.isoformat()}。如需抓最新官方資料，請手動按「更新官方融資融券」。"
+            )
+        st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
+        if margin_df.empty:
+            st.info("尚無官方 ETF 融資融券本地快取；按「更新官方融資融券」後才會建立。")
+        else:
+            mg1, mg2, mg3, mg4 = st.columns(4)
+            mg1.metric("當日ETF檔數", str(len(margin_df)))
+            mg2.metric(
+                "融資今日餘額合計(張)",
+                f"{int(float(margin_meta.get('total_margin_balance') or 0.0)):,}",
+            )
+            mg3.metric(
+                "融券今日餘額合計(張)",
+                f"{int(float(margin_meta.get('total_short_balance') or 0.0)):,}",
+            )
+            mg4.metric(
+                "券資比>=10%檔數",
+                str(int(margin_meta.get("short_ratio_alert_count") or 0)),
+            )
+
+            margin_drilldown_enabled = _render_table_drilldown_toggle_inline(
+                scope="tw_etf_margin",
+                label="官方融資融券點擊導流",
+                default=True,
+            )
+            margin_search = st.text_input(
+                "搜尋官方融資融券",
+                value="",
+                key="tw_etf_margin_search",
+                placeholder="輸入 ETF 代碼、名稱、類型或註記",
+            )
+            filtered_margin_df = _filter_dataframe_by_keyword(
+                margin_df,
+                keyword=margin_search,
+                columns=["代碼", "ETF", "類型", "註記"],
+            )
+            margin_display = filtered_margin_df
+            margin_link_config: dict[str, object] = {}
+            if margin_drilldown_enabled:
+                margin_display, margin_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(
+                    filtered_margin_df
+                )
+                margin_display, margin_code_cfg = _decorate_dataframe_backtest_links(
+                    margin_display
+                )
+                if isinstance(margin_code_cfg, dict):
+                    margin_link_config.update(margin_code_cfg)
+                if isinstance(margin_heatmap_cfg, dict):
+                    margin_link_config.update(margin_heatmap_cfg)
+            if margin_search:
+                st.caption(f"搜尋結果：{len(filtered_margin_df)} / {len(margin_df)}")
+            st.dataframe(
+                margin_display,
+                width="stretch",
+                hide_index=True,
+                height=scroll_height,
+                column_config=margin_link_config if margin_link_config else None,
+                disable_backtest_drilldown=True,
+            )
+            st.caption(
+                "欄位說明：`券資比(%) = 融券今日餘額 / 融資今日餘額`；`融資/融券使用率(%) = 今日餘額 / 次一營業日限額`。"
+            )
+
         st.markdown("#### 官方 ETF MIS 指標總表")
         mis_refresh = st.button(
             "更新官方 MIS 指標",
@@ -9921,6 +10230,7 @@ def _render_tw_etf_all_types_view():
         super_export_df = _build_tw_etf_super_export_table(
             main_frame=table_view_df,
             daily_market_frame=daily_market_df,
+            margin_frame=margin_df,
             mis_frame=mis_df,
             three_investors_frame=three_investors_df,
         )
@@ -9928,6 +10238,7 @@ def _render_tw_etf_all_types_view():
             export_frame=super_export_df,
             main_meta=meta,
             daily_market_meta=daily_market_meta,
+            margin_meta=margin_meta,
             mis_meta=mis_meta,
             three_investors_meta=three_investors_meta,
         )
