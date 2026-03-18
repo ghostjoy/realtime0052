@@ -7641,6 +7641,166 @@ def _build_rank_exit_table(
     return pd.DataFrame(rows, columns=[code_col, name_col, "離開日期"])
 
 
+def _select_tw_etf_rank_frame_for_display(
+    frame: pd.DataFrame,
+    *,
+    display_n: int,
+    performance_col_label: str,
+    excess_col_label: str,
+    rank_by_underperform: bool,
+    market_return_pct: float | None = None,
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    out = frame.copy()
+    display_n_value = max(1, int(display_n))
+    if not rank_by_underperform:
+        return out.head(display_n_value).copy()
+    market_return_value = _safe_float(market_return_pct)
+    if market_return_value is not None and math.isfinite(float(market_return_value)):
+        out[excess_col_label] = (
+            pd.to_numeric(out.get(performance_col_label), errors="coerce") - float(market_return_value)
+        ).round(2)
+        return (
+            out.sort_values(excess_col_label, ascending=True, na_position="last")
+            .head(display_n_value)
+            .copy()
+        )
+    return (
+        out.sort_values(performance_col_label, ascending=True, na_position="last")
+        .head(display_n_value)
+        .copy()
+    )
+
+
+def _build_tw_etf_rank_frame_for_exit_lookup(
+    *,
+    start_yyyymmdd: str,
+    end_yyyymmdd: str,
+    display_n: int,
+    type_filter: str | None = None,
+    sort_ascending: bool = False,
+    exclude_split_event: bool = False,
+    performance_col_label: str = "YTD績效(%)",
+    excess_col_label: str = "大盤超額(%)",
+    rank_by_underperform: bool = False,
+) -> tuple[pd.DataFrame, str, str]:
+    fetch_n = 99999 if rank_by_underperform else max(1, int(display_n))
+    frame, start_used, end_used, _ = _build_tw_etf_top10_between(
+        start_yyyymmdd=start_yyyymmdd,
+        end_yyyymmdd=end_yyyymmdd,
+        type_filter=type_filter,
+        top_n=fetch_n,
+        sort_ascending=bool(sort_ascending),
+        exclude_split_event=bool(exclude_split_event),
+    )
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame(), start_used, end_used
+    out = frame.rename(columns={"區間報酬(%)": performance_col_label}).copy()
+    market_return_pct: float | None = None
+    if rank_by_underperform:
+        try:
+            market_return_pct, _, _ = _load_tw_market_return_between(
+                start_yyyymmdd=start_used,
+                end_yyyymmdd=end_used,
+                force_sync=False,
+            )
+        except Exception:
+            market_return_pct = None
+    out = _select_tw_etf_rank_frame_for_display(
+        out,
+        display_n=display_n,
+        performance_col_label=performance_col_label,
+        excess_col_label=excess_col_label,
+        rank_by_underperform=rank_by_underperform,
+        market_return_pct=market_return_pct,
+    )
+    return out, start_used, end_used
+
+
+def _resolve_rank_exit_snapshot(
+    *,
+    current_frame: pd.DataFrame,
+    previous_frame: pd.DataFrame,
+    current_end_used: str,
+    current_prev_used: str = "",
+    start_yyyymmdd: str,
+    display_n: int,
+    type_filter: str | None = None,
+    sort_ascending: bool = False,
+    exclude_split_event: bool = False,
+    performance_col_label: str = "YTD績效(%)",
+    excess_col_label: str = "大盤超額(%)",
+    rank_by_underperform: bool = False,
+    max_lookback_pairs: int = 20,
+) -> tuple[pd.DataFrame, str, str, bool, bool]:
+    empty_exit_df = pd.DataFrame(columns=["代碼", "ETF", "離開日期"])
+    current_token = re.sub(r"\D", "", str(current_end_used or "").strip())
+    if not current_token:
+        return empty_exit_df, "", "", False, False
+
+    frame_cache: dict[str, pd.DataFrame] = {}
+    if isinstance(current_frame, pd.DataFrame) and not current_frame.empty:
+        frame_cache[current_token] = current_frame.copy()
+    prev_token = re.sub(r"\D", "", str(current_prev_used or "").strip())
+    if prev_token and isinstance(previous_frame, pd.DataFrame) and not previous_frame.empty:
+        frame_cache[prev_token] = previous_frame.copy()
+
+    def _get_rank_frame(end_token: str) -> pd.DataFrame:
+        token = re.sub(r"\D", "", str(end_token or "").strip())
+        if not token:
+            return pd.DataFrame()
+        cached = frame_cache.get(token)
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            return cached
+        built_frame, _, built_end_used = _build_tw_etf_rank_frame_for_exit_lookup(
+            start_yyyymmdd=start_yyyymmdd,
+            end_yyyymmdd=token,
+            display_n=display_n,
+            type_filter=type_filter,
+            sort_ascending=bool(sort_ascending),
+            exclude_split_event=bool(exclude_split_event),
+            performance_col_label=performance_col_label,
+            excess_col_label=excess_col_label,
+            rank_by_underperform=rank_by_underperform,
+        )
+        built_token = re.sub(r"\D", "", str(built_end_used or "").strip())
+        if built_token != token or built_frame.empty:
+            frame_cache[token] = pd.DataFrame()
+            return pd.DataFrame()
+        frame_cache[token] = built_frame.copy()
+        return built_frame
+
+    snapshot_tokens = [current_token]
+    cursor = current_token
+    for _ in range(max(1, int(max_lookback_pairs))):
+        prev_snapshot_token, _ = _find_previous_twse_snapshot_close_map(cursor, max_scan_days=20)
+        prev_snapshot_token = re.sub(r"\D", "", str(prev_snapshot_token or "").strip())
+        if not prev_snapshot_token or prev_snapshot_token in snapshot_tokens:
+            break
+        snapshot_tokens.append(prev_snapshot_token)
+        cursor = prev_snapshot_token
+
+    had_comparable_pair = False
+    for idx in range(len(snapshot_tokens) - 1):
+        end_token = snapshot_tokens[idx]
+        prev_snapshot_token = snapshot_tokens[idx + 1]
+        end_rank_df = _get_rank_frame(end_token)
+        prev_rank_df = _get_rank_frame(prev_snapshot_token)
+        if end_rank_df.empty or prev_rank_df.empty:
+            continue
+        had_comparable_pair = True
+        exit_df = _build_rank_exit_table(
+            current_frame=end_rank_df,
+            previous_frame=prev_rank_df,
+            end_used=end_token,
+        )
+        if not exit_df.empty:
+            return exit_df, prev_snapshot_token, end_token, end_token != current_token, True
+
+    return empty_exit_df, "", "", False, had_comparable_pair
+
+
 def _style_tw_today_move_table(frame: pd.DataFrame):
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return frame
@@ -10118,27 +10278,14 @@ def _render_top10_etf_2026_ytd_view(
         except Exception as exc:
             market_issues = [f"market: {exc}"]
 
-        if rank_by_underperform:
-            if market_return_pct is not None and math.isfinite(float(market_return_pct)):
-                top10_etf_df[excess_col_label] = (
-                    pd.to_numeric(top10_etf_df[performance_col_label], errors="coerce")
-                    - float(market_return_pct)
-                ).round(2)
-                top10_etf_df = (
-                    top10_etf_df.sort_values(excess_col_label, ascending=True, na_position="last")
-                    .head(display_n)
-                    .copy()
-                )
-            else:
-                top10_etf_df = (
-                    top10_etf_df.sort_values(
-                        performance_col_label, ascending=True, na_position="last"
-                    )
-                    .head(display_n)
-                    .copy()
-                )
-        else:
-            top10_etf_df = top10_etf_df.head(display_n).copy()
+        top10_etf_df = _select_tw_etf_rank_frame_for_display(
+            top10_etf_df,
+            display_n=display_n,
+            performance_col_label=performance_col_label,
+            excess_col_label=excess_col_label,
+            rank_by_underperform=rank_by_underperform,
+            market_return_pct=market_return_pct,
+        )
 
         top10_symbols = tuple(
             str(x).strip().upper()
@@ -10197,48 +10344,22 @@ def _render_top10_etf_2026_ytd_view(
         previous_rank_df = pd.DataFrame()
         if daily_prev_used and daily_prev_used != end_used:
             try:
-                prev_fetch_n = 99999 if rank_by_underperform else display_n
-                prev_top10, _, _, _ = _build_tw_etf_top10_between(
+                previous_rank_df, _, prev_rank_end_used = _build_tw_etf_rank_frame_for_exit_lookup(
                     start_yyyymmdd=start_target,
                     end_yyyymmdd=daily_prev_used,
+                    display_n=display_n,
                     type_filter=etf_type_filter_text or None,
-                    top_n=prev_fetch_n,
                     sort_ascending=bool(sort_ascending),
                     exclude_split_event=bool(exclude_split_event),
+                    performance_col_label=performance_col_label,
+                    excess_col_label=excess_col_label,
+                    rank_by_underperform=rank_by_underperform,
                 )
-                if not prev_top10.empty:
-                    prev_rank_df = prev_top10.rename(
-                        columns={"區間報酬(%)": performance_col_label}
-                    ).copy()
-                    if rank_by_underperform:
-                        if market_return_pct is not None and math.isfinite(
-                            float(market_return_pct)
-                        ):
-                            prev_rank_df[excess_col_label] = (
-                                pd.to_numeric(prev_rank_df[performance_col_label], errors="coerce")
-                                - float(market_return_pct)
-                            ).round(2)
-                            prev_rank_df = (
-                                prev_rank_df.sort_values(
-                                    excess_col_label, ascending=True, na_position="last"
-                                )
-                                .head(display_n)
-                                .copy()
-                            )
-                        else:
-                            prev_rank_df = (
-                                prev_rank_df.sort_values(
-                                    performance_col_label, ascending=True, na_position="last"
-                                )
-                                .head(display_n)
-                                .copy()
-                            )
-                    else:
-                        prev_rank_df = prev_rank_df.head(display_n).copy()
+                if prev_rank_end_used == daily_prev_used and not previous_rank_df.empty:
                     previous_rank_map = {
                         str(code).strip().upper(): idx
                         for idx, code in enumerate(
-                            prev_rank_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
+                            previous_rank_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
                             start=1,
                         )
                         if str(code).strip()
@@ -10407,27 +10528,48 @@ def _render_top10_etf_2026_ytd_view(
                 column_config=merged_link_config if merged_link_config else None,
                 disable_backtest_drilldown=True,
             )
-        if daily_prev_used and not previous_rank_df.empty:
-            exit_df = _build_rank_exit_table(
-                current_frame=top10_etf_df,
-                previous_frame=previous_rank_df,
-                end_used=end_used,
-            )
-            if not exit_df.empty:
-                exit_items: list[str] = []
-                for _, row in exit_df.iterrows():
-                    code_text = str(row.get("代碼", "")).strip()
-                    name_text = str(row.get("ETF", "")).strip() or code_text
-                    date_text = str(row.get("離開日期", "")).strip() or str(end_used).strip()
-                    if code_text:
-                        exit_items.append(f"`{code_text}` {name_text}（離開日期：{date_text}）")
-                if exit_items:
-                    st.caption(f"離開排行（{daily_prev_used} -> {end_used}）：")
-                    st.markdown("\n".join([f"- {item}" for item in exit_items]))
+        (
+            exit_df,
+            exit_prev_used,
+            exit_end_used,
+            exit_is_carried_forward,
+            exit_had_comparable_pair,
+        ) = _resolve_rank_exit_snapshot(
+            current_frame=top10_etf_df,
+            previous_frame=previous_rank_df,
+            current_end_used=end_used,
+            current_prev_used=daily_prev_used,
+            start_yyyymmdd=start_target,
+            display_n=display_n,
+            type_filter=etf_type_filter_text or None,
+            sort_ascending=bool(sort_ascending),
+            exclude_split_event=bool(exclude_split_event),
+            performance_col_label=performance_col_label,
+            excess_col_label=excess_col_label,
+            rank_by_underperform=rank_by_underperform,
+        )
+        if not exit_df.empty:
+            exit_items: list[str] = []
+            for _, row in exit_df.iterrows():
+                code_text = str(row.get("代碼", "")).strip()
+                name_text = str(row.get("ETF", "")).strip() or code_text
+                date_text = str(row.get("離開日期", "")).strip() or str(exit_end_used).strip()
+                if code_text:
+                    exit_items.append(f"`{code_text}` {name_text}（離開日期：{date_text}）")
+            if exit_items:
+                if exit_is_carried_forward and exit_prev_used and exit_end_used:
+                    st.caption(
+                        f"離開排行（最近更新：{exit_end_used}；比較區間：{exit_prev_used} -> {exit_end_used}）："
+                    )
+                elif exit_prev_used and exit_end_used:
+                    st.caption(f"離開排行（{exit_prev_used} -> {exit_end_used}）：")
                 else:
-                    st.caption("離開排行：本期無離榜 ETF。")
+                    st.caption("離開排行：")
+                st.markdown("\n".join([f"- {item}" for item in exit_items]))
             else:
-                st.caption("離開排行：本期無離榜 ETF。")
+                st.caption("離開排行：近期無離榜 ETF。")
+        elif exit_had_comparable_pair:
+            st.caption("離開排行：近期無離榜 ETF。")
         elif daily_prev_used:
             st.caption(f"離開排行：{daily_prev_used} 榜單資料不可用，暫無法比對。")
         else:

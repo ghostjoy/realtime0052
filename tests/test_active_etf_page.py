@@ -79,6 +79,7 @@ from app import (
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
     _resolve_notebook_selected_id,
+    _resolve_rank_exit_snapshot,
     _resolve_tw_etf_super_export_file_name,
     _resolve_tw_symbol_names,
     _restore_notebook_editor_from_saved_state,
@@ -670,6 +671,113 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(list(out["代碼"]), ["00878", "00919"])
         self.assertEqual(list(out["ETF"]), ["國泰永續高股息", "群益台灣精選高息"])
         self.assertTrue((out["離開日期"] == "20260214").all())
+
+    def test_resolve_rank_exit_snapshot_carries_forward_latest_exit(self):
+        current_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "0056", "ETF": "元大高股息"},
+            ]
+        )
+        older_prev_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "00878", "ETF": "國泰永續高股息"},
+                {"代碼": "0056", "ETF": "元大高股息"},
+            ]
+        )
+
+        def _fake_find_previous(end_token, *, max_scan_days=20):
+            mapping = {
+                "20260215": ("20260214", {"0050": 1.0}),
+                "20260214": ("20260213", {"0050": 1.0}),
+                "20260213": ("20260212", {"0050": 1.0}),
+                "20260212": ("", {}),
+            }
+            return mapping.get(str(end_token), ("", {}))
+
+        def _fake_build_rank_frame(**kwargs):
+            end_token = str(kwargs.get("end_yyyymmdd", ""))
+            frames = {
+                "20260213": current_df,
+                "20260212": older_prev_df,
+            }
+            return frames[end_token].copy(), str(kwargs.get("start_yyyymmdd", "")), end_token
+
+        with (
+            patch("app._find_previous_twse_snapshot_close_map", side_effect=_fake_find_previous),
+            patch(
+                "app._build_tw_etf_rank_frame_for_exit_lookup",
+                side_effect=_fake_build_rank_frame,
+            ),
+        ):
+            out, prev_used, end_used, carried_forward, had_comparable_pair = (
+                _resolve_rank_exit_snapshot(
+                    current_frame=current_df,
+                    previous_frame=current_df,
+                    current_end_used="20260215",
+                    current_prev_used="20260214",
+                    start_yyyymmdd="20251231",
+                    display_n=10,
+                )
+            )
+
+        self.assertEqual(list(out["代碼"]), ["00878"])
+        self.assertEqual(list(out["ETF"]), ["國泰永續高股息"])
+        self.assertTrue((out["離開日期"] == "20260213").all())
+        self.assertEqual(prev_used, "20260212")
+        self.assertEqual(end_used, "20260213")
+        self.assertTrue(carried_forward)
+        self.assertTrue(had_comparable_pair)
+
+    def test_resolve_rank_exit_snapshot_reports_no_recent_exit_when_history_stable(self):
+        current_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "0056", "ETF": "元大高股息"},
+            ]
+        )
+
+        def _fake_find_previous(end_token, *, max_scan_days=20):
+            mapping = {
+                "20260215": ("20260214", {"0050": 1.0}),
+                "20260214": ("20260213", {"0050": 1.0}),
+                "20260213": ("20260212", {"0050": 1.0}),
+                "20260212": ("", {}),
+            }
+            return mapping.get(str(end_token), ("", {}))
+
+        def _fake_build_rank_frame(**kwargs):
+            end_token = str(kwargs.get("end_yyyymmdd", ""))
+            frames = {
+                "20260213": current_df,
+                "20260212": current_df,
+            }
+            return frames[end_token].copy(), str(kwargs.get("start_yyyymmdd", "")), end_token
+
+        with (
+            patch("app._find_previous_twse_snapshot_close_map", side_effect=_fake_find_previous),
+            patch(
+                "app._build_tw_etf_rank_frame_for_exit_lookup",
+                side_effect=_fake_build_rank_frame,
+            ),
+        ):
+            out, prev_used, end_used, carried_forward, had_comparable_pair = (
+                _resolve_rank_exit_snapshot(
+                    current_frame=current_df,
+                    previous_frame=current_df,
+                    current_end_used="20260215",
+                    current_prev_used="20260214",
+                    start_yyyymmdd="20251231",
+                    display_n=10,
+                )
+            )
+
+        self.assertTrue(out.empty)
+        self.assertEqual(prev_used, "")
+        self.assertEqual(end_used, "")
+        self.assertFalse(carried_forward)
+        self.assertTrue(had_comparable_pair)
 
     def test_resolve_tw_symbol_names_uses_full_rows_fallback(self):
         class _FakeService:
