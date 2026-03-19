@@ -52,6 +52,9 @@
 - Auto: updated app.py, services/tw_etf_margin_sync.py [id:9986dbbbf0]
 - Auto: updated README.md, services/tw_etf_margin_sync.py, tests/test_tw_etf_margin_sync.py [id:3fadcd702a]
 - Auto: updated app.py, backtest/engine.py, providers/tw_finmind.py, tests/test_backtest_page.py, tests/test_market_data_service.py, ui/core/charts.py, ... (+2) [id:d14032c04e]
+- `export-tw-etf-super-table` / `crontab` 的同步範圍補齊 `基金規模追蹤`：
+  - 除了主總表、官方日成交、融資融券、MIS、三大法人外，現在也會一併累積當日 ETF 規模資料
+  - CLI `refresh` 摘要同步顯示 `aum_track` 更新結果，方便從排程 log 確認是否有寫入
 - `台股 ETF 全類型總表` 的「基金規模追蹤」顯示窗口由最近 `10` 交易日調整為最近 `240` 交易日，並統一更新表頭與說明文案
 - 右側價格軸圖表統一補上末端留白：
   - `lightweight-charts` 新增 `timeScale.rightOffset`

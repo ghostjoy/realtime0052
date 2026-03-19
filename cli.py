@@ -263,14 +263,26 @@ def export_tw_etf_super_table(
     if isinstance(refresh_summary, dict):
         main_summary = refresh_summary.get("main", {})
         daily_summary = refresh_summary.get("daily_market", {})
+        margin_summary = refresh_summary.get("margin", {})
         mis_summary = refresh_summary.get("mis", {})
+        three_summary = refresh_summary.get("three_investors", {})
+        aum_summary = refresh_summary.get("aum_track", {})
         main_used_trade_date = str(main_summary.get("used_trade_date") or "").strip()
+        three_used_trade_date = str(three_summary.get("used_trade_date") or "").strip()
+        aum_trade_date = str(aum_summary.get("trade_date") or "").strip()
         click.echo(
             "refresh "
             f"main={str(main_summary.get('status') or 'unknown')}"
             f"{f'({main_used_trade_date})' if main_used_trade_date else ''} "
             f"daily=synced:{int(daily_summary.get('synced_days') or 0)}/saved:{int(daily_summary.get('saved_rows') or 0)} "
-            f"mis=synced:{int(mis_summary.get('synced_days') or 0)}/saved:{int(mis_summary.get('saved_rows') or 0)}"
+            f"margin=synced:{int(margin_summary.get('synced_days') or 0)}/saved:{int(margin_summary.get('saved_rows') or 0)} "
+            f"mis=synced:{int(mis_summary.get('synced_days') or 0)}/saved:{int(mis_summary.get('saved_rows') or 0)} "
+            f"three_investors={str(three_summary.get('status') or 'unknown')}"
+            f"{f'({three_used_trade_date})' if three_used_trade_date else ''}"
+            f"/rows:{int(three_summary.get('row_count') or 0)} "
+            f"aum_track={str(aum_summary.get('status') or 'unknown')}"
+            f"{f'({aum_trade_date})' if aum_trade_date else ''}"
+            f"/updated:{int(aum_summary.get('updated') or 0)}"
         )
     issues = result.get("issues") if isinstance(result, dict) else []
     if isinstance(issues, list):

@@ -96,7 +96,18 @@ class CliTests(unittest.TestCase):
             "refresh_summary": {
                 "main": {"status": "synced", "used_trade_date": "20260310"},
                 "daily_market": {"synced_days": 2, "saved_rows": 240},
+                "margin": {"synced_days": 2, "saved_rows": 220},
                 "mis": {"synced_days": 1, "saved_rows": 120},
+                "three_investors": {
+                    "status": "synced",
+                    "used_trade_date": "2026-03-10",
+                    "row_count": 118,
+                },
+                "aum_track": {
+                    "status": "synced",
+                    "trade_date": "2026-03-10",
+                    "updated": 132,
+                },
             },
             "issues": ["daily_market: skipped holiday 2026-03-08"],
         }
@@ -137,7 +148,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("rows=123 cols=27", result.output)
         self.assertIn("refresh main=synced(20260310)", result.output)
         self.assertIn("daily=synced:2/saved:240", result.output)
+        self.assertIn("margin=synced:2/saved:220", result.output)
         self.assertIn("mis=synced:1/saved:120", result.output)
+        self.assertIn("three_investors=synced(2026-03-10)/rows:118", result.output)
+        self.assertIn("aum_track=synced(2026-03-10)/updated:132", result.output)
         self.assertIn("! daily_market: skipped holiday 2026-03-08", result.output)
 
     @patch("cli._resolve_store")

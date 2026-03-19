@@ -141,6 +141,7 @@ def _sync_tw_etf_super_export_sources(
         "margin": {},
         "mis": {},
         "three_investors": {},
+        "aum_track": {},
         "issues": [],
     }
     issues: list[str] = []
@@ -243,6 +244,45 @@ def _sync_tw_etf_super_export_sources(
         except Exception as exc:
             issues.append(f"three_investors: {exc}")
             summary["three_investors"] = {"status": "error", "issues": [str(exc)]}
+
+    resolve_trade_date_iso = getattr(app_module, "_resolve_latest_tw_trade_date_iso", None)
+    load_aum_snapshot_info = getattr(app_module, "_load_tw_etf_aum_snapshot_info", None)
+    build_aum_rows_from_snapshot_info = getattr(
+        app_module, "_build_tw_etf_aum_rows_from_snapshot_info", None
+    )
+    if callable(load_aum_snapshot_info) and callable(build_aum_rows_from_snapshot_info):
+        try:
+            trade_date_iso = (
+                str(_call_app_quiet(resolve_trade_date_iso, trade_token)).strip()
+                if callable(resolve_trade_date_iso)
+                else (
+                    pd.Timestamp(trade_token).date().isoformat()
+                    if str(trade_token).strip()
+                    else ""
+                )
+            )
+            snapshot_info = _call_app_quiet(load_aum_snapshot_info, trade_token)
+            aum_rows = _call_app_quiet(build_aum_rows_from_snapshot_info, snapshot_info)
+            if aum_rows:
+                updated = store.save_tw_etf_aum_snapshot(
+                    rows=aum_rows,
+                    trade_date=trade_date_iso,
+                    keep_days=0,
+                )
+                summary["aum_track"] = {
+                    "status": "synced",
+                    "updated": int(updated),
+                    "trade_date": trade_date_iso,
+                }
+            else:
+                summary["aum_track"] = {
+                    "status": "empty",
+                    "updated": 0,
+                    "trade_date": trade_date_iso,
+                }
+        except Exception as exc:
+            issues.append(f"aum_track: {exc}")
+            summary["aum_track"] = {"status": "error", "issues": [str(exc)]}
 
     _clear_export_related_caches(app_module)
     summary["issues"] = issues
