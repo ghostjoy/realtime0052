@@ -166,8 +166,12 @@ class FinMindBacktestInsightTests(unittest.TestCase):
         self.assertIsNotNone(history)
         assert history is not None
         self.assertTrue(meta["enabled"])
-        self.assertEqual(pd.Timestamp(history.iloc[1]["資料日期"]).strftime("%Y-%m-%d"), "2026-03-10")
-        self.assertEqual(pd.Timestamp(history.iloc[2]["資料日期"]).strftime("%Y-%m-%d"), "2026-03-12")
+        self.assertEqual(
+            pd.Timestamp(history.iloc[1]["資料日期"]).strftime("%Y-%m-%d"), "2026-03-10"
+        )
+        self.assertEqual(
+            pd.Timestamp(history.iloc[2]["資料日期"]).strftime("%Y-%m-%d"), "2026-03-12"
+        )
 
     def test_build_tw_chip_replay_insight_scores_and_labels(self):
         index = pd.to_datetime(["2026-03-10", "2026-03-11"], utc=True)

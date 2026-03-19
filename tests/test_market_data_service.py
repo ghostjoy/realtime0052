@@ -130,7 +130,9 @@ class _FakeMetadataStore:
             }
         )
 
-    def load_latest_market_snapshot(self, *, dataset_key: str, market: str = "", symbol: str = "", interval: str = ""):
+    def load_latest_market_snapshot(
+        self, *, dataset_key: str, market: str = "", symbol: str = "", interval: str = ""
+    ):
         for row in reversed(self.snapshots):
             if str(row.get("dataset_key", "")) != str(dataset_key or ""):
                 continue
@@ -407,7 +409,10 @@ class MarketDataServiceTests(unittest.TestCase):
 
         self.assertEqual(out["2330"], "台積電")
         self.assertTrue(
-            any(str(item.get("source", "")) == "finmind:TaiwanStockInfo" for item in metadata.upserted)
+            any(
+                str(item.get("source", "")) == "finmind:TaiwanStockInfo"
+                for item in metadata.upserted
+            )
         )
         service.tw_finmind.fetch_stock_info.assert_called_once()
 

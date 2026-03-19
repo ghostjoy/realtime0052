@@ -215,7 +215,9 @@ def _normalize_finmind_institutional_history_rows(rows: object) -> pd.DataFrame:
         if not isinstance(row, dict):
             continue
         parsed_date = _parse_finmind_date(row.get("date"))
-        bucket = _finmind_institutional_bucket(row.get("name") or row.get("institutional_investors"))
+        bucket = _finmind_institutional_bucket(
+            row.get("name") or row.get("institutional_investors")
+        )
         if parsed_date is None or bucket is None:
             continue
         buy = _to_optional_float(row.get("buy"))
@@ -256,9 +258,9 @@ def _build_tw_chip_history_frame(
         return None, {"enabled": False, "reason": "no_normalized_chip_history"}
 
     grouped = (
-        chip_df.groupby(["date", "bucket"], as_index=False)["net_lots"].sum().pivot(
-            index="date", columns="bucket", values="net_lots"
-        )
+        chip_df.groupby(["date", "bucket"], as_index=False)["net_lots"]
+        .sum()
+        .pivot(index="date", columns="bucket", values="net_lots")
     )
     grouped = grouped.reindex(columns=["外資", "投信", "自營商"]).fillna(0.0).sort_index()
     grouped["三大法人合計"] = grouped.sum(axis=1)
@@ -403,7 +405,10 @@ def _build_tw_chip_replay_insight(
         and total_lots > 0
         and rolling_3d_total_lots is not None
         and rolling_3d_total_lots > 0
-        and ((foreign_lots is not None and foreign_lots > 0) or (trust_lots is not None and trust_lots > 0))
+        and (
+            (foreign_lots is not None and foreign_lots > 0)
+            or (trust_lots is not None and trust_lots > 0)
+        )
     ):
         chip_state = "籌碼順風"
     elif (
@@ -499,7 +504,9 @@ def _build_tw_chip_replay_insight(
         ],
         "chip_state": chip_state,
         "chip_score": chip_score_int,
-        "chip_score_label": "順風" if chip_score_int >= 65 else ("逆風" if chip_score_int < 40 else "中性"),
+        "chip_score_label": "順風"
+        if chip_score_int >= 65
+        else ("逆風" if chip_score_int < 40 else "中性"),
         "asof_date_text": asof_date_text,
     }
 
@@ -717,7 +724,9 @@ def _summarize_twse_three_investors(snapshot: object) -> dict[str, object]:
     trust_net = _to_optional_float(payload.get("investment_trust_net_lots"))
     dealer_net = _to_optional_float(payload.get("dealer_net_lots"))
     total_net = _to_optional_float(payload.get("total_net_lots"))
-    if not data_date or all(value is None for value in (foreign_net, trust_net, dealer_net, total_net)):
+    if not data_date or all(
+        value is None for value in (foreign_net, trust_net, dealer_net, total_net)
+    ):
         return {
             "available": False,
             "line": "",
@@ -725,7 +734,9 @@ def _summarize_twse_three_investors(snapshot: object) -> dict[str, object]:
             "decision_rows": [],
         }
 
-    values = [abs(float(value)) for value in (foreign_net, trust_net, dealer_net) if value is not None]
+    values = [
+        abs(float(value)) for value in (foreign_net, trust_net, dealer_net) if value is not None
+    ]
     gross = float(sum(values))
     total_value = float(total_net or 0.0)
     neutral_threshold = max(1.0, gross * 0.02)
@@ -801,9 +812,7 @@ def _build_finmind_backtest_insight(
         }
 
     revenue_summary = (
-        _summarize_finmind_month_revenue(payload.get("month_revenue"))
-        if research_enabled
-        else None
+        _summarize_finmind_month_revenue(payload.get("month_revenue")) if research_enabled else None
     )
     finmind_institutional_summary = (
         _summarize_finmind_institutional(payload.get("institutional_investors"))
@@ -834,15 +843,22 @@ def _build_finmind_backtest_insight(
         else "資料不足"
     )
     institution_signal = (
-        str(institutional_summary.get("signal_text") or "資料不足") if allow_institutional else "資料不足"
+        str(institutional_summary.get("signal_text") or "資料不足")
+        if allow_institutional
+        else "資料不足"
     )
     if not research_enabled and institutional_available:
-        research_conclusion = f"研究面補充：官方三大法人顯示 {institution_signal}，本次以技術面搭配籌碼方向輔助判讀。"
+        research_conclusion = (
+            f"研究面補充：官方三大法人顯示 {institution_signal}，本次以技術面搭配籌碼方向輔助判讀。"
+        )
     elif not allow_institutional and revenue_signal == "資料不足":
         research_conclusion = "研究面補充：研究資料不足，本次仍以技術面為主。"
     elif not allow_institutional and "動能延續" in revenue_signal:
         research_conclusion = "研究面補充：最新營收維持正向，基本面至少不是逆風。"
-    elif not allow_institutional and revenue_signal in {"營收面未提供順風", "短月回升，但年增未轉正"}:
+    elif not allow_institutional and revenue_signal in {
+        "營收面未提供順風",
+        "短月回升，但年增未轉正",
+    }:
         research_conclusion = "研究面補充：基本面還沒完全站穩，技術面再漂亮也別自動腦補成一路噴。"
     elif not allow_institutional:
         research_conclusion = f"研究面補充：{revenue_signal}。"
@@ -863,7 +879,9 @@ def _build_finmind_backtest_insight(
     news_lines = news_titles if isinstance(news_titles, list) else []
     conclusion_lines = [research_conclusion]
     if news_lines:
-        conclusion_lines.append(f"事件背景：{'；'.join(str(title) for title in news_lines if str(title).strip())}")
+        conclusion_lines.append(
+            f"事件背景：{'；'.join(str(title) for title in news_lines if str(title).strip())}"
+        )
     elif research_enabled:
         conclusion_lines.append("事件背景：近期新聞資料不足。")
 
@@ -2803,20 +2821,12 @@ def _render_backtest_view():
         chip_decision_rows = chip_replay_insight.get("decision_rows", [])
         if isinstance(chip_decision_rows, list):
             decision_rows.extend(
-                [
-                    row
-                    for row in chip_decision_rows
-                    if isinstance(row, tuple) and len(row) == 4
-                ]
+                [row for row in chip_decision_rows if isinstance(row, tuple) and len(row) == 4]
             )
         finmind_decision_rows = finmind_backtest_insight.get("decision_rows", [])
         if isinstance(finmind_decision_rows, list):
             decision_rows.extend(
-                [
-                    row
-                    for row in finmind_decision_rows
-                    if isinstance(row, tuple) and len(row) == 4
-                ]
+                [row for row in finmind_decision_rows if isinstance(row, tuple) and len(row) == 4]
             )
         decision_md_lines.extend([f"| {c} | {r} | {e} | {m} |" for c, r, e, m in decision_rows])
 
@@ -2843,9 +2853,7 @@ def _render_backtest_view():
 
         chip_state_text = str(chip_replay_insight.get("chip_state") or "資料不足")
         chip_score_display = (
-            f"{int(chip_score_int)}/100"
-            if isinstance(chip_score_int, (int, float))
-            else "資料不足"
+            f"{int(chip_score_int)}/100" if isinstance(chip_score_int, (int, float)) else "資料不足"
         )
         if chip_state_text == "籌碼順風":
             chip_clause = "籌碼有人抬，但有人抬不代表你可以閉眼追，追在爛位置一樣是自己坑自己。"
@@ -2869,7 +2877,11 @@ def _render_backtest_view():
         chip_caption = str(chip_replay_insight.get("caption") or "").strip()
         if chip_caption:
             st.caption(chip_caption)
-        elif market_selector in {"TW", "OTC"} and len(symbols) == 1 and not bool(chip_history_meta.get("enabled", False)):
+        elif (
+            market_selector in {"TW", "OTC"}
+            and len(symbols) == 1
+            and not bool(chip_history_meta.get("enabled", False))
+        ):
             st.caption("法人籌碼資料不足，本次仍以技術面為主。")
         finmind_caption = str(finmind_backtest_insight.get("caption") or "").strip()
         if finmind_caption:

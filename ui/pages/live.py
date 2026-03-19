@@ -279,12 +279,12 @@ def _render_finmind_research_card(service, symbol: str) -> None:
     company_info = research.get("company_info")
     company_row = company_info if isinstance(company_info, dict) else {}
     company_name = str(company_row.get("stock_name") or company_row.get("name") or "").strip()
-    industry = str(company_row.get("industry_category") or company_row.get("industry") or "").strip()
+    industry = str(
+        company_row.get("industry_category") or company_row.get("industry") or ""
+    ).strip()
     market_type = str(company_row.get("type") or "").strip()
     if company_name:
-        st.caption(
-            " / ".join([part for part in [company_name, industry, market_type] if part])
-        )
+        st.caption(" / ".join([part for part in [company_name, industry, market_type] if part]))
     elif industry or market_type:
         st.caption(" / ".join([part for part in [industry, market_type] if part]))
 

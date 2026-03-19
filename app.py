@@ -3027,6 +3027,7 @@ def _render_notebook_view():
                 unsafe_allow_html=True,
             )
 
+
 def _build_message_board_threads(entries: list[Any]) -> list[dict[str, Any]]:
     roots: list[Any] = []
     replies_by_parent: dict[str, list[Any]] = {}
@@ -5395,9 +5396,7 @@ def _fetch_twse_three_investors_network_single(date_token: str) -> tuple[str, pd
         "自營商買賣超股數(避險)": "dealer_hedge_net_shares",
         "三大法人買賣超股數": "total_net_shares",
     }
-    index_map = {
-        str(field): idx for idx, field in enumerate(fields) if str(field) in field_map
-    }
+    index_map = {str(field): idx for idx, field in enumerate(fields) if str(field) in field_map}
     if "證券代號" not in index_map or "證券名稱" not in index_map:
         return None
 
@@ -8242,7 +8241,9 @@ def _build_tw_etf_three_investors_overview(
         }
 
     filtered = raw.copy()
-    filtered["code"] = filtered.get("code", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
+    filtered["code"] = (
+        filtered.get("code", pd.Series(dtype=str)).astype(str).str.strip().str.upper()
+    )
     filtered = filtered[filtered["code"].isin(code_set)].copy()
     if filtered.empty:
         return pd.DataFrame(), {
@@ -8303,8 +8304,9 @@ def _build_tw_etf_three_investors_overview(
         ]
     ].reset_index(drop=True)
     return out, {
-        "last_trade_date": pd.to_datetime(str(used_trade_token), format="%Y%m%d", errors="coerce")
-        .strftime("%Y-%m-%d")
+        "last_trade_date": pd.to_datetime(
+            str(used_trade_token), format="%Y%m%d", errors="coerce"
+        ).strftime("%Y-%m-%d")
         if str(used_trade_token).strip()
         else "",
         "row_count": int(len(out)),
@@ -8353,8 +8355,9 @@ def _load_latest_twse_three_investors_for_symbol(
     return {
         "symbol": token,
         "name": str(row.get("name") or token).strip(),
-        "data_date": pd.to_datetime(str(used_trade_token), format="%Y%m%d", errors="coerce")
-        .strftime("%Y-%m-%d")
+        "data_date": pd.to_datetime(
+            str(used_trade_token), format="%Y%m%d", errors="coerce"
+        ).strftime("%Y-%m-%d")
         if str(used_trade_token).strip()
         else "",
         "source": "TWSE T86",
@@ -9855,9 +9858,7 @@ def _render_tw_etf_all_types_view():
             )
         history_title_col, history_action_col = st.columns([5, 1])
         with history_title_col:
-            st.markdown(
-                f"#### 基金規模追蹤（最近 {TW_ETF_AUM_HISTORY_MAX_DATE_COLS} 交易日）"
-            )
+            st.markdown(f"#### 基金規模追蹤（最近 {TW_ETF_AUM_HISTORY_MAX_DATE_COLS} 交易日）")
         with history_action_col:
             refresh_aum_track = st.button(
                 "更新規模追蹤",

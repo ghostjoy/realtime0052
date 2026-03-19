@@ -28,9 +28,7 @@ class TwFinMindClient:
         if direct:
             return direct
 
-        env_key = str(
-            os.getenv("FINMIND_API_TOKEN") or os.getenv("FINMIND_TOKEN") or ""
-        ).strip()
+        env_key = str(os.getenv("FINMIND_API_TOKEN") or os.getenv("FINMIND_TOKEN") or "").strip()
         if env_key:
             return env_key
 
@@ -80,14 +78,20 @@ class TwFinMindClient:
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            resp = requests.get(self.base_url, headers=headers, params=query, timeout=self.timeout_sec)
+            resp = requests.get(
+                self.base_url, headers=headers, params=query, timeout=self.timeout_sec
+            )
         except requests.RequestException as exc:
-            raise ProviderError(self.name, ProviderErrorKind.NETWORK, "FinMind network error", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.NETWORK, "FinMind network error", exc
+            ) from exc
 
         try:
             payload = resp.json()
         except ValueError as exc:
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "FinMind invalid JSON", exc) from exc
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "FinMind invalid JSON", exc
+            ) from exc
 
         status_code = int(getattr(resp, "status_code", 0) or 0)
         status_value = None
@@ -109,13 +113,17 @@ class TwFinMindClient:
                 message or f"FinMind HTTP {status_code}",
             )
         if not isinstance(payload, dict):
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "FinMind response is not an object")
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "FinMind response is not an object"
+            )
 
         data = payload.get("data")
         if data in (None, ""):
             return []
         if not isinstance(data, list):
-            raise ProviderError(self.name, ProviderErrorKind.PARSE, "FinMind response data is not a list")
+            raise ProviderError(
+                self.name, ProviderErrorKind.PARSE, "FinMind response data is not a list"
+            )
         return [row for row in data if isinstance(row, dict)]
 
     def fetch_stock_info(self) -> list[dict[str, Any]]:

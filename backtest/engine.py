@@ -19,7 +19,9 @@ class CostModel:
 
 class BacktestEngine:
     @staticmethod
-    def _normalize_signal_filter(index: pd.Index, signal_filter: pd.Series | None) -> pd.Series | None:
+    def _normalize_signal_filter(
+        index: pd.Index, signal_filter: pd.Series | None
+    ) -> pd.Series | None:
         if not isinstance(signal_filter, pd.Series):
             return None
         gate = pd.to_numeric(signal_filter, errors="coerce")

@@ -274,13 +274,17 @@ def _render_benchmark_lines_chart(
     )
     if x_range is not None:
         fig.update_xaxes(range=list(x_range))
-    edge_marker_x = _plotly_right_edge_marker_x([ts for _, series in plotted_series for ts in series.index])
+    edge_marker_x = _plotly_right_edge_marker_x(
+        [ts for _, series in plotted_series for ts in series.index]
+    )
     if edge_marker_x is not None:
         fig.add_vline(
             x=edge_marker_x,
             line_width=1,
             line_dash="dot",
-            line_color=_to_rgba(str(palette["text_muted"]) if "text_muted" in palette else str(palette["grid"]), 0.9),
+            line_color=_to_rgba(
+                str(palette["text_muted"]) if "text_muted" in palette else str(palette["grid"]), 0.9
+            ),
         )
     _apply_unified_benchmark_hover(fig, palette)
     _enable_plotly_draw_tools(fig)
