@@ -47,6 +47,7 @@
   - 明確標示 `FinMind` 內容使用最新可得資料，不隨回放日期回溯
 
 ### Changed
+- Auto: updated app.py, services/tw_etf_super_export.py, tests/test_tw_etf_super_export.py [id:578c987ed6]
 - Auto: updated app.py, services/tw_etf_margin_sync.py [id:9986dbbbf0]
 - Auto: updated README.md, services/tw_etf_margin_sync.py, tests/test_tw_etf_margin_sync.py [id:3fadcd702a]
 - Auto: updated app.py, backtest/engine.py, providers/tw_finmind.py, tests/test_backtest_page.py, tests/test_market_data_service.py, ui/core/charts.py, ... (+2) [id:d14032c04e]

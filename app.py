@@ -8144,9 +8144,13 @@ def _build_tw_etf_daily_market_overview(
     *,
     lookback_days: int = 90,
     top_n: int = 60,
+    target_trade_date: object | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     store = _history_store()
-    coverage = store.load_tw_etf_daily_market_coverage()
+    coverage_kwargs: dict[str, object] = {}
+    if target_trade_date is not None:
+        coverage_kwargs["end"] = pd.Timestamp(target_trade_date).date()
+    coverage = store.load_tw_etf_daily_market_coverage(**coverage_kwargs)
     last_date_raw = coverage.get("last_date") if isinstance(coverage, dict) else None
     if last_date_raw is None:
         return pd.DataFrame(), {
@@ -8284,9 +8288,13 @@ def _build_tw_etf_daily_market_overview(
 def _build_tw_etf_margin_overview(
     *,
     top_n: int = 60,
+    target_trade_date: object | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     store = _history_store()
-    coverage = store.load_tw_etf_margin_daily_coverage()
+    coverage_kwargs: dict[str, object] = {}
+    if target_trade_date is not None:
+        coverage_kwargs["end"] = pd.Timestamp(target_trade_date).date()
+    coverage = store.load_tw_etf_margin_daily_coverage(**coverage_kwargs)
     last_date_raw = coverage.get("last_date") if isinstance(coverage, dict) else None
     if last_date_raw is None:
         return pd.DataFrame(), {
@@ -8452,9 +8460,13 @@ def _build_tw_etf_margin_overview(
 def _build_tw_etf_mis_overview(
     *,
     top_n: int = 60,
+    target_trade_date: object | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     store = _history_store()
-    coverage = store.load_tw_etf_mis_daily_coverage()
+    coverage_kwargs: dict[str, object] = {}
+    if target_trade_date is not None:
+        coverage_kwargs["end"] = pd.Timestamp(target_trade_date).date()
+    coverage = store.load_tw_etf_mis_daily_coverage(**coverage_kwargs)
     last_date_raw = coverage.get("last_date") if isinstance(coverage, dict) else None
     if last_date_raw is None:
         return pd.DataFrame(), {
@@ -8545,6 +8557,7 @@ def _build_tw_etf_three_investors_overview(
     etf_codes: tuple[str, ...] = (),
     lookback_days: int = 14,
     top_n: int = 60,
+    target_trade_date: object | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     code_set = {
         str(code).strip().upper()
@@ -8563,7 +8576,8 @@ def _build_tw_etf_three_investors_overview(
             "total_net_positive_count": 0,
         }
 
-    target_token = _resolve_latest_tw_trade_day_token()
+    target_token = _normalize_trade_date_token(target_trade_date)
+    target_token = _resolve_latest_tw_trade_day_token(target_token or None)
     try:
         used_trade_token, raw = _fetch_twse_three_investors_with_fallback(
             target_token,

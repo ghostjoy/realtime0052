@@ -5,7 +5,7 @@ import importlib
 import io
 import math
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +13,7 @@ import pandas as pd
 
 from services.tw_etf_daily_sync import sync_twse_etf_daily_market
 from services.tw_etf_margin_sync import sync_twse_etf_margin_daily
-from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
+from services.tw_etf_mis_sync import TWSE_MIS_ETF_SOURCE, sync_twse_etf_mis_daily
 from storage import HistoryStore
 
 
@@ -125,11 +125,14 @@ def _sync_tw_etf_super_export_sources(
     app_module,
     daily_lookback_days: int,
     force: bool,
+    target_trade_date: str | None = None,
 ) -> dict[str, object]:
     resolve_latest_trade_day_token = app_module._resolve_latest_tw_trade_day_token
     fetch_snapshot_network_single = app_module._fetch_twse_snapshot_network_single
     fetch_snapshot_with_fallback = app_module._fetch_twse_snapshot_with_fallback
-    trade_token = str(_call_app_quiet(resolve_latest_trade_day_token)).strip()
+    trade_token = str(
+        _call_app_quiet(resolve_latest_trade_day_token, str(target_trade_date or "").strip() or None)
+    ).strip()
     summary: dict[str, object] = {
         "main": {"status": "fallback", "used_trade_date": ""},
         "daily_market": {},
@@ -159,6 +162,10 @@ def _sync_tw_etf_super_export_sources(
     try:
         summary["daily_market"] = sync_twse_etf_daily_market(
             store=store,
+            start=pd.Timestamp(trade_token).date() - timedelta(days=max(1, int(daily_lookback_days)))
+            if trade_token
+            else None,
+            end=pd.Timestamp(trade_token).date() if trade_token else None,
             lookback_days=max(1, int(daily_lookback_days)),
             force=bool(force),
         )
@@ -169,6 +176,10 @@ def _sync_tw_etf_super_export_sources(
     try:
         summary["margin"] = sync_twse_etf_margin_daily(
             store=store,
+            start=pd.Timestamp(trade_token).date() - timedelta(days=max(1, int(daily_lookback_days)))
+            if trade_token
+            else None,
+            end=pd.Timestamp(trade_token).date() if trade_token else None,
             lookback_days=max(1, int(daily_lookback_days)),
             force=bool(force),
         )
@@ -177,10 +188,33 @@ def _sync_tw_etf_super_export_sources(
         summary["margin"] = {"status": "error", "issues": [str(exc)]}
 
     try:
-        summary["mis"] = sync_twse_etf_mis_daily(
-            store=store,
-            force=bool(force),
+        target_date = pd.Timestamp(trade_token).date() if trade_token else None
+        local_coverage = (
+            store.load_tw_etf_mis_daily_coverage(start=target_date, end=target_date)
+            if target_date is not None
+            else {}
         )
+        if target_date is not None and int(local_coverage.get("row_count") or 0) > 0 and not force:
+            summary["mis"] = {
+                "start_date": target_date.isoformat(),
+                "end_date": target_date.isoformat(),
+                "requested_days": 1,
+                "synced_days": 0,
+                "skipped_days": 1,
+                "empty_days": 0,
+                "saved_rows": 0,
+                "latest_date": target_date.isoformat(),
+                "available_date": target_date.isoformat(),
+                "issues": [],
+                "source": TWSE_MIS_ETF_SOURCE,
+            }
+        else:
+            summary["mis"] = sync_twse_etf_mis_daily(
+                store=store,
+                start=target_date,
+                end=target_date,
+                force=bool(force),
+            )
     except Exception as exc:
         issues.append(f"mis: {exc}")
         summary["mis"] = {"status": "error", "issues": [str(exc)]}
@@ -471,11 +505,15 @@ def export_tw_etf_super_table_artifact(
         compare_start=compare_start,
         compare_end=compare_end,
     )
+    target_trade_token = str(
+        _call_app_quiet(resolve_latest_trade_day_token, periods["ytd_end"])
+    ).strip() or periods["ytd_end"]
     refresh_summary = _sync_tw_etf_super_export_sources(
         store=store,
         app_module=app_module,
         daily_lookback_days=max(1, int(daily_lookback_days)),
         force=bool(force),
+        target_trade_date=target_trade_token,
     )
     table_df, main_meta = _call_app_quiet(
         build_performance_table,
@@ -488,14 +526,17 @@ def export_tw_etf_super_table_artifact(
         build_daily_market_overview,
         lookback_days=max(30, int(daily_lookback_days)),
         top_n=0,
+        target_trade_date=target_trade_token,
     )
     margin_df, margin_meta = _call_app_quiet(
         build_margin_overview,
         top_n=0,
+        target_trade_date=target_trade_token,
     )
     mis_df, mis_meta = _call_app_quiet(
         build_mis_overview,
         top_n=0,
+        target_trade_date=target_trade_token,
     )
     etf_codes = tuple(
         sorted(
@@ -511,6 +552,7 @@ def export_tw_etf_super_table_artifact(
         etf_codes=etf_codes,
         lookback_days=max(1, int(daily_lookback_days)),
         top_n=0,
+        target_trade_date=target_trade_token,
     )
     main_frame = build_tw_etf_all_types_main_export_frame(table_df=table_df, meta=main_meta)
     super_export_df = build_tw_etf_super_export_table(
@@ -523,7 +565,7 @@ def export_tw_etf_super_table_artifact(
     if super_export_df.empty:
         raise RuntimeError("no super export data generated")
 
-    trade_token = str(_call_app_quiet(resolve_latest_trade_day_token)).strip() or periods["ytd_end"]
+    trade_token = target_trade_token
     output_path = resolve_tw_etf_super_export_output_path(trade_token=trade_token, out=out)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     csv_bytes = build_tw_etf_super_export_csv_bytes(super_export_df)
