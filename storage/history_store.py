@@ -448,6 +448,29 @@ class HistoryStore:
                     PRIMARY KEY(etf_code, trade_date)
                 );
 
+                CREATE TABLE IF NOT EXISTS tw_etf_margin_daily (
+                    trade_date TEXT NOT NULL,
+                    etf_code TEXT NOT NULL,
+                    etf_name TEXT NOT NULL,
+                    margin_buy INTEGER,
+                    margin_sell INTEGER,
+                    margin_cash_redemption INTEGER,
+                    margin_prev_balance INTEGER,
+                    margin_balance INTEGER,
+                    margin_next_limit INTEGER,
+                    short_buy INTEGER,
+                    short_sell INTEGER,
+                    short_stock_redemption INTEGER,
+                    short_prev_balance INTEGER,
+                    short_balance INTEGER,
+                    short_next_limit INTEGER,
+                    offset_amount INTEGER,
+                    note TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY(etf_code, trade_date)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_daily_bars_market_symbol_date
                     ON daily_bars(instrument_id, date);
 
@@ -495,6 +518,12 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_tw_etf_mis_daily_code_date
                     ON tw_etf_mis_daily(etf_code, trade_date DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_margin_daily_trade_date
+                    ON tw_etf_margin_daily(trade_date DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_tw_etf_margin_daily_code_date
+                    ON tw_etf_margin_daily(etf_code, trade_date DESC);
                 """
             )
             cols = {
@@ -1888,6 +1917,259 @@ class HistoryStore:
                 SELECT COUNT(*), MIN(trade_date), MAX(trade_date),
                        COUNT(DISTINCT trade_date), COUNT(DISTINCT etf_code)
                 FROM tw_etf_daily_market
+                {where_sql}
+                """,
+                params,
+            ).fetchone()
+        if row is None:
+            return {
+                "row_count": 0,
+                "first_date": None,
+                "last_date": None,
+                "trade_date_count": 0,
+                "symbol_count": 0,
+            }
+        first = self._parse_iso_datetime(row[1])
+        last = self._parse_iso_datetime(row[2])
+        return {
+            "row_count": max(0, int(row[0] or 0)),
+            "first_date": first,
+            "last_date": last,
+            "trade_date_count": max(0, int(row[3] or 0)),
+            "symbol_count": max(0, int(row[4] or 0)),
+        }
+
+    def save_tw_etf_margin_daily(
+        self,
+        *,
+        rows: list[dict[str, object]],
+        trade_date: str,
+        source: str = "twse_margin_mi_margn",
+    ) -> int:
+        try:
+            trade_date_iso = pd.Timestamp(trade_date).date().isoformat()
+        except Exception:
+            return 0
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        source_token = self._normalize_text(source) or "twse_margin_mi_margn"
+        numeric_fields = (
+            "margin_buy",
+            "margin_sell",
+            "margin_cash_redemption",
+            "margin_prev_balance",
+            "margin_balance",
+            "margin_next_limit",
+            "short_buy",
+            "short_sell",
+            "short_stock_redemption",
+            "short_prev_balance",
+            "short_balance",
+            "short_next_limit",
+            "offset_amount",
+        )
+
+        dedup: dict[str, dict[str, object]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = self._normalize_symbol_token(
+                row.get("etf_code") or row.get("code") or row.get("symbol")
+            )
+            if not code:
+                continue
+            payload = {
+                "etf_name": self._normalize_text(row.get("etf_name") or row.get("name")) or code,
+                "note": self._normalize_text(row.get("note")),
+                "source": self._normalize_text(row.get("source")) or source_token,
+            }
+            for field in numeric_fields:
+                number = pd.to_numeric(row.get(field), errors="coerce")
+                payload[field] = int(number) if pd.notna(number) else None
+            dedup[code] = payload
+
+        if not dedup:
+            return 0
+
+        with self._connect_ctx() as conn:
+            for code, payload in dedup.items():
+                conn.execute(
+                    """
+                    INSERT INTO tw_etf_margin_daily(
+                        trade_date, etf_code, etf_name,
+                        margin_buy, margin_sell, margin_cash_redemption,
+                        margin_prev_balance, margin_balance, margin_next_limit,
+                        short_buy, short_sell, short_stock_redemption,
+                        short_prev_balance, short_balance, short_next_limit,
+                        offset_amount, note, source, fetched_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(etf_code, trade_date) DO UPDATE SET
+                        etf_name=excluded.etf_name,
+                        margin_buy=excluded.margin_buy,
+                        margin_sell=excluded.margin_sell,
+                        margin_cash_redemption=excluded.margin_cash_redemption,
+                        margin_prev_balance=excluded.margin_prev_balance,
+                        margin_balance=excluded.margin_balance,
+                        margin_next_limit=excluded.margin_next_limit,
+                        short_buy=excluded.short_buy,
+                        short_sell=excluded.short_sell,
+                        short_stock_redemption=excluded.short_stock_redemption,
+                        short_prev_balance=excluded.short_prev_balance,
+                        short_balance=excluded.short_balance,
+                        short_next_limit=excluded.short_next_limit,
+                        offset_amount=excluded.offset_amount,
+                        note=excluded.note,
+                        source=excluded.source,
+                        fetched_at=excluded.fetched_at
+                    """,
+                    (
+                        trade_date_iso,
+                        code,
+                        payload["etf_name"],
+                        payload["margin_buy"],
+                        payload["margin_sell"],
+                        payload["margin_cash_redemption"],
+                        payload["margin_prev_balance"],
+                        payload["margin_balance"],
+                        payload["margin_next_limit"],
+                        payload["short_buy"],
+                        payload["short_sell"],
+                        payload["short_stock_redemption"],
+                        payload["short_prev_balance"],
+                        payload["short_balance"],
+                        payload["short_next_limit"],
+                        payload["offset_amount"],
+                        payload["note"],
+                        payload["source"],
+                        now_iso,
+                    ),
+                )
+        return len(dedup)
+
+    def load_tw_etf_margin_daily(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> pd.DataFrame:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self._connect_ctx() as conn:
+            df = pd.read_sql_query(
+                f"""
+                SELECT trade_date, etf_code, etf_name,
+                       margin_buy, margin_sell, margin_cash_redemption,
+                       margin_prev_balance, margin_balance, margin_next_limit,
+                       short_buy, short_sell, short_stock_redemption,
+                       short_prev_balance, short_balance, short_next_limit,
+                       offset_amount, note, source, fetched_at
+                FROM tw_etf_margin_daily
+                {where_sql}
+                ORDER BY trade_date ASC, etf_code ASC
+                """,
+                conn,
+                params=params,
+            )
+        if df.empty:
+            return pd.DataFrame(
+                columns=[
+                    "trade_date",
+                    "etf_code",
+                    "etf_name",
+                    "margin_buy",
+                    "margin_sell",
+                    "margin_cash_redemption",
+                    "margin_prev_balance",
+                    "margin_balance",
+                    "margin_next_limit",
+                    "short_buy",
+                    "short_sell",
+                    "short_stock_redemption",
+                    "short_prev_balance",
+                    "short_balance",
+                    "short_next_limit",
+                    "offset_amount",
+                    "note",
+                    "source",
+                    "fetched_at",
+                ]
+            )
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.astype(str)
+        for column in [
+            "margin_buy",
+            "margin_sell",
+            "margin_cash_redemption",
+            "margin_prev_balance",
+            "margin_balance",
+            "margin_next_limit",
+            "short_buy",
+            "short_sell",
+            "short_stock_redemption",
+            "short_prev_balance",
+            "short_balance",
+            "short_next_limit",
+            "offset_amount",
+        ]:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df
+
+    def load_tw_etf_margin_daily_coverage(
+        self,
+        *,
+        start: datetime | date | str | None = None,
+        end: datetime | date | str | None = None,
+        etf_codes: list[str] | None = None,
+    ) -> dict[str, object]:
+        where: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            where.append("trade_date>=?")
+            params.append(pd.Timestamp(start).date().isoformat())
+        if end is not None:
+            where.append("trade_date<=?")
+            params.append(pd.Timestamp(end).date().isoformat())
+        normalized_codes: list[str] = []
+        seen: set[str] = set()
+        for code in etf_codes or []:
+            token = self._normalize_symbol_token(code)
+            if not token or token in seen:
+                continue
+            normalized_codes.append(token)
+            seen.add(token)
+        if normalized_codes:
+            placeholders = ", ".join(["?"] * len(normalized_codes))
+            where.append(f"etf_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self._connect_ctx() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*), MIN(trade_date), MAX(trade_date),
+                       COUNT(DISTINCT trade_date), COUNT(DISTINCT etf_code)
+                FROM tw_etf_margin_daily
                 {where_sql}
                 """,
                 params,

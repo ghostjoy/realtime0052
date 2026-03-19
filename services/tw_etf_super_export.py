@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from services.tw_etf_daily_sync import sync_twse_etf_daily_market
+from services.tw_etf_margin_sync import sync_twse_etf_margin_daily
 from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
 from storage import HistoryStore
 
@@ -132,6 +133,7 @@ def _sync_tw_etf_super_export_sources(
     summary: dict[str, object] = {
         "main": {"status": "fallback", "used_trade_date": ""},
         "daily_market": {},
+        "margin": {},
         "mis": {},
         "three_investors": {},
         "issues": [],
@@ -163,6 +165,16 @@ def _sync_tw_etf_super_export_sources(
     except Exception as exc:
         issues.append(f"daily_market: {exc}")
         summary["daily_market"] = {"status": "error", "issues": [str(exc)]}
+
+    try:
+        summary["margin"] = sync_twse_etf_margin_daily(
+            store=store,
+            lookback_days=max(1, int(daily_lookback_days)),
+            force=bool(force),
+        )
+    except Exception as exc:
+        issues.append(f"margin: {exc}")
+        summary["margin"] = {"status": "error", "issues": [str(exc)]}
 
     try:
         summary["mis"] = sync_twse_etf_mis_daily(
@@ -308,14 +320,17 @@ def build_tw_etf_super_export_table(
     *,
     main_frame: pd.DataFrame,
     daily_market_frame: pd.DataFrame,
+    margin_frame: pd.DataFrame | None = None,
     mis_frame: pd.DataFrame,
     three_investors_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     sources: list[tuple[str, pd.DataFrame]] = [
         ("main", main_frame),
         ("daily", daily_market_frame),
-        ("mis", mis_frame),
     ]
+    if isinstance(margin_frame, pd.DataFrame):
+        sources.append(("margin", margin_frame))
+    sources.append(("mis", mis_frame))
     if isinstance(three_investors_frame, pd.DataFrame):
         sources.append(("three_investors", three_investors_frame))
     prepared: list[tuple[str, pd.DataFrame]] = []
@@ -446,6 +461,7 @@ def export_tw_etf_super_table_artifact(
     app_module = _load_app_module()
     build_performance_table = app_module._build_tw_etf_all_types_performance_table
     build_daily_market_overview = app_module._build_tw_etf_daily_market_overview
+    build_margin_overview = app_module._build_tw_etf_margin_overview
     build_mis_overview = app_module._build_tw_etf_mis_overview
     build_three_investors_overview = app_module._build_tw_etf_three_investors_overview
     resolve_latest_trade_day_token = app_module._resolve_latest_tw_trade_day_token
@@ -473,6 +489,10 @@ def export_tw_etf_super_table_artifact(
         lookback_days=max(30, int(daily_lookback_days)),
         top_n=0,
     )
+    margin_df, margin_meta = _call_app_quiet(
+        build_margin_overview,
+        top_n=0,
+    )
     mis_df, mis_meta = _call_app_quiet(
         build_mis_overview,
         top_n=0,
@@ -496,6 +516,7 @@ def export_tw_etf_super_table_artifact(
     super_export_df = build_tw_etf_super_export_table(
         main_frame=main_frame,
         daily_market_frame=daily_market_df,
+        margin_frame=margin_df,
         mis_frame=mis_df,
         three_investors_frame=three_investors_df,
     )
@@ -513,6 +534,7 @@ def export_tw_etf_super_table_artifact(
         "refresh_summary": refresh_summary,
         "main_meta": dict(main_meta or {}),
         "daily_market_meta": dict(daily_market_meta or {}),
+        "margin_meta": dict(margin_meta or {}),
         "mis_meta": dict(mis_meta or {}),
         "three_investors_meta": dict(three_investors_meta or {}),
         "csv_sha256": csv_sha256,

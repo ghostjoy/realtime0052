@@ -42,6 +42,7 @@ from app import (
     _build_tw_etf_daily_market_overview,
     _build_tw_etf_heatmap_focus_chart,
     _build_tw_etf_heatmap_focus_plotly_figure,
+    _build_tw_etf_margin_overview,
     _build_tw_etf_mis_overview,
     _build_tw_etf_super_export_csv_bytes,
     _build_tw_etf_super_export_table,
@@ -79,6 +80,7 @@ from app import (
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
     _resolve_notebook_selected_id,
+    _resolve_rank_exit_snapshot,
     _resolve_tw_etf_super_export_file_name,
     _resolve_tw_symbol_names,
     _restore_notebook_editor_from_saved_state,
@@ -226,6 +228,18 @@ class ActiveEtfPageTests(unittest.TestCase):
                 }
             ]
         )
+        margin = pd.DataFrame(
+            [
+                {
+                    "編號": 1,
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "融資今日餘額": 12630,
+                    "融券今日餘額": 812,
+                    "券資比(%)": 6.42,
+                }
+            ]
+        )
         mis = pd.DataFrame(
             [
                 {
@@ -260,6 +274,7 @@ class ActiveEtfPageTests(unittest.TestCase):
         out = _build_tw_etf_super_export_table(
             main_frame=main,
             daily_market_frame=daily,
+            margin_frame=margin,
             mis_frame=mis,
             three_investors_frame=three_investors,
         )
@@ -273,6 +288,9 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(row_0050["成交金額(億)"]), 123.0)
         self.assertEqual(float(row_0050["外資買進(張)"]), 7260.3)
         self.assertEqual(float(row_0050["三大法人合計淨買賣超(張)"]), -120452.27)
+        self.assertEqual(float(row_0050["融資今日餘額"]), 12630.0)
+        self.assertEqual(float(row_0050["融券今日餘額"]), 812.0)
+        self.assertEqual(float(row_0050["券資比(%)"]), 6.42)
         self.assertEqual(str(row_0050["ETF"]), "元大台灣50")
         self.assertEqual(str(row_00999["ETF"]), "測試ETF")
         self.assertEqual(str(row_00999["YTD績效(%)"]), "-")
@@ -292,10 +310,19 @@ class ActiveEtfPageTests(unittest.TestCase):
             export_frame=pd.DataFrame([{"代碼": "0050"}]),
             main_meta={"daily_end_used": "2026-03-10"},
             daily_market_meta={"last_trade_date": "2026-03-09"},
+            margin_meta={"last_trade_date": "2026-03-08"},
             mis_meta={"last_trade_date": "2026-03-08"},
         )
 
         self.assertEqual(out, "tw_etf_super_export_20260310.csv")
+
+    def test_resolve_tw_etf_super_export_file_name_uses_margin_date_when_needed(self):
+        out = _resolve_tw_etf_super_export_file_name(
+            export_frame=pd.DataFrame([{"代碼": "0050"}]),
+            margin_meta={"last_trade_date": "2026-03-11"},
+        )
+
+        self.assertEqual(out, "tw_etf_super_export_20260311.csv")
 
     def test_sync_tw_etf_all_types_export_sources_runs_all_updates(self):
         fake_store = SimpleNamespace()
@@ -316,6 +343,10 @@ class ActiveEtfPageTests(unittest.TestCase):
                 "app.sync_twse_etf_daily_market",
                 return_value={"requested_days": 14, "synced_days": 1},
             ) as daily_mock,
+            patch(
+                "app.sync_twse_etf_margin_daily",
+                return_value={"requested_days": 14, "synced_days": 1},
+            ) as margin_mock,
             patch(
                 "app.sync_twse_etf_mis_daily",
                 return_value={"requested_days": 1, "synced_days": 1},
@@ -351,12 +382,14 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(clear_mock.call_count, 2)
         main_sync_mock.assert_called_once_with("20260309")
         daily_mock.assert_called_once_with(store=fake_store, lookback_days=14, force=True)
+        margin_mock.assert_called_once_with(store=fake_store, lookback_days=14, force=True)
         mis_mock.assert_called_once_with(store=fake_store, force=True)
         three_mock.assert_called_once_with("20260309", lookback_days=14)
         perf_mock.assert_called_once()
         aum_map_mock.assert_called_once_with("20260309")
         aum_rows_mock.assert_called_once()
         self.assertEqual(out.get("main", {}).get("status"), "synced")
+        self.assertEqual(out.get("margin", {}).get("synced_days"), 1)
         self.assertEqual(out.get("three_investors", {}).get("status"), "synced")
         self.assertEqual(out.get("aum_track", {}).get("status"), "synced")
         self.assertEqual(out.get("issues"), [])
@@ -670,6 +703,113 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(list(out["代碼"]), ["00878", "00919"])
         self.assertEqual(list(out["ETF"]), ["國泰永續高股息", "群益台灣精選高息"])
         self.assertTrue((out["離開日期"] == "20260214").all())
+
+    def test_resolve_rank_exit_snapshot_carries_forward_latest_exit(self):
+        current_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "0056", "ETF": "元大高股息"},
+            ]
+        )
+        older_prev_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "00878", "ETF": "國泰永續高股息"},
+                {"代碼": "0056", "ETF": "元大高股息"},
+            ]
+        )
+
+        def _fake_find_previous(end_token, *, max_scan_days=20):
+            mapping = {
+                "20260215": ("20260214", {"0050": 1.0}),
+                "20260214": ("20260213", {"0050": 1.0}),
+                "20260213": ("20260212", {"0050": 1.0}),
+                "20260212": ("", {}),
+            }
+            return mapping.get(str(end_token), ("", {}))
+
+        def _fake_build_rank_frame(**kwargs):
+            end_token = str(kwargs.get("end_yyyymmdd", ""))
+            frames = {
+                "20260213": current_df,
+                "20260212": older_prev_df,
+            }
+            return frames[end_token].copy(), str(kwargs.get("start_yyyymmdd", "")), end_token
+
+        with (
+            patch("app._find_previous_twse_snapshot_close_map", side_effect=_fake_find_previous),
+            patch(
+                "app._build_tw_etf_rank_frame_for_exit_lookup",
+                side_effect=_fake_build_rank_frame,
+            ),
+        ):
+            out, prev_used, end_used, carried_forward, had_comparable_pair = (
+                _resolve_rank_exit_snapshot(
+                    current_frame=current_df,
+                    previous_frame=current_df,
+                    current_end_used="20260215",
+                    current_prev_used="20260214",
+                    start_yyyymmdd="20251231",
+                    display_n=10,
+                )
+            )
+
+        self.assertEqual(list(out["代碼"]), ["00878"])
+        self.assertEqual(list(out["ETF"]), ["國泰永續高股息"])
+        self.assertTrue((out["離開日期"] == "20260213").all())
+        self.assertEqual(prev_used, "20260212")
+        self.assertEqual(end_used, "20260213")
+        self.assertTrue(carried_forward)
+        self.assertTrue(had_comparable_pair)
+
+    def test_resolve_rank_exit_snapshot_reports_no_recent_exit_when_history_stable(self):
+        current_df = pd.DataFrame(
+            [
+                {"代碼": "0050", "ETF": "元大台灣50"},
+                {"代碼": "0056", "ETF": "元大高股息"},
+            ]
+        )
+
+        def _fake_find_previous(end_token, *, max_scan_days=20):
+            mapping = {
+                "20260215": ("20260214", {"0050": 1.0}),
+                "20260214": ("20260213", {"0050": 1.0}),
+                "20260213": ("20260212", {"0050": 1.0}),
+                "20260212": ("", {}),
+            }
+            return mapping.get(str(end_token), ("", {}))
+
+        def _fake_build_rank_frame(**kwargs):
+            end_token = str(kwargs.get("end_yyyymmdd", ""))
+            frames = {
+                "20260213": current_df,
+                "20260212": current_df,
+            }
+            return frames[end_token].copy(), str(kwargs.get("start_yyyymmdd", "")), end_token
+
+        with (
+            patch("app._find_previous_twse_snapshot_close_map", side_effect=_fake_find_previous),
+            patch(
+                "app._build_tw_etf_rank_frame_for_exit_lookup",
+                side_effect=_fake_build_rank_frame,
+            ),
+        ):
+            out, prev_used, end_used, carried_forward, had_comparable_pair = (
+                _resolve_rank_exit_snapshot(
+                    current_frame=current_df,
+                    previous_frame=current_df,
+                    current_end_used="20260215",
+                    current_prev_used="20260214",
+                    start_yyyymmdd="20251231",
+                    display_n=10,
+                )
+            )
+
+        self.assertTrue(out.empty)
+        self.assertEqual(prev_used, "")
+        self.assertEqual(end_used, "")
+        self.assertFalse(carried_forward)
+        self.assertTrue(had_comparable_pair)
 
     def test_resolve_tw_symbol_names_uses_full_rows_fallback(self):
         class _FakeService:
@@ -2659,6 +2799,83 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "已發行單位(萬)"].iloc[0]), 135000.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "折溢價(%)"].iloc[0]), 2.89)
         self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
+
+    def test_build_tw_etf_margin_overview(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": "2026-03-18",
+                    "etf_code": "00935",
+                    "etf_name": "野村臺灣新科技50",
+                    "margin_buy": 30,
+                    "margin_sell": 10,
+                    "margin_cash_redemption": 0,
+                    "margin_prev_balance": 95,
+                    "margin_balance": 100,
+                    "margin_next_limit": 0,
+                    "short_buy": 3,
+                    "short_sell": 4,
+                    "short_stock_redemption": 0,
+                    "short_prev_balance": 14,
+                    "short_balance": 15,
+                    "short_next_limit": 0,
+                    "offset_amount": 1,
+                    "note": "",
+                    "source": "twse_margin_mi_margn",
+                    "fetched_at": "2026-03-18T12:00:00+00:00",
+                },
+                {
+                    "trade_date": "2026-03-18",
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "margin_buy": 826,
+                    "margin_sell": 945,
+                    "margin_cash_redemption": 4,
+                    "margin_prev_balance": 12753,
+                    "margin_balance": 12630,
+                    "margin_next_limit": 4480625,
+                    "short_buy": 22,
+                    "short_sell": 89,
+                    "short_stock_redemption": 0,
+                    "short_prev_balance": 745,
+                    "short_balance": 812,
+                    "short_next_limit": 4480625,
+                    "offset_amount": 21,
+                    "note": "X",
+                    "source": "twse_margin_mi_margn",
+                    "fetched_at": "2026-03-18T12:00:00+00:00",
+                },
+            ]
+        )
+        fake_store = SimpleNamespace(
+            load_tw_etf_margin_daily_coverage=lambda **kwargs: {
+                "row_count": len(frame),
+                "first_date": pd.Timestamp("2026-03-18").to_pydatetime(),
+                "last_date": pd.Timestamp("2026-03-18").to_pydatetime(),
+                "trade_date_count": 1,
+                "symbol_count": 2,
+            },
+            load_tw_etf_margin_daily=lambda **kwargs: frame.copy(),
+        )
+        with patch("app._history_store", return_value=fake_store):
+            out, meta = _build_tw_etf_margin_overview(top_n=0)
+
+        self.assertEqual(list(out["代碼"]), ["0050", "00935"])
+        self.assertEqual(list(out["編號"]), [1, 2])
+        row_0050 = out.loc[out["代碼"] == "0050"].iloc[0]
+        row_00935 = out.loc[out["代碼"] == "00935"].iloc[0]
+        self.assertEqual(int(row_0050["融資淨變動(張)"]), -123)
+        self.assertEqual(float(row_0050["券資比(%)"]), 6.42)
+        self.assertEqual(float(row_0050["融資使用率(%)"]), 0.28)
+        self.assertEqual(str(row_0050["註記"]), "X")
+        self.assertEqual(float(row_00935["券資比(%)"]), 15.0)
+        self.assertTrue(pd.isna(row_00935["融資使用率(%)"]))
+        self.assertTrue(pd.isna(row_00935["融券使用率(%)"]))
+        self.assertEqual(str(row_00935["註記"]), "—")
+        self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-18")
+        self.assertEqual(float(meta.get("total_margin_balance") or 0.0), 12730.0)
+        self.assertEqual(float(meta.get("total_short_balance") or 0.0), 827.0)
+        self.assertEqual(int(meta.get("short_ratio_alert_count") or 0), 1)
 
     def test_build_tw_etf_three_investors_overview(self):
         raw = pd.DataFrame(

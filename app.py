@@ -108,6 +108,7 @@ from services.sync_orchestrator import (
 )
 from services.sync_orchestrator import sync_symbols_if_needed
 from services.tw_etf_daily_sync import TWSE_ETF_DAILY_SOURCE, sync_twse_etf_daily_market
+from services.tw_etf_margin_sync import TWSE_ETF_MARGIN_SOURCE, sync_twse_etf_margin_daily
 from services.tw_etf_mis_sync import TWSE_MIS_ETF_SOURCE, sync_twse_etf_mis_daily
 from state_keys import BT_KEYS
 from storage import HistoryStore
@@ -313,6 +314,7 @@ def _clear_tw_etf_all_types_view_caches() -> None:
     _load_tw_market_intraday_return.clear()
     _load_tw_market_daily_return.clear()
     _build_tw_etf_all_types_performance_table.clear()
+    _build_tw_etf_margin_overview.clear()
     _build_tw_etf_three_investors_overview.clear()
 
 
@@ -419,14 +421,17 @@ def _build_tw_etf_super_export_table(
     *,
     main_frame: pd.DataFrame,
     daily_market_frame: pd.DataFrame,
+    margin_frame: pd.DataFrame | None = None,
     mis_frame: pd.DataFrame,
     three_investors_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     sources: list[tuple[str, pd.DataFrame]] = [
         ("main", main_frame),
         ("daily", daily_market_frame),
-        ("mis", mis_frame),
     ]
+    if isinstance(margin_frame, pd.DataFrame):
+        sources.append(("margin", margin_frame))
+    sources.append(("mis", mis_frame))
     if isinstance(three_investors_frame, pd.DataFrame):
         sources.append(("three_investors", three_investors_frame))
     prepared: list[tuple[str, pd.DataFrame]] = []
@@ -550,6 +555,7 @@ def _resolve_tw_etf_super_export_file_name(
     export_frame: pd.DataFrame,
     main_meta: dict[str, object] | None = None,
     daily_market_meta: dict[str, object] | None = None,
+    margin_meta: dict[str, object] | None = None,
     mis_meta: dict[str, object] | None = None,
     three_investors_meta: dict[str, object] | None = None,
 ) -> str:
@@ -564,6 +570,8 @@ def _resolve_tw_etf_super_export_file_name(
         )
     if isinstance(daily_market_meta, dict):
         meta_candidates.append(daily_market_meta.get("last_trade_date"))
+    if isinstance(margin_meta, dict):
+        meta_candidates.append(margin_meta.get("last_trade_date"))
     if isinstance(mis_meta, dict):
         meta_candidates.append(mis_meta.get("last_trade_date"))
     if isinstance(three_investors_meta, dict):
@@ -593,6 +601,7 @@ def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
     summary: dict[str, object] = {
         "main": {"status": "fallback", "used_trade_date": ""},
         "daily_market": {},
+        "margin": {},
         "mis": {},
         "three_investors": {},
         "aum_track": {},
@@ -621,6 +630,16 @@ def _sync_tw_etf_all_types_export_sources(store) -> dict[str, object]:
     except Exception as exc:
         issues.append(f"daily_market: {exc}")
         summary["daily_market"] = {"status": "error", "issues": [str(exc)]}
+
+    try:
+        summary["margin"] = sync_twse_etf_margin_daily(
+            store=store,
+            lookback_days=14,
+            force=True,
+        )
+    except Exception as exc:
+        issues.append(f"margin: {exc}")
+        summary["margin"] = {"status": "error", "issues": [str(exc)]}
 
     try:
         summary["mis"] = sync_twse_etf_mis_daily(
@@ -7640,6 +7659,166 @@ def _build_rank_exit_table(
     return pd.DataFrame(rows, columns=[code_col, name_col, "離開日期"])
 
 
+def _select_tw_etf_rank_frame_for_display(
+    frame: pd.DataFrame,
+    *,
+    display_n: int,
+    performance_col_label: str,
+    excess_col_label: str,
+    rank_by_underperform: bool,
+    market_return_pct: float | None = None,
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    out = frame.copy()
+    display_n_value = max(1, int(display_n))
+    if not rank_by_underperform:
+        return out.head(display_n_value).copy()
+    market_return_value = _safe_float(market_return_pct)
+    if market_return_value is not None and math.isfinite(float(market_return_value)):
+        out[excess_col_label] = (
+            pd.to_numeric(out.get(performance_col_label), errors="coerce") - float(market_return_value)
+        ).round(2)
+        return (
+            out.sort_values(excess_col_label, ascending=True, na_position="last")
+            .head(display_n_value)
+            .copy()
+        )
+    return (
+        out.sort_values(performance_col_label, ascending=True, na_position="last")
+        .head(display_n_value)
+        .copy()
+    )
+
+
+def _build_tw_etf_rank_frame_for_exit_lookup(
+    *,
+    start_yyyymmdd: str,
+    end_yyyymmdd: str,
+    display_n: int,
+    type_filter: str | None = None,
+    sort_ascending: bool = False,
+    exclude_split_event: bool = False,
+    performance_col_label: str = "YTD績效(%)",
+    excess_col_label: str = "大盤超額(%)",
+    rank_by_underperform: bool = False,
+) -> tuple[pd.DataFrame, str, str]:
+    fetch_n = 99999 if rank_by_underperform else max(1, int(display_n))
+    frame, start_used, end_used, _ = _build_tw_etf_top10_between(
+        start_yyyymmdd=start_yyyymmdd,
+        end_yyyymmdd=end_yyyymmdd,
+        type_filter=type_filter,
+        top_n=fetch_n,
+        sort_ascending=bool(sort_ascending),
+        exclude_split_event=bool(exclude_split_event),
+    )
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame(), start_used, end_used
+    out = frame.rename(columns={"區間報酬(%)": performance_col_label}).copy()
+    market_return_pct: float | None = None
+    if rank_by_underperform:
+        try:
+            market_return_pct, _, _ = _load_tw_market_return_between(
+                start_yyyymmdd=start_used,
+                end_yyyymmdd=end_used,
+                force_sync=False,
+            )
+        except Exception:
+            market_return_pct = None
+    out = _select_tw_etf_rank_frame_for_display(
+        out,
+        display_n=display_n,
+        performance_col_label=performance_col_label,
+        excess_col_label=excess_col_label,
+        rank_by_underperform=rank_by_underperform,
+        market_return_pct=market_return_pct,
+    )
+    return out, start_used, end_used
+
+
+def _resolve_rank_exit_snapshot(
+    *,
+    current_frame: pd.DataFrame,
+    previous_frame: pd.DataFrame,
+    current_end_used: str,
+    current_prev_used: str = "",
+    start_yyyymmdd: str,
+    display_n: int,
+    type_filter: str | None = None,
+    sort_ascending: bool = False,
+    exclude_split_event: bool = False,
+    performance_col_label: str = "YTD績效(%)",
+    excess_col_label: str = "大盤超額(%)",
+    rank_by_underperform: bool = False,
+    max_lookback_pairs: int = 20,
+) -> tuple[pd.DataFrame, str, str, bool, bool]:
+    empty_exit_df = pd.DataFrame(columns=["代碼", "ETF", "離開日期"])
+    current_token = re.sub(r"\D", "", str(current_end_used or "").strip())
+    if not current_token:
+        return empty_exit_df, "", "", False, False
+
+    frame_cache: dict[str, pd.DataFrame] = {}
+    if isinstance(current_frame, pd.DataFrame) and not current_frame.empty:
+        frame_cache[current_token] = current_frame.copy()
+    prev_token = re.sub(r"\D", "", str(current_prev_used or "").strip())
+    if prev_token and isinstance(previous_frame, pd.DataFrame) and not previous_frame.empty:
+        frame_cache[prev_token] = previous_frame.copy()
+
+    def _get_rank_frame(end_token: str) -> pd.DataFrame:
+        token = re.sub(r"\D", "", str(end_token or "").strip())
+        if not token:
+            return pd.DataFrame()
+        cached = frame_cache.get(token)
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            return cached
+        built_frame, _, built_end_used = _build_tw_etf_rank_frame_for_exit_lookup(
+            start_yyyymmdd=start_yyyymmdd,
+            end_yyyymmdd=token,
+            display_n=display_n,
+            type_filter=type_filter,
+            sort_ascending=bool(sort_ascending),
+            exclude_split_event=bool(exclude_split_event),
+            performance_col_label=performance_col_label,
+            excess_col_label=excess_col_label,
+            rank_by_underperform=rank_by_underperform,
+        )
+        built_token = re.sub(r"\D", "", str(built_end_used or "").strip())
+        if built_token != token or built_frame.empty:
+            frame_cache[token] = pd.DataFrame()
+            return pd.DataFrame()
+        frame_cache[token] = built_frame.copy()
+        return built_frame
+
+    snapshot_tokens = [current_token]
+    cursor = current_token
+    for _ in range(max(1, int(max_lookback_pairs))):
+        prev_snapshot_token, _ = _find_previous_twse_snapshot_close_map(cursor, max_scan_days=20)
+        prev_snapshot_token = re.sub(r"\D", "", str(prev_snapshot_token or "").strip())
+        if not prev_snapshot_token or prev_snapshot_token in snapshot_tokens:
+            break
+        snapshot_tokens.append(prev_snapshot_token)
+        cursor = prev_snapshot_token
+
+    had_comparable_pair = False
+    for idx in range(len(snapshot_tokens) - 1):
+        end_token = snapshot_tokens[idx]
+        prev_snapshot_token = snapshot_tokens[idx + 1]
+        end_rank_df = _get_rank_frame(end_token)
+        prev_rank_df = _get_rank_frame(prev_snapshot_token)
+        if end_rank_df.empty or prev_rank_df.empty:
+            continue
+        had_comparable_pair = True
+        exit_df = _build_rank_exit_table(
+            current_frame=end_rank_df,
+            previous_frame=prev_rank_df,
+            end_used=end_token,
+        )
+        if not exit_df.empty:
+            return exit_df, prev_snapshot_token, end_token, end_token != current_token, True
+
+    return empty_exit_df, "", "", False, had_comparable_pair
+
+
 def _style_tw_today_move_table(frame: pd.DataFrame):
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return frame
@@ -8097,6 +8276,177 @@ def _build_tw_etf_daily_market_overview(
         "total_trade_value_billion": total_trade_value_billion,
         "spike_count": spike_count,
         "lookback_start": pd.Timestamp(start_date).date().isoformat(),
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _build_tw_etf_margin_overview(
+    *,
+    top_n: int = 60,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    store = _history_store()
+    coverage = store.load_tw_etf_margin_daily_coverage()
+    last_date_raw = coverage.get("last_date") if isinstance(coverage, dict) else None
+    if last_date_raw is None:
+        return pd.DataFrame(), {
+            "last_trade_date": "",
+            "row_count": 0,
+            "trade_date_count": 0,
+            "symbol_count": 0,
+        }
+
+    last_trade_date = pd.Timestamp(last_date_raw).date()
+    raw = store.load_tw_etf_margin_daily(start=last_trade_date, end=last_trade_date)
+    if raw.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": last_trade_date.isoformat(),
+            "row_count": 0,
+            "trade_date_count": int(coverage.get("trade_date_count") or 0),
+            "symbol_count": int(coverage.get("symbol_count") or 0),
+        }
+
+    latest = raw.copy()
+    latest["trade_date"] = pd.to_datetime(latest["trade_date"], errors="coerce")
+    latest = (
+        latest.dropna(subset=["trade_date"])
+        .sort_values(["trade_date", "etf_code"])
+        .groupby("etf_code", group_keys=False)
+        .tail(1)
+        .reset_index(drop=True)
+    )
+    if latest.empty:
+        return pd.DataFrame(), {
+            "last_trade_date": last_trade_date.isoformat(),
+            "row_count": 0,
+            "trade_date_count": int(coverage.get("trade_date_count") or 0),
+            "symbol_count": int(coverage.get("symbol_count") or 0),
+        }
+
+    latest["代碼"] = latest["etf_code"]
+    latest["ETF"] = latest["etf_name"]
+    latest["類型"] = [
+        _classify_tw_etf(name=str(name), code=str(code))
+        for name, code in zip(latest["ETF"], latest["代碼"], strict=False)
+    ]
+    latest["融資買進"] = latest["margin_buy"]
+    latest["融資賣出"] = latest["margin_sell"]
+    latest["融資現金償還"] = latest["margin_cash_redemption"]
+    latest["融資前日餘額"] = latest["margin_prev_balance"]
+    latest["融資今日餘額"] = latest["margin_balance"]
+    latest["融資淨變動(張)"] = (
+        pd.to_numeric(latest["margin_balance"], errors="coerce")
+        - pd.to_numeric(latest["margin_prev_balance"], errors="coerce")
+    )
+    latest["融資次日限額"] = latest["margin_next_limit"]
+    latest["融資使用率(%)"] = np.where(
+        pd.to_numeric(latest["margin_next_limit"], errors="coerce") > 0,
+        (
+            pd.to_numeric(latest["margin_balance"], errors="coerce")
+            / pd.to_numeric(latest["margin_next_limit"], errors="coerce")
+        )
+        * 100.0,
+        np.nan,
+    )
+    latest["融券買進"] = latest["short_buy"]
+    latest["融券賣出"] = latest["short_sell"]
+    latest["融券現券償還"] = latest["short_stock_redemption"]
+    latest["融券前日餘額"] = latest["short_prev_balance"]
+    latest["融券今日餘額"] = latest["short_balance"]
+    latest["融券淨變動(張)"] = (
+        pd.to_numeric(latest["short_balance"], errors="coerce")
+        - pd.to_numeric(latest["short_prev_balance"], errors="coerce")
+    )
+    latest["融券次日限額"] = latest["short_next_limit"]
+    latest["融券使用率(%)"] = np.where(
+        pd.to_numeric(latest["short_next_limit"], errors="coerce") > 0,
+        (
+            pd.to_numeric(latest["short_balance"], errors="coerce")
+            / pd.to_numeric(latest["short_next_limit"], errors="coerce")
+        )
+        * 100.0,
+        np.nan,
+    )
+    latest["券資比(%)"] = np.where(
+        pd.to_numeric(latest["margin_balance"], errors="coerce") > 0,
+        (
+            pd.to_numeric(latest["short_balance"], errors="coerce")
+            / pd.to_numeric(latest["margin_balance"], errors="coerce")
+        )
+        * 100.0,
+        np.nan,
+    )
+    latest["資券互抵"] = latest["offset_amount"]
+    latest["註記"] = latest["note"].fillna("").astype(str).str.strip().replace({"": "—"})
+    latest = latest.sort_values(
+        ["代碼", "ETF"], ascending=[True, True], na_position="last"
+    ).reset_index(drop=True)
+    latest.insert(0, "編號", range(1, len(latest) + 1))
+    if top_n > 0:
+        latest = latest.head(max(1, int(top_n))).copy()
+
+    for column in [
+        "融資買進",
+        "融資賣出",
+        "融資現金償還",
+        "融資前日餘額",
+        "融資今日餘額",
+        "融資淨變動(張)",
+        "融資次日限額",
+        "融券買進",
+        "融券賣出",
+        "融券現券償還",
+        "融券前日餘額",
+        "融券今日餘額",
+        "融券淨變動(張)",
+        "融券次日限額",
+        "資券互抵",
+    ]:
+        if column in latest.columns:
+            latest[column] = _truncate_integer_series(latest[column])
+    for column in ["融資使用率(%)", "融券使用率(%)", "券資比(%)"]:
+        if column in latest.columns:
+            latest[column] = _truncate_series(latest[column], digits=2)
+
+    out = latest[
+        [
+            "編號",
+            "代碼",
+            "ETF",
+            "類型",
+            "融資買進",
+            "融資賣出",
+            "融資現金償還",
+            "融資前日餘額",
+            "融資今日餘額",
+            "融資淨變動(張)",
+            "融資次日限額",
+            "融資使用率(%)",
+            "融券買進",
+            "融券賣出",
+            "融券現券償還",
+            "融券前日餘額",
+            "融券今日餘額",
+            "融券淨變動(張)",
+            "融券次日限額",
+            "融券使用率(%)",
+            "券資比(%)",
+            "資券互抵",
+            "註記",
+        ]
+    ].reset_index(drop=True)
+    short_ratio_alert_count = int(
+        (pd.to_numeric(out.get("券資比(%)"), errors="coerce") >= 10.0).sum()
+    )
+    total_margin_balance = float(pd.to_numeric(latest["融資今日餘額"], errors="coerce").sum())
+    total_short_balance = float(pd.to_numeric(latest["融券今日餘額"], errors="coerce").sum())
+    return out, {
+        "last_trade_date": last_trade_date.isoformat(),
+        "row_count": int(coverage.get("row_count") or 0),
+        "trade_date_count": int(coverage.get("trade_date_count") or 0),
+        "symbol_count": int(coverage.get("symbol_count") or 0),
+        "total_margin_balance": total_margin_balance,
+        "total_short_balance": total_short_balance,
+        "short_ratio_alert_count": short_ratio_alert_count,
     }
 
 
@@ -9520,6 +9870,125 @@ def _render_tw_etf_all_types_view():
                 "欄位說明：`量能異常(倍) = 今日成交股數 / 20日均成交股數`；`20日波動率(%)` 以日報酬標準差計算。"
             )
 
+        st.markdown("#### 官方 ETF 融資融券總表")
+        margin_refresh = st.button(
+            "更新官方融資融券",
+            key="tw_etf_margin_refresh",
+            width="stretch",
+        )
+        margin_sync_summary: dict[str, object] = (
+            dict(export_refresh_summary.get("margin", {}))
+            if isinstance(export_refresh_summary.get("margin", {}), dict)
+            else {}
+        )
+        margin_coverage = store.load_tw_etf_margin_daily_coverage()
+        margin_last_raw = margin_coverage.get("last_date") if isinstance(margin_coverage, dict) else None
+        margin_last_date = (
+            pd.Timestamp(margin_last_raw).date() if margin_last_raw is not None else None
+        )
+        if margin_refresh:
+            try:
+                with st.spinner("同步 TWSE 官方 ETF 融資融券中..."):
+                    margin_sync_summary = sync_twse_etf_margin_daily(
+                        store=store,
+                        lookback_days=14,
+                        force=bool(margin_refresh),
+                    )
+            except Exception as exc:
+                st.warning(f"同步官方 ETF 融資融券失敗：{exc}")
+        margin_df, margin_meta = _build_tw_etf_margin_overview(top_n=0)
+        margin_health = _build_data_health(
+            as_of=margin_meta.get("last_trade_date", ""),
+            data_sources=[_store_data_source(store, "tw_etf_margin_daily")],
+            source_chain=[TWSE_ETF_MARGIN_SOURCE],
+        )
+        _render_data_health_caption("官方融資融券資料健康度", margin_health)
+        if margin_sync_summary:
+            st.caption(
+                "同步摘要："
+                f" requested_days={int(margin_sync_summary.get('requested_days') or 0)}"
+                f" / synced_days={int(margin_sync_summary.get('synced_days') or 0)}"
+                f" / skipped_days={int(margin_sync_summary.get('skipped_days') or 0)}"
+                f" / empty_days={int(margin_sync_summary.get('empty_days') or 0)}"
+            )
+        margin_issues = margin_sync_summary.get("issues", [])
+        if isinstance(margin_issues, list) and margin_issues:
+            _render_sync_issues(
+                "官方 ETF 融資融券同步有部分錯誤，已保留既有本地資料",
+                margin_issues,
+                preview_limit=2,
+            )
+        st.caption(
+            "資料來源：TWSE `marginTrading/MI_MARGN` 官方融資融券彙總（上市 ETF 逐檔信用交易餘額）。"
+        )
+        if margin_last_date is None:
+            st.caption("目前只讀本地快取；尚未建立快取時，請手動按「更新官方融資融券」。")
+        else:
+            st.caption(
+                f"目前顯示本地快取：{margin_last_date.isoformat()}。如需抓最新官方資料，請手動按「更新官方融資融券」。"
+            )
+        st.caption("排序規則：依 `台股代號` 由小到大；`編號` 也會依此重新編列。")
+        if margin_df.empty:
+            st.info("尚無官方 ETF 融資融券本地快取；按「更新官方融資融券」後才會建立。")
+        else:
+            mg1, mg2, mg3, mg4 = st.columns(4)
+            mg1.metric("當日ETF檔數", str(len(margin_df)))
+            mg2.metric(
+                "融資今日餘額合計(張)",
+                f"{int(float(margin_meta.get('total_margin_balance') or 0.0)):,}",
+            )
+            mg3.metric(
+                "融券今日餘額合計(張)",
+                f"{int(float(margin_meta.get('total_short_balance') or 0.0)):,}",
+            )
+            mg4.metric(
+                "券資比>=10%檔數",
+                str(int(margin_meta.get("short_ratio_alert_count") or 0)),
+            )
+
+            margin_drilldown_enabled = _render_table_drilldown_toggle_inline(
+                scope="tw_etf_margin",
+                label="官方融資融券點擊導流",
+                default=True,
+            )
+            margin_search = st.text_input(
+                "搜尋官方融資融券",
+                value="",
+                key="tw_etf_margin_search",
+                placeholder="輸入 ETF 代碼、名稱、類型或註記",
+            )
+            filtered_margin_df = _filter_dataframe_by_keyword(
+                margin_df,
+                keyword=margin_search,
+                columns=["代碼", "ETF", "類型", "註記"],
+            )
+            margin_display = filtered_margin_df
+            margin_link_config: dict[str, object] = {}
+            if margin_drilldown_enabled:
+                margin_display, margin_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(
+                    filtered_margin_df
+                )
+                margin_display, margin_code_cfg = _decorate_dataframe_backtest_links(
+                    margin_display
+                )
+                if isinstance(margin_code_cfg, dict):
+                    margin_link_config.update(margin_code_cfg)
+                if isinstance(margin_heatmap_cfg, dict):
+                    margin_link_config.update(margin_heatmap_cfg)
+            if margin_search:
+                st.caption(f"搜尋結果：{len(filtered_margin_df)} / {len(margin_df)}")
+            st.dataframe(
+                margin_display,
+                width="stretch",
+                hide_index=True,
+                height=scroll_height,
+                column_config=margin_link_config if margin_link_config else None,
+                disable_backtest_drilldown=True,
+            )
+            st.caption(
+                "欄位說明：`券資比(%) = 融券今日餘額 / 融資今日餘額`；`融資/融券使用率(%) = 今日餘額 / 次一營業日限額`。"
+            )
+
         st.markdown("#### 官方 ETF MIS 指標總表")
         mis_refresh = st.button(
             "更新官方 MIS 指標",
@@ -9764,6 +10233,7 @@ def _render_tw_etf_all_types_view():
         super_export_df = _build_tw_etf_super_export_table(
             main_frame=table_view_df,
             daily_market_frame=daily_market_df,
+            margin_frame=margin_df,
             mis_frame=mis_df,
             three_investors_frame=three_investors_df,
         )
@@ -9771,6 +10241,7 @@ def _render_tw_etf_all_types_view():
             export_frame=super_export_df,
             main_meta=meta,
             daily_market_meta=daily_market_meta,
+            margin_meta=margin_meta,
             mis_meta=mis_meta,
             three_investors_meta=three_investors_meta,
         )
@@ -10119,27 +10590,14 @@ def _render_top10_etf_2026_ytd_view(
         except Exception as exc:
             market_issues = [f"market: {exc}"]
 
-        if rank_by_underperform:
-            if market_return_pct is not None and math.isfinite(float(market_return_pct)):
-                top10_etf_df[excess_col_label] = (
-                    pd.to_numeric(top10_etf_df[performance_col_label], errors="coerce")
-                    - float(market_return_pct)
-                ).round(2)
-                top10_etf_df = (
-                    top10_etf_df.sort_values(excess_col_label, ascending=True, na_position="last")
-                    .head(display_n)
-                    .copy()
-                )
-            else:
-                top10_etf_df = (
-                    top10_etf_df.sort_values(
-                        performance_col_label, ascending=True, na_position="last"
-                    )
-                    .head(display_n)
-                    .copy()
-                )
-        else:
-            top10_etf_df = top10_etf_df.head(display_n).copy()
+        top10_etf_df = _select_tw_etf_rank_frame_for_display(
+            top10_etf_df,
+            display_n=display_n,
+            performance_col_label=performance_col_label,
+            excess_col_label=excess_col_label,
+            rank_by_underperform=rank_by_underperform,
+            market_return_pct=market_return_pct,
+        )
 
         top10_symbols = tuple(
             str(x).strip().upper()
@@ -10198,48 +10656,22 @@ def _render_top10_etf_2026_ytd_view(
         previous_rank_df = pd.DataFrame()
         if daily_prev_used and daily_prev_used != end_used:
             try:
-                prev_fetch_n = 99999 if rank_by_underperform else display_n
-                prev_top10, _, _, _ = _build_tw_etf_top10_between(
+                previous_rank_df, _, prev_rank_end_used = _build_tw_etf_rank_frame_for_exit_lookup(
                     start_yyyymmdd=start_target,
                     end_yyyymmdd=daily_prev_used,
+                    display_n=display_n,
                     type_filter=etf_type_filter_text or None,
-                    top_n=prev_fetch_n,
                     sort_ascending=bool(sort_ascending),
                     exclude_split_event=bool(exclude_split_event),
+                    performance_col_label=performance_col_label,
+                    excess_col_label=excess_col_label,
+                    rank_by_underperform=rank_by_underperform,
                 )
-                if not prev_top10.empty:
-                    prev_rank_df = prev_top10.rename(
-                        columns={"區間報酬(%)": performance_col_label}
-                    ).copy()
-                    if rank_by_underperform:
-                        if market_return_pct is not None and math.isfinite(
-                            float(market_return_pct)
-                        ):
-                            prev_rank_df[excess_col_label] = (
-                                pd.to_numeric(prev_rank_df[performance_col_label], errors="coerce")
-                                - float(market_return_pct)
-                            ).round(2)
-                            prev_rank_df = (
-                                prev_rank_df.sort_values(
-                                    excess_col_label, ascending=True, na_position="last"
-                                )
-                                .head(display_n)
-                                .copy()
-                            )
-                        else:
-                            prev_rank_df = (
-                                prev_rank_df.sort_values(
-                                    performance_col_label, ascending=True, na_position="last"
-                                )
-                                .head(display_n)
-                                .copy()
-                            )
-                    else:
-                        prev_rank_df = prev_rank_df.head(display_n).copy()
+                if prev_rank_end_used == daily_prev_used and not previous_rank_df.empty:
                     previous_rank_map = {
                         str(code).strip().upper(): idx
                         for idx, code in enumerate(
-                            prev_rank_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
+                            previous_rank_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist(),
                             start=1,
                         )
                         if str(code).strip()
@@ -10408,27 +10840,48 @@ def _render_top10_etf_2026_ytd_view(
                 column_config=merged_link_config if merged_link_config else None,
                 disable_backtest_drilldown=True,
             )
-        if daily_prev_used and not previous_rank_df.empty:
-            exit_df = _build_rank_exit_table(
-                current_frame=top10_etf_df,
-                previous_frame=previous_rank_df,
-                end_used=end_used,
-            )
-            if not exit_df.empty:
-                exit_items: list[str] = []
-                for _, row in exit_df.iterrows():
-                    code_text = str(row.get("代碼", "")).strip()
-                    name_text = str(row.get("ETF", "")).strip() or code_text
-                    date_text = str(row.get("離開日期", "")).strip() or str(end_used).strip()
-                    if code_text:
-                        exit_items.append(f"`{code_text}` {name_text}（離開日期：{date_text}）")
-                if exit_items:
-                    st.caption(f"離開排行（{daily_prev_used} -> {end_used}）：")
-                    st.markdown("\n".join([f"- {item}" for item in exit_items]))
+        (
+            exit_df,
+            exit_prev_used,
+            exit_end_used,
+            exit_is_carried_forward,
+            exit_had_comparable_pair,
+        ) = _resolve_rank_exit_snapshot(
+            current_frame=top10_etf_df,
+            previous_frame=previous_rank_df,
+            current_end_used=end_used,
+            current_prev_used=daily_prev_used,
+            start_yyyymmdd=start_target,
+            display_n=display_n,
+            type_filter=etf_type_filter_text or None,
+            sort_ascending=bool(sort_ascending),
+            exclude_split_event=bool(exclude_split_event),
+            performance_col_label=performance_col_label,
+            excess_col_label=excess_col_label,
+            rank_by_underperform=rank_by_underperform,
+        )
+        if not exit_df.empty:
+            exit_items: list[str] = []
+            for _, row in exit_df.iterrows():
+                code_text = str(row.get("代碼", "")).strip()
+                name_text = str(row.get("ETF", "")).strip() or code_text
+                date_text = str(row.get("離開日期", "")).strip() or str(exit_end_used).strip()
+                if code_text:
+                    exit_items.append(f"`{code_text}` {name_text}（離開日期：{date_text}）")
+            if exit_items:
+                if exit_is_carried_forward and exit_prev_used and exit_end_used:
+                    st.caption(
+                        f"離開排行（最近更新：{exit_end_used}；比較區間：{exit_prev_used} -> {exit_end_used}）："
+                    )
+                elif exit_prev_used and exit_end_used:
+                    st.caption(f"離開排行（{exit_prev_used} -> {exit_end_used}）：")
                 else:
-                    st.caption("離開排行：本期無離榜 ETF。")
+                    st.caption("離開排行：")
+                st.markdown("\n".join([f"- {item}" for item in exit_items]))
             else:
-                st.caption("離開排行：本期無離榜 ETF。")
+                st.caption("離開排行：近期無離榜 ETF。")
+        elif exit_had_comparable_pair:
+            st.caption("離開排行：近期無離榜 ETF。")
         elif daily_prev_used:
             st.caption(f"離開排行：{daily_prev_used} 榜單資料不可用，暫無法比對。")
         else:

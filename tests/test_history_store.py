@@ -352,6 +352,73 @@ class HistoryStoreTests(unittest.TestCase):
                 181.62,
             )
 
+    def test_save_and_load_tw_etf_margin_daily(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            store = HistoryStore(db_path=db_path, service=_FakeService())
+            saved = store.save_tw_etf_margin_daily(
+                rows=[
+                    {
+                        "trade_date": "2026-03-18",
+                        "etf_code": "0050",
+                        "etf_name": "元大台灣50",
+                        "margin_buy": 826,
+                        "margin_sell": 945,
+                        "margin_cash_redemption": 4,
+                        "margin_prev_balance": 12753,
+                        "margin_balance": 12630,
+                        "margin_next_limit": 4480625,
+                        "short_buy": 22,
+                        "short_sell": 89,
+                        "short_stock_redemption": 0,
+                        "short_prev_balance": 745,
+                        "short_balance": 812,
+                        "short_next_limit": 4480625,
+                        "offset_amount": 21,
+                        "note": "X",
+                        "source": "unit_test",
+                    },
+                    {
+                        "trade_date": "2026-03-18",
+                        "etf_code": "0056",
+                        "etf_name": "元大高股息",
+                        "margin_buy": 139,
+                        "margin_sell": 46,
+                        "margin_cash_redemption": 57,
+                        "margin_prev_balance": 3669,
+                        "margin_balance": 3705,
+                        "margin_next_limit": 3444008,
+                        "short_buy": 0,
+                        "short_sell": 12,
+                        "short_stock_redemption": 0,
+                        "short_prev_balance": 184,
+                        "short_balance": 196,
+                        "short_next_limit": 3444008,
+                        "offset_amount": 0,
+                        "note": "",
+                        "source": "unit_test",
+                    },
+                ],
+                trade_date="2026-03-18",
+            )
+            self.assertEqual(saved, 2)
+
+            coverage = store.load_tw_etf_margin_daily_coverage()
+            self.assertEqual(int(coverage["row_count"]), 2)
+            self.assertEqual(int(coverage["trade_date_count"]), 1)
+            self.assertEqual(int(coverage["symbol_count"]), 2)
+
+            frame = store.load_tw_etf_margin_daily(start="2026-03-18", end="2026-03-18")
+            self.assertEqual(len(frame), 2)
+            self.assertEqual(
+                int(frame.loc[frame["etf_code"] == "0050", "margin_balance"].iloc[0]),
+                12630,
+            )
+            self.assertEqual(
+                int(frame.loc[frame["etf_code"] == "0050", "short_balance"].iloc[0]),
+                812,
+            )
+
     def test_save_and_load_latest_heatmap_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = f"{tmp}/test.sqlite3"
