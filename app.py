@@ -7677,7 +7677,8 @@ def _select_tw_etf_rank_frame_for_display(
     market_return_value = _safe_float(market_return_pct)
     if market_return_value is not None and math.isfinite(float(market_return_value)):
         out[excess_col_label] = (
-            pd.to_numeric(out.get(performance_col_label), errors="coerce") - float(market_return_value)
+            pd.to_numeric(out.get(performance_col_label), errors="coerce")
+            - float(market_return_value)
         ).round(2)
         return (
             out.sort_values(excess_col_label, ascending=True, na_position="last")
@@ -8333,10 +8334,9 @@ def _build_tw_etf_margin_overview(
     latest["融資現金償還"] = latest["margin_cash_redemption"]
     latest["融資前日餘額"] = latest["margin_prev_balance"]
     latest["融資今日餘額"] = latest["margin_balance"]
-    latest["融資淨變動(張)"] = (
-        pd.to_numeric(latest["margin_balance"], errors="coerce")
-        - pd.to_numeric(latest["margin_prev_balance"], errors="coerce")
-    )
+    latest["融資淨變動(張)"] = pd.to_numeric(
+        latest["margin_balance"], errors="coerce"
+    ) - pd.to_numeric(latest["margin_prev_balance"], errors="coerce")
     latest["融資次日限額"] = latest["margin_next_limit"]
     latest["融資使用率(%)"] = np.where(
         pd.to_numeric(latest["margin_next_limit"], errors="coerce") > 0,
@@ -8352,10 +8352,9 @@ def _build_tw_etf_margin_overview(
     latest["融券現券償還"] = latest["short_stock_redemption"]
     latest["融券前日餘額"] = latest["short_prev_balance"]
     latest["融券今日餘額"] = latest["short_balance"]
-    latest["融券淨變動(張)"] = (
-        pd.to_numeric(latest["short_balance"], errors="coerce")
-        - pd.to_numeric(latest["short_prev_balance"], errors="coerce")
-    )
+    latest["融券淨變動(張)"] = pd.to_numeric(
+        latest["short_balance"], errors="coerce"
+    ) - pd.to_numeric(latest["short_prev_balance"], errors="coerce")
     latest["融券次日限額"] = latest["short_next_limit"]
     latest["融券使用率(%)"] = np.where(
         pd.to_numeric(latest["short_next_limit"], errors="coerce") > 0,
@@ -9882,7 +9881,9 @@ def _render_tw_etf_all_types_view():
             else {}
         )
         margin_coverage = store.load_tw_etf_margin_daily_coverage()
-        margin_last_raw = margin_coverage.get("last_date") if isinstance(margin_coverage, dict) else None
+        margin_last_raw = (
+            margin_coverage.get("last_date") if isinstance(margin_coverage, dict) else None
+        )
         margin_last_date = (
             pd.Timestamp(margin_last_raw).date() if margin_last_raw is not None else None
         )
@@ -9968,9 +9969,7 @@ def _render_tw_etf_all_types_view():
                 margin_display, margin_heatmap_cfg = _decorate_tw_etf_name_heatmap_links(
                     filtered_margin_df
                 )
-                margin_display, margin_code_cfg = _decorate_dataframe_backtest_links(
-                    margin_display
-                )
+                margin_display, margin_code_cfg = _decorate_dataframe_backtest_links(margin_display)
                 if isinstance(margin_code_cfg, dict):
                     margin_link_config.update(margin_code_cfg)
                 if isinstance(margin_heatmap_cfg, dict):

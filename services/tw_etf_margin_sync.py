@@ -119,7 +119,11 @@ def fetch_twse_etf_margin_report(
 
     rows = detail_table.get("data")
     if not isinstance(rows, list):
-        return trade_day.isoformat(), empty_tw_etf_margin_frame(), {"stat": stat, "date": date_token}
+        return (
+            trade_day.isoformat(),
+            empty_tw_etf_margin_frame(),
+            {"stat": stat, "date": date_token},
+        )
 
     normalized_rows: list[dict[str, object]] = []
     for row in rows:
@@ -155,7 +159,11 @@ def fetch_twse_etf_margin_report(
 
     frame = pd.DataFrame(normalized_rows)
     if frame.empty:
-        return trade_day.isoformat(), empty_tw_etf_margin_frame(), {"stat": stat, "date": date_token}
+        return (
+            trade_day.isoformat(),
+            empty_tw_etf_margin_frame(),
+            {"stat": stat, "date": date_token},
+        )
 
     for column in TWSE_ETF_MARGIN_COLUMNS:
         if column.startswith(("margin_", "short_", "offset_")) and column in frame.columns:

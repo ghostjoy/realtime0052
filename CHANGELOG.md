@@ -47,6 +47,7 @@
   - 明確標示 `FinMind` 內容使用最新可得資料，不隨回放日期回溯
 
 ### Changed
+- Auto: updated app.py, services/tw_etf_margin_sync.py [id:9986dbbbf0]
 - Auto: updated README.md, services/tw_etf_margin_sync.py, tests/test_tw_etf_margin_sync.py [id:3fadcd702a]
 - Auto: updated app.py, backtest/engine.py, providers/tw_finmind.py, tests/test_backtest_page.py, tests/test_market_data_service.py, ui/core/charts.py, ... (+2) [id:d14032c04e]
 - `台股 ETF 全類型總表` 的「基金規模追蹤」顯示窗口由最近 `10` 交易日調整為最近 `240` 交易日，並統一更新表頭與說明文案
