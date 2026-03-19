@@ -131,7 +131,9 @@ def _sync_tw_etf_super_export_sources(
     fetch_snapshot_network_single = app_module._fetch_twse_snapshot_network_single
     fetch_snapshot_with_fallback = app_module._fetch_twse_snapshot_with_fallback
     trade_token = str(
-        _call_app_quiet(resolve_latest_trade_day_token, str(target_trade_date or "").strip() or None)
+        _call_app_quiet(
+            resolve_latest_trade_day_token, str(target_trade_date or "").strip() or None
+        )
     ).strip()
     summary: dict[str, object] = {
         "main": {"status": "fallback", "used_trade_date": ""},
@@ -162,7 +164,8 @@ def _sync_tw_etf_super_export_sources(
     try:
         summary["daily_market"] = sync_twse_etf_daily_market(
             store=store,
-            start=pd.Timestamp(trade_token).date() - timedelta(days=max(1, int(daily_lookback_days)))
+            start=pd.Timestamp(trade_token).date()
+            - timedelta(days=max(1, int(daily_lookback_days)))
             if trade_token
             else None,
             end=pd.Timestamp(trade_token).date() if trade_token else None,
@@ -176,7 +179,8 @@ def _sync_tw_etf_super_export_sources(
     try:
         summary["margin"] = sync_twse_etf_margin_daily(
             store=store,
-            start=pd.Timestamp(trade_token).date() - timedelta(days=max(1, int(daily_lookback_days)))
+            start=pd.Timestamp(trade_token).date()
+            - timedelta(days=max(1, int(daily_lookback_days)))
             if trade_token
             else None,
             end=pd.Timestamp(trade_token).date() if trade_token else None,
@@ -505,9 +509,10 @@ def export_tw_etf_super_table_artifact(
         compare_start=compare_start,
         compare_end=compare_end,
     )
-    target_trade_token = str(
-        _call_app_quiet(resolve_latest_trade_day_token, periods["ytd_end"])
-    ).strip() or periods["ytd_end"]
+    target_trade_token = (
+        str(_call_app_quiet(resolve_latest_trade_day_token, periods["ytd_end"])).strip()
+        or periods["ytd_end"]
+    )
     refresh_summary = _sync_tw_etf_super_export_sources(
         store=store,
         app_module=app_module,
