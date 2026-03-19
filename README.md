@@ -127,6 +127,21 @@ uv run realtime0052 bootstrap --scope both --years 5
 - 預載流程會先建立 `symbol_metadata`，再批次同步 `daily_bars`，接著同步 `tw_etf_daily_market` 與 `tw_etf_mis_daily`，最後把任務摘要寫入 `bootstrap_runs`。
 - `export-tw-etf-super-table` 適合放進 `crontab`：會先同步主總表來源 + 官方 ETF 日成交 + 官方 MIS，再輸出 CSV，並把該次匯出摘要寫入 DuckDB `tw_etf_super_export_runs`。
 
+#### `crontab` 範例：每日匯出超級大表
+
+若要每天固定匯出到指定資料夾，建議把 `--out` 指到「目錄」而不是固定檔名；這樣 CLI 會沿用預設命名規則，自動輸出成 `tw_etf_super_export_<trade_day>.csv`，每天保留一份。
+
+```cron
+CRON_TZ=Asia/Taipei
+5 17 * * * cd /Users/ztw/codexapp/realtime0052_minimax && /opt/homebrew/bin/uv run realtime0052 export-tw-etf-super-table --out "/Users/ztw/Library/CloudStorage/GoogleDrive-ghostjoy@gmail.com/My Drive/etf_report/"
+```
+
+- 上例會在每天 `17:05` 執行，輸出到 `Google Drive/etf_report/`
+- 實際檔名會像 `tw_etf_super_export_20260318.csv`
+- 若把 `--out` 寫成固定檔名，例如 `--out ./tw_etf_super_export_latest.csv`，則每次都會覆蓋同一個檔案
+- `cron` 環境通常不會自動帶入互動式 shell 的 `PATH`，建議像上例一樣使用 `uv` 的絕對路徑
+- 若想保留執行紀錄，可改寫成 `... >> /path/to/tw_etf_super_export.log 2>&1`
+
 ### 3) 回測（第一版）
 
 - 粒度：日K

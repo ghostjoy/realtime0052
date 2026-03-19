@@ -146,6 +146,22 @@ class TwEtfMarginSyncTests(unittest.TestCase):
         self.assertEqual(str(frame.iloc[0]["note"]), "X")
         self.assertEqual(int(meta["row_count"]), 1)
 
+    @patch("services.tw_etf_margin_sync.requests.get")
+    def test_fetch_twse_etf_margin_report_returns_empty_frame_for_no_data_stat(self, get_mock):
+        get_mock.return_value = _FakeResponse(
+            {
+                "stat": "很抱歉，沒有符合條件的資料",
+                "date": "20260319",
+                "tables": None,
+            }
+        )
+
+        trade_date, frame, meta = fetch_twse_etf_margin_report("2026-03-19")
+
+        self.assertEqual(trade_date, "2026-03-19")
+        self.assertTrue(frame.empty)
+        self.assertEqual(str(meta.get("stat") or ""), "很抱歉，沒有符合條件的資料")
+
     @patch("services.tw_etf_margin_sync.fetch_twse_etf_margin_report")
     def test_sync_twse_etf_margin_daily_skips_existing_dates(self, fetch_mock):
         store = _FakeStore()

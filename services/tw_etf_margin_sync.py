@@ -65,6 +65,11 @@ def _to_int(value: object) -> int | None:
         return None
 
 
+def _is_no_data_stat(stat: object) -> bool:
+    text = str(stat or "").strip()
+    return any(token in text for token in ("沒有符合條件", "查無資料", "無資料"))
+
+
 def _is_tw_etf_row(code: object, name: object) -> bool:
     code_text = _normalize_code(code)
     name_text = _normalize_name(name)
@@ -90,6 +95,12 @@ def fetch_twse_etf_margin_report(
 
     stat = str(payload.get("stat", "") or "").strip()
     tables = payload.get("tables")
+    if _is_no_data_stat(stat):
+        return (
+            trade_day.isoformat(),
+            empty_tw_etf_margin_frame(),
+            {"stat": stat, "date": date_token},
+        )
     if not isinstance(tables, list):
         raise RuntimeError(f"TWSE ETF margin payload missing tables: {stat or 'unknown'}")
 
@@ -104,12 +115,6 @@ def fetch_twse_etf_margin_report(
         None,
     )
     if not isinstance(detail_table, dict):
-        if "沒有符合條件" in stat:
-            return (
-                trade_day.isoformat(),
-                empty_tw_etf_margin_frame(),
-                {"stat": stat, "date": date_token},
-            )
         raise RuntimeError(f"TWSE ETF margin payload missing detail table: {stat or 'unknown'}")
 
     rows = detail_table.get("data")
