@@ -256,9 +256,7 @@ def _sync_tw_etf_super_export_sources(
                 str(_call_app_quiet(resolve_trade_date_iso, trade_token)).strip()
                 if callable(resolve_trade_date_iso)
                 else (
-                    pd.Timestamp(trade_token).date().isoformat()
-                    if str(trade_token).strip()
-                    else ""
+                    pd.Timestamp(trade_token).date().isoformat() if str(trade_token).strip() else ""
                 )
             )
             snapshot_info = _call_app_quiet(load_aum_snapshot_info, trade_token)
