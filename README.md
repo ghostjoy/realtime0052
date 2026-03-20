@@ -143,6 +143,22 @@ CRON_TZ=Asia/Taipei
 - `cron` 環境通常不會自動帶入互動式 shell 的 `PATH`，建議像上例一樣使用 `uv` 的絕對路徑
 - 若想保留執行紀錄，可改寫成 `... >> /path/to/tw_etf_super_export.log 2>&1`
 
+若本機另外有包一層 wrapper script（例如 `/Users/ztw/bin/export_tw_etf_super_table.sh`），也可以直接用該腳本：
+
+```bash
+# 最新交易日
+/Users/ztw/bin/export_tw_etf_super_table.sh
+
+# 指定單日（會輸出該交易日對應的超級大表）
+/Users/ztw/bin/export_tw_etf_super_table.sh 2026-03-18
+
+# 指定日期區間（逐日跑；非交易日會回退到前一個交易日，因此可能覆蓋成同一份交易日檔案）
+/Users/ztw/bin/export_tw_etf_super_table.sh 2026-03-06 2026-03-18
+```
+
+- 單日/區間模式的核心是把目標日期傳給 `export-tw-etf-super-table --ytd-end <date>`
+- 區間若包含週末或休市日，例如 `2026-03-08`，實際可能仍落到最近一個可交易日檔名，例如 `tw_etf_super_export_20260306.csv`
+
 ### 3) 回測（第一版）
 
 - 粒度：日K

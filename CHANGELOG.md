@@ -47,6 +47,7 @@
   - 明確標示 `FinMind` 內容使用最新可得資料，不隨回放日期回溯
 
 ### Changed
+- Auto: updated README.md [id:8ec9a00bfd]
 - Auto: updated services/tw_etf_super_export.py [id:f096b6a7aa]
 - Auto: updated app.py, services/tw_etf_super_export.py, tests/test_tw_etf_super_export.py [id:578c987ed6]
 - Auto: updated app.py, services/tw_etf_margin_sync.py [id:9986dbbbf0]
