@@ -10,6 +10,7 @@ import pandas as pd
 
 from services.tw_etf_super_export import (
     _sync_tw_etf_super_export_sources,
+    build_tw_etf_all_types_main_export_frame,
     export_tw_etf_super_table_artifact,
 )
 
@@ -33,6 +34,34 @@ class _FakeStore:
 
 
 class TwEtfSuperExportTests(unittest.TestCase):
+    def test_build_main_export_frame_strips_official_category_columns(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "編號": 1,
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "官方主分類": "台股ETF",
+                    "官方次分類": "全市場指數",
+                    "類型": "台股ETF",
+                    "YTD績效(%)": 12.34,
+                }
+            ]
+        )
+
+        out = build_tw_etf_all_types_main_export_frame(
+            table_df=frame,
+            meta={
+                "market_2025_return": 20.01,
+                "market_ytd_return": 8.88,
+                "market_daily_return": 0.45,
+            },
+        )
+
+        self.assertEqual(str(out.iloc[0]["代碼"]), "^TWII")
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
+
     @patch("services.tw_etf_super_export.sync_twse_etf_mis_daily")
     @patch("services.tw_etf_super_export.sync_twse_etf_margin_daily")
     @patch("services.tw_etf_super_export.sync_twse_etf_daily_market")

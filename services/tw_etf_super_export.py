@@ -295,6 +295,7 @@ def build_tw_etf_all_types_main_export_frame(
     frame = table_df.copy() if isinstance(table_df, pd.DataFrame) else pd.DataFrame()
     if frame.empty:
         return frame
+    frame = frame[[col for col in frame.columns if col not in {"官方主分類", "官方次分類"}]]
     market_2025_return = _safe_float(meta.get("market_2025_return"))
     market_ytd_return = _safe_float(meta.get("market_ytd_return"))
     market_daily_return = _safe_float(meta.get("market_daily_return"))

@@ -304,6 +304,7 @@ def _filter_dataframe_by_keyword(
 def _clear_tw_etf_all_types_view_caches() -> None:
     _fetch_twse_snapshot_with_fallback.clear()
     _fetch_twse_three_investors_with_fallback.clear()
+    _load_tw_etf_official_profile_map.clear()
     _build_tw_etf_top10_between.clear()
     _load_twii_twse_month_close_map.clear()
     _load_twii_twse_return_between.clear()
@@ -325,6 +326,7 @@ def _build_tw_etf_all_types_main_table_view(
 ) -> pd.DataFrame:
     if not isinstance(table_df, pd.DataFrame) or table_df.empty:
         return pd.DataFrame()
+    table_df = table_df[[col for col in table_df.columns if col not in {"官方主分類", "官方次分類"}]]
     meta_dict = meta if isinstance(meta, dict) else {}
     market_2025_return = _safe_float(meta_dict.get("market_2025_return"))
     market_ytd_return = _safe_float(meta_dict.get("market_ytd_return"))
@@ -2316,17 +2318,17 @@ PAGE_CARDS = [
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
     {
         "key": "2026 YTD 前十大股利型、配息型 ETF",
-        "desc": "2026 年截至今日的台股股利/配息型 ETF 報酬率前十名。",
+        "desc": "2026 年截至今日的台股高股息主題 ETF 報酬率前十名（TWSE 官方主題/因子）。",
     },
     {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
     {
         "key": "台股 ETF 全類型總表",
-        "desc": "台股 ETF 全名單（含類型）與 2025/2026 YTD/大盤勝負比較。",
+        "desc": "台股 ETF 全名單與 2025/2026 YTD/大盤勝負比較。",
     },
     {"key": "2025 後20大最差勁 ETF", "desc": "2025 全年區間台股 ETF 報酬率後20名。"},
     {"key": "共識代表 ETF", "desc": "以前10 ETF 成分股交集，找出最具代表性的單一 ETF。"},
     {"key": "兩檔 ETF 推薦", "desc": "以共識代表+低重疊動能，收斂為兩檔建議組合。"},
-    {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效。"},
+    {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效（依 TWSE 官方分類）。"},
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
     {"key": "熱力圖總表", "desc": "集中管理你開啟過的 ETF 熱力圖與釘選卡片。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
@@ -5710,6 +5712,589 @@ TW_ETF_MANAGEMENT_FEE_FALLBACK: dict[str, str] = {
     "00995A": "0.75%起",
 }
 
+TWSE_ETF_PRODUCTS_PAGE_URL = "https://www.twse.com.tw/zh/ETFortune/products"
+TWSE_ETF_PRODUCTS_AJAX_URL = "https://www.twse.com.tw/zh/ETFortune/ajaxProductsResult"
+TWSE_ETF_INFO_URL_TEMPLATE = "https://www.twse.com.tw/zh/ETFortune/etfInfo/{code}"
+TWSE_ETF_OFFICIAL_PROFILE_DATASET_KEY = "twse_etf_official_profile_map"
+TWSE_ETF_OFFICIAL_MAIN_TYPES = (
+    "台股ETF",
+    "國外股票ETF",
+    "債券及固定收益ETF",
+    "多資產ETF",
+    "股票槓反ETF",
+    "債券槓反ETF",
+    "期貨ETF",
+    "期貨槓反ETF",
+    "主動式ETF",
+)
+TWSE_ETF_HIGH_DIVIDEND_TAGS = ("高股息", "高息低波動")
+
+
+def _decode_tw_etf_official_profile_payload(
+    payload: object,
+) -> dict[str, dict[str, object]]:
+    if not isinstance(payload, dict):
+        return {}
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code", "")).strip().upper()
+        if not re.fullmatch(r"\d{4,6}[A-Z]?", code):
+            continue
+        theme_tags = row.get("theme_tags")
+        if not isinstance(theme_tags, list):
+            theme_tags = []
+        out[code] = {
+            "code": code,
+            "stock_name": str(row.get("stock_name", "")).strip(),
+            "index_name": str(row.get("index_name", "")).strip(),
+            "issuer": str(row.get("issuer", "")).strip(),
+            "listing_date": str(row.get("listing_date", "")).strip(),
+            "manager_type": str(row.get("manager_type", "")).strip(),
+            "asset_types": [
+                str(value).strip()
+                for value in row.get("asset_types", [])
+                if str(value).strip()
+            ],
+            "reward_types": [
+                str(value).strip()
+                for value in row.get("reward_types", [])
+                if str(value).strip()
+            ],
+            "theme_tags": [str(value).strip() for value in theme_tags if str(value).strip()],
+            "security_category": str(row.get("security_category", "")).strip(),
+            "official_main_type": str(row.get("official_main_type", "")).strip(),
+            "official_secondary_type": str(row.get("official_secondary_type", "")).strip(),
+            "profile_source": str(row.get("profile_source", "")).strip(),
+        }
+    return out
+
+
+def _fetch_twse_etf_products_page(*, timeout_sec: int = 20) -> str:
+    import requests
+
+    resp = requests.get(TWSE_ETF_PRODUCTS_PAGE_URL, timeout=timeout_sec)
+    resp.raise_for_status()
+    return resp.text
+
+
+def _extract_twse_etf_filter_options(page_html: str, input_name: str) -> list[dict[str, str]]:
+    if not str(page_html or "").strip():
+        return []
+    pattern = re.compile(
+        rf'<input[^>]*name="{re.escape(input_name)}"[^>]*value="([^"]+)"[^>]*>\s*'
+        rf"<label[^>]*>([^<]+)</label>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for value_raw, label_raw in pattern.findall(page_html):
+        value = html.unescape(str(value_raw or "").strip())
+        label = html.unescape(str(label_raw or "").strip())
+        key = (value, label)
+        if not value or not label or key in seen:
+            continue
+        seen.add(key)
+        out.append({"value": value, "label": label})
+    return out
+
+
+def _fetch_twse_etf_products_rows(
+    params: dict[str, str] | None = None,
+    *,
+    timeout_sec: int = 20,
+) -> list[dict[str, object]]:
+    import requests
+
+    resp = requests.post(
+        TWSE_ETF_PRODUCTS_AJAX_URL,
+        data=params or {},
+        timeout=timeout_sec,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("TWSE ETF products response is not an object")
+    rows = payload.get("data")
+    if str(payload.get("status", "")).strip().lower() != "success" or not isinstance(rows, list):
+        raise RuntimeError("TWSE ETF products payload missing rows")
+    return rows
+
+
+def _fetch_twse_etf_info_profile(
+    code: str,
+    *,
+    timeout_sec: int = 20,
+) -> dict[str, object]:
+    import requests
+
+    token = str(code or "").strip().upper()
+    if not re.fullmatch(r"\d{4,6}[A-Z]?", token):
+        return {}
+    resp = requests.get(
+        TWSE_ETF_INFO_URL_TEMPLATE.format(code=quote(token)),
+        timeout=timeout_sec,
+    )
+    resp.raise_for_status()
+    text = resp.text
+    category_match = re.search(
+        r"<p>\s*證券類別\s*</p>\s*<p><b>([^<]+)</b></p>",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    security_category = (
+        html.unescape(str(category_match.group(1))).strip() if category_match else ""
+    )
+    tags_block = re.search(
+        r'<div class="etf-result">(.*?)</div>\s*<div class="chart-col">',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    theme_tags = []
+    if tags_block:
+        for tag_raw in re.findall(
+            r'<span class="result"><a [^>]*>([^<]+)</a></span>',
+            str(tags_block.group(1)),
+            re.IGNORECASE | re.DOTALL,
+        ):
+            tag = html.unescape(str(tag_raw or "").strip())
+            if tag and tag not in theme_tags:
+                theme_tags.append(tag)
+    return {
+        "security_category": security_category,
+        "theme_tags": theme_tags,
+    }
+
+
+def _legacy_type_to_official_main_type(legacy_type: str) -> str:
+    token = str(legacy_type or "").strip()
+    if token in {"市值型", "股利型", "科技型", "金融型", "永續ESG型", "產業主題型"}:
+        return "台股ETF"
+    if token == "海外市場型":
+        return "國外股票ETF"
+    if token == "債券收益型":
+        return "債券及固定收益ETF"
+    if token == "平衡收益型":
+        return "多資產ETF"
+    if token == "主動式":
+        return "主動式ETF"
+    return "其他ETF"
+
+
+def _derive_twse_etf_security_category(
+    *,
+    code: str,
+    stock_name: str,
+    index_name: str,
+    manager_type: str,
+    asset_types: set[str],
+    reward_types: set[str],
+) -> str:
+    if manager_type == "Active":
+        return "主動式ETF"
+    if "MultiAsset" in asset_types or str(code or "").strip().upper().endswith("T"):
+        return "多資產ETF"
+    if "Bond" in asset_types:
+        return "債券槓反ETF" if reward_types & {"L", "I"} else "債券及固定收益ETF"
+    if asset_types & {"RawMaterial", "FX"}:
+        return "期貨槓反ETF" if reward_types & {"L", "I"} else "期貨ETF"
+    if reward_types & {"L", "I"}:
+        return "股票槓反ETF"
+    if "REITs" in asset_types:
+        return "國外股票ETF"
+
+    code_text = str(code or "").strip().upper()
+    name_text = str(stock_name or "").strip()
+    index_text = str(index_name or "").strip()
+    if _is_tw_equity_etf(code_text, name_text):
+        return "台股ETF"
+
+    foreign_keywords = (
+        "美國",
+        "日本",
+        "中國",
+        "全球",
+        "NASDAQ",
+        "S&P",
+        "上證",
+        "上証",
+        "滬深",
+        "日經",
+        "香港",
+        "印度",
+        "越南",
+        "歐洲",
+        "道瓊",
+        "東証",
+        "東證",
+        "NIFTY",
+        "NYSE",
+        "彭博",
+    )
+    combined_text = f"{name_text} {index_text}".upper()
+    if any(keyword.upper() in combined_text for keyword in foreign_keywords):
+        return "國外股票ETF"
+
+    return _legacy_type_to_official_main_type(_classify_tw_etf(name_text, code=code_text))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_tw_etf_official_profile_map(target_yyyymmdd: str = "") -> dict[str, dict[str, object]]:
+    store = _history_store()
+    token = str(target_yyyymmdd or "").strip()
+    asof_token = (
+        token if re.fullmatch(r"\d{8}", token) else datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+    )
+
+    cached_map: dict[str, dict[str, object]] = {}
+    loader = getattr(store, "load_latest_market_snapshot", None)
+    if callable(loader):
+        try:
+            cached = loader(
+                dataset_key=TWSE_ETF_OFFICIAL_PROFILE_DATASET_KEY,
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+            )
+        except Exception:
+            cached = None
+        if isinstance(cached, dict):
+            cached_map = _decode_tw_etf_official_profile_payload(cached.get("payload"))
+            cached_asof = cached.get("asof")
+            if not token and cached_map:
+                return cached_map
+            if (
+                isinstance(cached_asof, datetime)
+                and cached_asof.strftime("%Y%m%d") == asof_token
+                and cached_map
+            ):
+                return cached_map
+
+    try:
+        page_html = _fetch_twse_etf_products_page()
+        base_rows = _fetch_twse_etf_products_rows()
+    except Exception:
+        return cached_map
+
+    base_map: dict[str, dict[str, object]] = {}
+    for row in base_rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("stockNo", "")).strip().upper()
+        if not re.fullmatch(r"\d{4,6}[A-Z]?", code):
+            continue
+        base_map[code] = {
+            "code": code,
+            "stock_name": str(row.get("stockName", "")).strip(),
+            "index_name": str(row.get("indexName", "")).strip(),
+            "issuer": str(row.get("issuer", "")).strip(),
+            "listing_date": str(row.get("listingDate", "")).strip(),
+        }
+    if not base_map:
+        return cached_map
+
+    filter_defs = {
+        "managerType": _extract_twse_etf_filter_options(page_html, "managerType"),
+        "assetType": _extract_twse_etf_filter_options(page_html, "assetType"),
+        "rewardType": _extract_twse_etf_filter_options(page_html, "rewardType"),
+        "hashtag": _extract_twse_etf_filter_options(page_html, "hashtag"),
+    }
+    memberships: dict[str, dict[str, set[str]]] = {
+        "managerType": {},
+        "assetType": {},
+        "rewardType": {},
+        "hashtag": {},
+    }
+    for filter_name, options in filter_defs.items():
+        for option in options:
+            value = str(option.get("value", "")).strip()
+            label = str(option.get("label", "")).strip()
+            if not value:
+                continue
+            try:
+                rows = _fetch_twse_etf_products_rows({filter_name: value})
+            except Exception:
+                continue
+            code_set = {
+                str(row.get("stockNo", "")).strip().upper()
+                for row in rows
+                if isinstance(row, dict) and str(row.get("stockNo", "")).strip()
+            }
+            if filter_name == "hashtag":
+                memberships[filter_name][label] = code_set
+            else:
+                memberships[filter_name][value] = code_set
+
+    unresolved_codes = [
+        code
+        for code in sorted(base_map)
+        if code not in cached_map or not str(cached_map[code].get("security_category", "")).strip()
+    ]
+    profile_updates: dict[str, dict[str, object]] = {}
+    if unresolved_codes:
+        max_workers = min(8, max(1, len(unresolved_codes)))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="twse-etf-profile") as pool:
+            future_map = {
+                pool.submit(_fetch_twse_etf_info_profile, code): code for code in unresolved_codes
+            }
+            for future, code in future_map.items():
+                try:
+                    profile = future.result()
+                except Exception:
+                    profile = {}
+                if isinstance(profile, dict):
+                    profile_updates[code] = profile
+
+    out_map: dict[str, dict[str, object]] = {}
+    for code, base in sorted(base_map.items()):
+        asset_types = [
+            value
+            for value, code_set in memberships["assetType"].items()
+            if code in code_set and value
+        ]
+        reward_types = [
+            value
+            for value, code_set in memberships["rewardType"].items()
+            if code in code_set and value
+        ]
+        theme_tags = [
+            label
+            for label, code_set in memberships["hashtag"].items()
+            if code in code_set and label
+        ]
+        manager_type = (
+            "Active"
+            if code in memberships["managerType"].get("Active", set())
+            else "Passive"
+        )
+        profile = profile_updates.get(code) or cached_map.get(code, {})
+        security_category = str(profile.get("security_category", "")).strip()
+        theme_tags_profile = profile.get("theme_tags")
+        if isinstance(theme_tags_profile, list):
+            theme_tags = [str(value).strip() for value in theme_tags_profile if str(value).strip()]
+        if security_category not in TWSE_ETF_OFFICIAL_MAIN_TYPES:
+            security_category = _derive_twse_etf_security_category(
+                code=code,
+                stock_name=str(base.get("stock_name", "")),
+                index_name=str(base.get("index_name", "")),
+                manager_type=manager_type,
+                asset_types=set(asset_types),
+                reward_types=set(reward_types),
+            )
+        out_map[code] = {
+            "code": code,
+            "stock_name": str(base.get("stock_name", "")).strip(),
+            "index_name": str(base.get("index_name", "")).strip(),
+            "issuer": str(base.get("issuer", "")).strip(),
+            "listing_date": str(base.get("listing_date", "")).strip(),
+            "manager_type": manager_type,
+            "asset_types": asset_types,
+            "reward_types": reward_types,
+            "theme_tags": theme_tags,
+            "security_category": security_category,
+            "official_main_type": security_category,
+            "official_secondary_type": "、".join(theme_tags),
+            "profile_source": (
+                "official"
+                if str(profile.get("security_category", "")).strip() in TWSE_ETF_OFFICIAL_MAIN_TYPES
+                else "derived"
+            ),
+        }
+
+    writer = getattr(store, "save_market_snapshot", None)
+    if callable(writer) and out_map:
+        now_utc = datetime.now(tz=timezone.utc)
+        asof_dt = datetime.strptime(asof_token, "%Y%m%d").replace(tzinfo=timezone.utc)
+        freshness = max(0, int((now_utc - asof_dt).total_seconds()))
+        try:
+            writer(
+                dataset_key=TWSE_ETF_OFFICIAL_PROFILE_DATASET_KEY,
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                source="twse_etf_official_profile",
+                asof=asof_dt,
+                payload={
+                    "date": asof_token,
+                    "rows": [
+                        {
+                            "code": code,
+                            "stock_name": item.get("stock_name"),
+                            "index_name": item.get("index_name"),
+                            "issuer": item.get("issuer"),
+                            "listing_date": item.get("listing_date"),
+                            "manager_type": item.get("manager_type"),
+                            "asset_types": item.get("asset_types"),
+                            "reward_types": item.get("reward_types"),
+                            "theme_tags": item.get("theme_tags"),
+                            "security_category": item.get("security_category"),
+                            "official_main_type": item.get("official_main_type"),
+                            "official_secondary_type": item.get("official_secondary_type"),
+                            "profile_source": item.get("profile_source"),
+                        }
+                        for code, item in sorted(out_map.items())
+                    ],
+                },
+                freshness_sec=freshness,
+                quality_score=1.0,
+                stale=freshness > 86400,
+                raw_json={"date": asof_token, "rows": len(out_map)},
+            )
+        except Exception:
+            pass
+    return out_map
+
+
+def _official_secondary_contains_any(value: object, tags: tuple[str, ...]) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    parts = {part.strip() for part in text.split("、") if part.strip()}
+    return any(str(tag).strip() in parts for tag in tags if str(tag).strip())
+
+
+def _resolve_tw_etf_official_labels(
+    *,
+    code: object,
+    name: object = "",
+    index_name: object = "",
+    target_yyyymmdd: str = "",
+) -> tuple[str, str]:
+    code_text = str(code or "").strip().upper()
+    if not code_text:
+        return "", ""
+    try:
+        profile = _load_tw_etf_official_profile_map(target_yyyymmdd).get(code_text, {})
+    except Exception:
+        profile = {}
+    main_type = str(profile.get("official_main_type", "")).strip()
+    secondary_type = str(profile.get("official_secondary_type", "")).strip()
+    if main_type:
+        return main_type, secondary_type
+    legacy_type = _classify_tw_etf(str(name or ""), code=code_text)
+    return _legacy_type_to_official_main_type(legacy_type), ""
+
+
+def _derive_tw_etf_semantic_type(
+    *,
+    code: object,
+    name: object = "",
+    official_main_type: object = "",
+    official_secondary_type: object = "",
+) -> str:
+    code_text = str(code or "").strip().upper()
+    if code_text.startswith("^"):
+        return "大盤"
+
+    name_text = str(name or "").strip()
+    main_type = str(official_main_type or "").strip()
+    secondary_text = str(official_secondary_type or "").strip()
+    secondary_parts = [part.strip() for part in secondary_text.split("、") if part.strip()]
+    secondary_blob = " ".join(secondary_parts)
+    combined_text = f"{name_text} {secondary_blob}".strip()
+    legacy_type = _classify_tw_etf(name_text, code=code_text)
+
+    if main_type == "主動式ETF":
+        return "主動式"
+    if main_type == "股票槓反ETF":
+        return "股票槓反型"
+    if main_type == "債券槓反ETF":
+        return "債券槓反型"
+    if main_type == "期貨槓反ETF":
+        return "期貨槓反型"
+    if main_type == "期貨ETF":
+        return "期貨商品型"
+    if main_type == "債券及固定收益ETF":
+        return "債券收益型"
+    if main_type == "多資產ETF":
+        return "平衡收益型"
+    if main_type == "國外股票ETF":
+        return "海外市場型"
+
+    if _official_secondary_contains_any(secondary_text, TWSE_ETF_HIGH_DIVIDEND_TAGS):
+        return "股利型"
+
+    if any(keyword in combined_text for keyword in ("科技", "半導體", "電子", "AI", "人工智慧", "5G", "雲端", "電動車")):
+        return "科技型"
+    if any(keyword in combined_text for keyword in ("金融", "銀行", "證券", "保險")):
+        return "金融型"
+    if any(keyword in combined_text for keyword in ("ESG", "永續", "公司治理", "低碳", "減碳", "碳中和", "碳權")):
+        return "永續ESG型"
+    if any(keyword in combined_text for keyword in ("全市場指數", "大型權值", "中型", "中小型", "藍籌", "寬基", "報酬指數", "市值")):
+        return "市值型"
+    if secondary_parts:
+        return "產業主題型"
+    return legacy_type
+
+
+def _attach_tw_etf_official_category_columns(
+    frame: pd.DataFrame,
+    *,
+    code_col_candidates: tuple[str, ...] = ("代碼", "ETF代碼", "etf_code", "code"),
+    name_col_candidates: tuple[str, ...] = ("ETF", "ETF名稱", "etf_name", "name"),
+    index_col_candidates: tuple[str, ...] = ("標的指數", "index_name"),
+    target_yyyymmdd: str = "",
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    code_col = next((col for col in code_col_candidates if col in frame.columns), "")
+    if not code_col:
+        return frame
+    name_col = next((col for col in name_col_candidates if col in frame.columns), "")
+    index_col = next((col for col in index_col_candidates if col in frame.columns), "")
+
+    out = frame.copy()
+    semantic_values: list[str] = []
+    main_values: list[str] = []
+    secondary_values: list[str] = []
+    for _, row in out.iterrows():
+        code_text = str(row.get(code_col, "")).strip().upper()
+        if code_text.startswith("^"):
+            semantic_value = str(row.get("類型", "")).strip() or "大盤"
+            semantic_values.append(semantic_value)
+            main_values.append(str(row.get("官方主分類", "")).strip() or semantic_value)
+            secondary_values.append("")
+            continue
+        main_type, secondary_type = _resolve_tw_etf_official_labels(
+            code=code_text,
+            name=row.get(name_col, "") if name_col else "",
+            index_name=row.get(index_col, "") if index_col else "",
+            target_yyyymmdd=target_yyyymmdd,
+        )
+        semantic_values.append(
+            _derive_tw_etf_semantic_type(
+                code=code_text,
+                name=row.get(name_col, "") if name_col else "",
+                official_main_type=main_type,
+                official_secondary_type=secondary_type,
+            )
+        )
+        main_values.append(main_type)
+        secondary_values.append(secondary_type)
+    out["類型"] = pd.Series(semantic_values, index=out.index, dtype="string")
+    out["官方主分類"] = pd.Series(main_values, index=out.index, dtype="string")
+    out["官方次分類"] = pd.Series(secondary_values, index=out.index, dtype="string")
+
+    ordered = [col for col in out.columns if col not in {"官方主分類", "官方次分類"}]
+    anchor_col = next(
+        (
+            col
+            for col in ("ETF規模(億)", "管理費(%)", "ETF", "ETF名稱", "代碼", "ETF代碼")
+            if col in ordered
+        ),
+        "",
+    )
+    if not anchor_col:
+        ordered.extend(["官方主分類", "官方次分類"])
+        return out[ordered]
+    insert_at = ordered.index(anchor_col) + 1
+    ordered[insert_at:insert_at] = ["官方主分類", "官方次分類"]
+    return out[ordered]
+
 
 def _normalize_tw_etf_management_fee_label(value: object) -> str:
     token = str(value or "").strip()
@@ -6640,6 +7225,8 @@ def _build_tw_etf_top10_between(
     start_yyyymmdd: str,
     end_yyyymmdd: str,
     type_filter: str | None = None,
+    official_main_type_filter: str | None = None,
+    official_secondary_tag_filters: tuple[str, ...] = (),
     top_n: int = 10,
     sort_ascending: bool = False,
     exclude_split_event: bool = False,
@@ -6758,16 +7345,42 @@ def _build_tw_etf_top10_between(
     if merged.empty:
         return pd.DataFrame(), start_used, end_used, 0
 
-    merged["type"] = merged.apply(
-        lambda r: _classify_tw_etf(
-            str(r.get("name", "")),
-            code=str(r.get("code", "")),
-        ),
-        axis=1,
+    merged["ETF"] = merged["name"]
+    merged["標的指數"] = ""
+    merged = _attach_tw_etf_official_category_columns(
+        merged,
+        code_col_candidates=("code",),
+        name_col_candidates=("name", "ETF"),
+        index_col_candidates=("標的指數",),
+        target_yyyymmdd=end_used,
     )
+    merged["type"] = merged.get("類型", pd.Series(dtype=str))
     type_filter_text = str(type_filter or "").strip()
+    main_type_filter_text = str(official_main_type_filter or "").strip()
+    secondary_tag_filters = tuple(
+        str(tag).strip() for tag in official_secondary_tag_filters if str(tag).strip()
+    )
+    if main_type_filter_text:
+        merged = merged[merged["官方主分類"] == main_type_filter_text].copy()
+    if secondary_tag_filters:
+        merged = merged[
+            merged["官方次分類"].map(
+                lambda value: _official_secondary_contains_any(value, secondary_tag_filters)
+            )
+        ].copy()
     if type_filter_text:
-        merged = merged[merged["type"] == type_filter_text].copy()
+        if type_filter_text in TWSE_ETF_OFFICIAL_MAIN_TYPES:
+            merged = merged[merged["官方主分類"] == type_filter_text].copy()
+        elif type_filter_text == "股利型":
+            merged = merged[
+                merged["官方次分類"].map(
+                    lambda value: _official_secondary_contains_any(
+                        value, TWSE_ETF_HIGH_DIVIDEND_TAGS
+                    )
+                )
+            ].copy()
+        else:
+            merged = merged[merged["type"] == type_filter_text].copy()
     if merged.empty:
         return pd.DataFrame(), start_used, end_used, 0
     universe_count = int(len(merged))
@@ -6815,11 +7428,15 @@ def _build_tw_active_etf_ytd_between(
     start_used, start_df = _fetch_twse_snapshot_with_fallback(start_yyyymmdd)
     end_used, end_df = _fetch_twse_snapshot_with_fallback(end_yyyymmdd)
 
-    end_active_df = end_df[
-        end_df.apply(
-            lambda r: _is_tw_active_etf(str(r.get("code", "")), str(r.get("name", ""))), axis=1
-        )
-    ].copy()
+    end_active_df = _attach_tw_etf_official_category_columns(
+        end_df.rename(columns={"code": "代碼", "name": "ETF"}).copy(),
+        code_col_candidates=("代碼",),
+        name_col_candidates=("ETF",),
+        target_yyyymmdd=end_used,
+    )
+    end_active_df = end_active_df[end_active_df["官方主分類"] == "主動式ETF"].copy()
+    if not end_active_df.empty:
+        end_active_df = end_active_df.rename(columns={"代碼": "code", "ETF": "name"})
     if end_active_df.empty and not symbols:
         return pd.DataFrame(), start_used, end_used
 
@@ -6945,7 +7562,14 @@ def _build_tw_active_etf_ytd_between(
     out["YTD報酬(%)"] = pd.to_numeric(out["YTD報酬(%)"], errors="coerce").round(2)
     out["開盤"] = pd.to_numeric(out["開盤"], errors="coerce").round(2)
     out["收盤"] = pd.to_numeric(out["收盤"], errors="coerce").round(2)
+    out = _attach_tw_etf_official_category_columns(
+        out,
+        code_col_candidates=("代碼",),
+        name_col_candidates=("ETF",),
+        target_yyyymmdd=end_used,
+    )
     out = _attach_tw_etf_management_fee_column(out, code_col_candidates=("代碼",))
+    out = out[[col for col in out.columns if col not in {"官方主分類", "官方次分類"}]]
     return out, start_used, end_used
 
 
@@ -7960,6 +8584,7 @@ def _decorate_tw_etf_top10_ytd_table(
     if underperform_label and underperform_label != excess_col_label:
         benchmark_row[underperform_label] = 0.0 if market_return_pct is not None else np.nan
     table_df = pd.concat([pd.DataFrame([benchmark_row]), etf_df], ignore_index=True)
+    table_df = _attach_tw_etf_official_category_columns(table_df, code_col_candidates=("代碼",))
     table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
     if "排名" in table_df.columns:
         table_df["排名"] = table_df["排名"].map(lambda v: str(v) if pd.notna(v) else "")
@@ -8081,6 +8706,12 @@ def _build_tw_etf_all_types_performance_table(
     table_df = _append_missing_tw_etf_rows_from_aum_snapshot(
         table_df,
         snapshot_info=aum_snapshot_info,
+    )
+    table_df = _attach_tw_etf_official_category_columns(
+        table_df,
+        code_col_candidates=("代碼",),
+        name_col_candidates=("ETF",),
+        target_yyyymmdd=ytd_end_used,
     )
     table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
     code_sort_text = (
@@ -8251,6 +8882,12 @@ def _build_tw_etf_daily_market_overview(
             latest[column] = _truncate_series(latest[column], digits=2)
     latest["成交股數"] = _truncate_integer_series(latest["成交股數"])
     latest["成交筆數"] = _truncate_integer_series(latest["成交筆數"])
+    latest = _attach_tw_etf_official_category_columns(
+        latest,
+        code_col_candidates=("代碼",),
+        name_col_candidates=("ETF",),
+        target_yyyymmdd=last_trade_date.strftime("%Y%m%d"),
+    )
 
     out = latest[
         [
@@ -8413,6 +9050,12 @@ def _build_tw_etf_margin_overview(
     for column in ["融資使用率(%)", "融券使用率(%)", "券資比(%)"]:
         if column in latest.columns:
             latest[column] = _truncate_series(latest[column], digits=2)
+    latest = _attach_tw_etf_official_category_columns(
+        latest,
+        code_col_candidates=("代碼",),
+        name_col_candidates=("ETF",),
+        target_yyyymmdd=last_trade_date.strftime("%Y%m%d"),
+    )
 
     out = latest[
         [
@@ -8521,6 +9164,12 @@ def _build_tw_etf_mis_overview(
     ]:
         if column in latest.columns:
             latest[column] = _truncate_series(latest[column], digits=2)
+    latest = _attach_tw_etf_official_category_columns(
+        latest,
+        code_col_candidates=("代碼",),
+        name_col_candidates=("ETF",),
+        target_yyyymmdd=last_trade_date.strftime("%Y%m%d"),
+    )
 
     out = latest[
         [
@@ -8655,6 +9304,12 @@ def _build_tw_etf_three_investors_overview(
     filtered["資料日期"] = filtered["資料日期"].dt.strftime("%Y-%m-%d").fillna("—")
     if top_n > 0:
         filtered = filtered.head(max(1, int(top_n))).copy()
+    filtered = _attach_tw_etf_official_category_columns(
+        filtered,
+        code_col_candidates=("代碼",),
+        name_col_candidates=("ETF",),
+        target_yyyymmdd=str(used_trade_token),
+    )
 
     out = filtered[
         [
@@ -9539,8 +10194,9 @@ def _render_tw_etf_top10_page(
         m1.metric(count_label, str(len(top10)))
         m2.metric("母體檔數（可比較）", str(universe_count))
         m3.metric(ratio_label, top10_ratio_text)
-        m4.metric("市值型", str(int((top10_display["類型"] == "市值型").sum())))
-        m5.metric("股利型", str(int((top10_display["類型"] == "股利型").sum())))
+        type_series = top10_display.get("類型", pd.Series(dtype=str)).astype(str)
+        m4.metric("市值型", str(int((type_series == "市值型").sum())))
+        m5.metric("科技型", str(int((type_series == "科技型").sum())))
         m6.metric("今日上漲檔數", str(int((top10_display["今日漲幅"] > 0).sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
@@ -9575,9 +10231,7 @@ def _render_tw_etf_top10_page(
         st.markdown(
             "\n".join(
                 [
-                    "- `代碼白名單`：優先以 ETF 代碼套用穩定分類（市值/股利/科技/金融/ESG/主題/海外/平衡/收益/主動）。",
-                    "- `名稱關鍵字`：若未命中白名單，再以名稱關鍵字補判（高股息/科技/ESG/金融/主動等）。",
-                    "- `其他`：未命中上述關鍵字分類。",
+                    "- `類型`：優先用 TWSE `主題/因子` 推導語意分類（如 `科技型`、`股利型`、`市值型`），不足時再回退既有名稱/代碼規則。",
                 ]
             )
         )
@@ -9585,12 +10239,12 @@ def _render_tw_etf_top10_page(
 
 def _render_top10_etf_2025_view():
     _render_top10_etf_2026_ytd_view(
-        page_title="2026 年截至今日前十大股利型、配息型 ETF（台股）",
+        page_title="2026 年截至今日前十大高股息主題 ETF（台股）",
         page_key_prefix="top10_dividend_etf_ytd",
         etf_type_filter="股利型",
-        card_subject_label="前十大股利型、配息型 ETF",
-        strategy_label="前十大股利型ETF等權",
-        empty_warning_text="目前沒有可顯示的股利型、配息型 ETF 排行資料。",
+        card_subject_label="前十大高股息主題 ETF",
+        strategy_label="前十大高股息主題ETF等權",
+        empty_warning_text="目前沒有可顯示的高股息主題 ETF 排行資料。",
     )
 
 
@@ -9600,7 +10254,7 @@ def _render_tw_etf_all_types_view():
 
     title_col, refresh_col, full_refresh_col, quick_export_col = st.columns([4, 1, 1, 1.35])
     with title_col:
-        st.subheader("台股 ETF 全類型總表（2025 / 2026 YTD）")
+        st.subheader("台股 ETF 全類型總表（TWSE 官方分類，2025 / 2026 YTD）")
     with refresh_col:
         refresh_market = st.button(
             "更新最新市況",
@@ -9650,8 +10304,8 @@ def _render_tw_etf_all_types_view():
         m2.metric("母體檔數（可比較）", str(universe_count))
         m3.metric("類型數", str(int(type_series.nunique(dropna=True))))
         m4.metric("市值型", str(int((type_series == "市值型").sum())))
-        m5.metric("股利型", str(int((type_series == "股利型").sum())))
-        m6.metric("主動式", str(int((type_series == "主動式").sum())))
+        m5.metric("科技型", str(int((type_series == "科技型").sum())))
+        m6.metric("股利型", str(int((type_series == "股利型").sum())))
 
         ytd_start_used = str(meta.get("ytd_start_used", "")).strip()
         ytd_end_used = str(meta.get("ytd_end_used", "")).strip()
@@ -9703,7 +10357,7 @@ def _render_tw_etf_all_types_view():
             _render_sync_issues(
                 "大盤資料同步有部分錯誤，已盡量使用本地可用資料", issues, preview_limit=2
             )
-        st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）；已納入所有 ETF 類型。")
+        st.caption("資料來源：TWSE MI_INDEX（上市全市場快照）+ TWSE ETF e添富官方 `證券類別 / 主題因子`。")
         st.caption(
             "欄位定義：`開盤/收盤` 為最近交易日同日價格，`昨收` 為前一交易日收盤；`今日漲幅 = (收盤/昨收 - 1)`。"
         )
@@ -9756,6 +10410,7 @@ def _render_tw_etf_all_types_view():
             disable_backtest_drilldown=True,
         )
         st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
+        st.caption("分類欄位說明：`類型` 為語意分類，優先參考 TWSE 官方 `主題/因子`。")
 
         st.markdown("#### 官方 ETF 日成交總表")
         daily_market_refresh = st.button(
@@ -10749,13 +11404,34 @@ def _render_top10_etf_2026_ytd_view(
         m1.metric(count_label, str(len(top10_etf_df)))
         m2.metric("母體檔數（可比較）", str(universe_count))
         m3.metric(ratio_label, top10_ratio_text)
-        type_series = top10_etf_df.get("類型", pd.Series(dtype=str))
+        type_series = top10_etf_df.get("類型", pd.Series(dtype=str)).astype(str)
+        official_secondary_series = top10_etf_df.get("官方次分類", pd.Series(dtype=str)).astype(
+            str
+        )
         if etf_type_filter_text == "股利型":
-            m4.metric("股利/配息型", str(int((type_series == "股利型").sum())))
-            m5.metric("非股利型", str(int((type_series != "股利型").sum())))
+            m4.metric(
+                "高股息",
+                str(
+                    int(
+                        official_secondary_series.map(
+                            lambda value: _official_secondary_contains_any(value, ("高股息",))
+                        ).sum()
+                    )
+                ),
+            )
+            m5.metric(
+                "高息低波動",
+                str(
+                    int(
+                        official_secondary_series.map(
+                            lambda value: _official_secondary_contains_any(value, ("高息低波動",))
+                        ).sum()
+                    )
+                ),
+            )
         else:
             m4.metric("市值型", str(int((type_series == "市值型").sum())))
-            m5.metric("股利型", str(int((type_series == "股利型").sum())))
+            m5.metric("科技型", str(int((type_series == "科技型").sum())))
         m6.metric("今日上漲檔數", str(int((top10_today_df["今日漲幅"] > 0).sum())))
         snapshot_health = _build_snapshot_health(
             start_used=start_used,
@@ -10803,7 +11479,7 @@ def _render_top10_etf_2026_ytd_view(
             st.caption(f"同日價格基準日：{daily_price_used or daily_end_used}")
         if etf_type_filter_text:
             st.caption(
-                "篩選條件：僅納入 `股利型`（名稱含高股息/股利/股息/收益/配息/月配/季配/年配）ETF。"
+                "篩選條件：僅納入 TWSE 官方 `主題/因子` 含 `高股息` 或 `高息低波動` 的 ETF。"
             )
         if exclude_split_event:
             st.caption("區間處理：已排除區間內含分割事件的標的（避免價格比較失真）。")
@@ -10908,9 +11584,7 @@ def _render_top10_etf_2026_ytd_view(
         st.markdown(
             "\n".join(
                 [
-                    "- `代碼白名單`：優先以 ETF 代碼套用穩定分類（市值/股利/科技/金融/ESG/主題/海外/平衡/收益/主動）。",
-                    "- `名稱關鍵字`：若未命中白名單，再以名稱關鍵字補判（高股息/科技/ESG/金融/主動等）。",
-                    "- `其他`：未命中上述關鍵字分類。",
+                    "- `類型`：優先用 TWSE `主題/因子` 推導語意分類（如 `科技型`、`股利型`、`市值型`），不足時再回退既有名稱/代碼規則。",
                 ]
             )
         )
@@ -11590,6 +12264,7 @@ def _render_active_etf_2026_ytd_view():
             "排名": "—",
             "代碼": "^TWII",
             "ETF": "台股大盤",
+            "類型": "大盤",
             "開盤": np.nan,
             "昨收": np.nan,
             "收盤": np.nan,
@@ -11651,6 +12326,12 @@ def _render_active_etf_2026_ytd_view():
             open_price=market_open,
             close_price=market_close,
         )
+        table_df = _attach_tw_etf_official_category_columns(
+            table_df,
+            code_col_candidates=("代碼",),
+            name_col_candidates=("ETF",),
+            target_yyyymmdd=end_used,
+        )
         table_df = _attach_tw_etf_management_fee_column(table_df, code_col_candidates=("代碼",))
         if "排名" in table_df.columns:
             table_df["排名"] = table_df["排名"].map(lambda v: str(v) if pd.notna(v) else "")
@@ -11660,6 +12341,7 @@ def _render_active_etf_2026_ytd_view():
             "ETF",
             "管理費(%)",
             "ETF規模(億)",
+            "類型",
             "昨收",
             "開盤",
             "收盤",
@@ -11706,7 +12388,7 @@ def _render_active_etf_2026_ytd_view():
         if market_issues:
             _render_sync_issues("更新大盤資料時有部分同步錯誤", market_issues, preview_limit=2)
         st.caption(
-            "資料來源：TWSE MI_INDEX（上市全市場快照）。主動式規則：代碼結尾 A 且名稱含「主動」。"
+            "資料來源：TWSE MI_INDEX（上市全市場快照）+ TWSE ETF e添富官方 `證券類別 / 主題因子`。"
         )
         st.caption(
             "欄位定義：`開盤/收盤` 為最近交易日同日價格，`昨收` 為前一交易日收盤；`今日漲幅 = (收盤/昨收 - 1)`。"
@@ -11719,6 +12401,7 @@ def _render_active_etf_2026_ytd_view():
         st.caption(
             "報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`大盤超額(%) = YTD績效 - 大盤報酬`。"
         )
+        st.caption("主動式篩選：僅納入 TWSE 官方 `證券類別 = 主動式ETF` 的標的。")
         table_drilldown_enabled = _render_table_drilldown_toggle_inline(
             scope="active_etf_ytd_main",
             label="主動式排行表點擊導流",
@@ -12639,7 +13322,7 @@ def _render_tutorial_view():
             },
             {
                 "分頁": "2026 YTD 前十大股利型、配息型 ETF",
-                "你會看到什麼": "2026 年迄今股利/配息型 Top10、2025 對照、大盤勝負、Benchmark 對照卡",
+                "你會看到什麼": "2026 年迄今高股息主題 Top10、2025 對照、大盤勝負、Benchmark 對照卡",
                 "什麼時候用": "看今年高股息族群領先 ETF",
             },
             {
@@ -12649,7 +13332,7 @@ def _render_tutorial_view():
             },
             {
                 "分頁": "台股 ETF 全類型總表",
-                "你會看到什麼": "台股 ETF 全名單、類型分類、2025/2026YTD 與大盤勝負",
+                "你會看到什麼": "台股 ETF 全名單、TWSE 官方分類、2025/2026YTD 與大盤勝負",
                 "什麼時候用": "一次盤點全市場 ETF 的跨年度相對強弱",
             },
             {
@@ -12722,7 +13405,7 @@ def _render_tutorial_view():
             [
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
-                "3. 再到 `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
+                "3. 再到 `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較；其中高股息頁與全類型頁已採 TWSE 官方分類，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
                 "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00735 / 0050 / 0052 熱力圖`。",
                 "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
             ]
@@ -13021,7 +13704,7 @@ def _render_tutorial_view():
             [
                 "1. 先在 `回測工作台` 用 `buy_hold` 跑單檔，確認資料與報表都正常。",
                 "2. 再改成 `sma_trend_filter` 或 `donchian_breakout`，比較是否優於 `buy_hold`。",
-                "3. 接著用 `2026 YTD 前十大 ETF` + `2026 YTD 前十大股利型、配息型 ETF` + `台股 ETF 全類型總表` + `2025 後20大最差勁 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合。",
+                "3. 接著用 `2026 YTD 前十大 ETF` + `2026 YTD 前十大股利型、配息型 ETF` + `台股 ETF 全類型總表` + `2025 後20大最差勁 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合；高股息與主動式頁面都已採 TWSE 官方分類母體。",
                 "4. 最後才進 `ETF 輪動策略`、`2026 YTD 主動式 ETF` 與各熱力圖做進階判讀。",
             ]
         )

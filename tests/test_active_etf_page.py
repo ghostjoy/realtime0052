@@ -17,10 +17,12 @@ from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
     DEFAULT_ACTIVE_PAGE,
+    TWSE_ETF_HIGH_DIVIDEND_TAGS,
     TW_ETF_AUM_HISTORY_MAX_DATE_COLS,
     _append_missing_tw_etf_rows_from_aum_snapshot,
     _apply_unified_benchmark_hover,
     _attach_rank_movement_columns,
+    _attach_tw_etf_official_category_columns,
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
     _auto_run_daily_incremental_refresh,
@@ -62,6 +64,7 @@ from app import (
     _decorate_tw_etf_aum_history_links,
     _decorate_tw_etf_name_heatmap_links,
     _decorate_tw_etf_top10_ytd_table,
+    _decode_tw_etf_official_profile_payload,
     _dynamic_heatmap_page_renderers,
     _extract_client_ip_from_headers,
     _fetch_twse_snapshot_with_fallback,
@@ -77,6 +80,7 @@ from app import (
     _load_tw_market_daily_return,
     _load_tw_market_return_between,
     _notebook_has_unsaved_changes_values,
+    _official_secondary_contains_any,
     _recent_twse_trading_days,
     _render_heatmap_constituent_intro_sections,
     _resolve_notebook_selected_id,
@@ -101,6 +105,51 @@ from ui.helpers import (
 
 
 class ActiveEtfPageTests(unittest.TestCase):
+    def setUp(self):
+        self._official_profile_patch = patch(
+            "app._load_tw_etf_official_profile_map",
+            side_effect=self._fake_official_profile_map,
+        )
+        self._official_profile_patch.start()
+
+    def tearDown(self):
+        self._official_profile_patch.stop()
+
+    @staticmethod
+    def _fake_official_profile_map(target_yyyymmdd: str = "") -> dict[str, dict[str, object]]:
+        del target_yyyymmdd
+        rows = {
+            "0050": ("台股ETF", "全市場指數"),
+            "0052": ("台股ETF", "科技主題型"),
+            "0056": ("台股ETF", "高股息"),
+            "00631L": ("股票槓反ETF", ""),
+            "00632R": ("股票槓反ETF", ""),
+            "00635U": ("期貨ETF", ""),
+            "00646": ("國外股票ETF", ""),
+            "00672L": ("期貨槓反ETF", ""),
+            "00680L": ("債券槓反ETF", ""),
+            "00858": ("國外股票ETF", "大型權值"),
+            "00910": ("國外股票ETF", "科技主題型"),
+            "00929": ("台股ETF", "高股息"),
+            "00935": ("台股ETF", "科技主題型"),
+            "00941": ("台股ETF", "全市場指數"),
+            "00980A": ("主動式ETF", "科技主題型"),
+            "00981A": ("主動式ETF", "高股息"),
+            "00981T": ("多資產ETF", ""),
+            "009817": ("國外股票ETF", "全市場指數"),
+            "00993A": ("主動式ETF", "高股息"),
+        }
+        return {
+            code: {
+                "code": code,
+                "official_main_type": main_type,
+                "official_secondary_type": secondary_type,
+                "security_category": main_type,
+                "theme_tags": [part for part in secondary_type.split("、") if part],
+            }
+            for code, (main_type, secondary_type) in rows.items()
+        }
+
     def test_default_active_page_is_tw_etf_summary(self):
         self.assertEqual(DEFAULT_ACTIVE_PAGE, "台股 ETF 全類型總表")
 
@@ -172,6 +221,8 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "編號": 1,
                     "代碼": "0050",
                     "ETF": "元大台灣50",
+                    "官方主分類": "台股ETF",
+                    "官方次分類": "全市場指數",
                     "類型": "市值型",
                     "YTD績效(%)": 12.34,
                     "今日漲幅": 1.23,
@@ -195,6 +246,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(str(out.iloc[0]["ETF"]), "台股大盤")
         self.assertEqual(str(out.iloc[1]["代碼"]), "0050")
         self.assertEqual(str(out.iloc[1]["編號"]), "1")
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
 
     def test_build_tw_etf_super_export_table_prefers_main_and_sanitizes_links(self):
         main = pd.DataFrame(
@@ -1637,6 +1690,62 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00995A"), "主動式")
         self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00999A"), "主動式")
 
+    def test_decode_tw_etf_official_profile_payload(self):
+        payload = {
+            "rows": [
+                {
+                    "code": "009817",
+                    "stock_name": "兆豐洲際半導體",
+                    "index_name": "半導體指數",
+                    "issuer": "兆豐投信",
+                    "listing_date": "2026-03-18",
+                    "manager_type": "Passive",
+                    "asset_types": ["Equity"],
+                    "reward_types": [],
+                    "theme_tags": ["全市場指數"],
+                    "security_category": "國外股票ETF",
+                    "official_main_type": "國外股票ETF",
+                    "official_secondary_type": "全市場指數",
+                    "profile_source": "official",
+                }
+            ]
+        }
+
+        out = _decode_tw_etf_official_profile_payload(payload)
+
+        self.assertEqual(str(out["009817"]["official_main_type"]), "國外股票ETF")
+        self.assertEqual(str(out["009817"]["official_secondary_type"]), "全市場指數")
+        self.assertEqual(list(out["009817"]["theme_tags"]), ["全市場指數"])
+
+    def test_official_secondary_contains_any(self):
+        self.assertTrue(_official_secondary_contains_any("高股息、低波動", ("高股息",)))
+        self.assertTrue(
+            _official_secondary_contains_any("高股息、高息低波動", TWSE_ETF_HIGH_DIVIDEND_TAGS)
+        )
+        self.assertFalse(_official_secondary_contains_any("科技主題型", TWSE_ETF_HIGH_DIVIDEND_TAGS))
+
+    def test_attach_tw_etf_official_category_columns_uses_official_labels(self):
+        frame = pd.DataFrame(
+            [
+                {"代碼": "00646", "ETF": "元大S&P500", "類型": "海外市場型"},
+                {"代碼": "00981A", "ETF": "主動統一台股增長", "類型": "主動式"},
+                {"代碼": "00631L", "ETF": "元大台灣50正2", "類型": "其他"},
+                {"代碼": "00680L", "ETF": "元大美債20正2", "類型": "其他"},
+                {"代碼": "00672L", "ETF": "元大S&P原油正2", "類型": "其他"},
+                {"代碼": "00635U", "ETF": "元大S&P黃金", "類型": "其他"},
+            ]
+        )
+
+        out = _attach_tw_etf_official_category_columns(frame, code_col_candidates=("代碼",))
+
+        self.assertEqual(str(out.loc[out["代碼"] == "00646", "官方主分類"].iloc[0]), "國外股票ETF")
+        self.assertEqual(str(out.loc[out["代碼"] == "00981A", "官方主分類"].iloc[0]), "主動式ETF")
+        self.assertEqual(str(out.loc[out["代碼"] == "00631L", "類型"].iloc[0]), "股票槓反型")
+        self.assertEqual(str(out.loc[out["代碼"] == "00680L", "類型"].iloc[0]), "債券槓反型")
+        self.assertEqual(str(out.loc[out["代碼"] == "00672L", "類型"].iloc[0]), "期貨槓反型")
+        self.assertEqual(str(out.loc[out["代碼"] == "00635U", "官方主分類"].iloc[0]), "期貨ETF")
+        self.assertEqual(str(out.loc[out["代碼"] == "00981A", "類型"].iloc[0]), "主動式")
+
     def test_build_symbol_line_styles_assigns_distinct_colors(self):
         symbols = [f"00{i:03d}A" for i in range(1, 11)]
         style_map = _build_symbol_line_styles(symbols)
@@ -1774,6 +1883,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(out.iloc[1]["YTD報酬(%)"]), 20.0)
         self.assertEqual(float(out.iloc[2]["YTD報酬(%)"]), -10.0)
         self.assertNotIn("00935", list(out["代碼"]))
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
 
     def test_build_tw_etf_top10_between_returns_universe_count(self):
         _build_tw_etf_top10_between.clear()
@@ -1821,6 +1932,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(universe_count, 3)
         self.assertEqual(len(out), 3)
         self.assertEqual(list(out["代碼"]), ["0050", "0056", "00935"])
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
 
     def test_build_tw_etf_top10_between_includes_newly_listed_etf(self):
         _build_tw_etf_top10_between.clear()
@@ -1949,6 +2062,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(universe_count, 2)
         self.assertEqual(list(out["代碼"]), ["00929", "0056"])
         self.assertTrue((out["類型"] == "股利型").all())
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
 
     def test_build_tw_etf_top10_between_bottom_n(self):
         _build_tw_etf_top10_between.clear()
@@ -2478,6 +2593,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("2025績效(%)", out.columns)
         self.assertIn("YTD績效(%)", out.columns)
         self.assertIn("大盤超額(%)", out.columns)
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
 
     def test_build_tw_etf_all_types_performance_table(self):
         _build_tw_etf_all_types_performance_table.clear()
@@ -2585,6 +2702,8 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertIn("大盤超額2025(%)", out.columns)
         self.assertIn("大盤超額YTD(%)", out.columns)
         self.assertIn("管理費(%)", out.columns)
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
         self.assertIn("開盤", out.columns)
         self.assertIn("昨收", out.columns)
         self.assertIn("收盤", out.columns)
@@ -2726,6 +2845,8 @@ class ActiveEtfPageTests(unittest.TestCase):
 
         self.assertEqual(list(out["代碼"]), ["0050", "0056", "00935"])
         self.assertEqual(list(out["編號"]), [1, 2, 3])
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "收盤"].iloc[0]), 76.5)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "日報酬(%)"].iloc[0]), 1.32)
         self.assertEqual(str(meta.get("last_trade_date", "")), "2026-03-06")
@@ -2795,6 +2916,8 @@ class ActiveEtfPageTests(unittest.TestCase):
 
         self.assertEqual(list(out["代碼"]), ["0050", "0056", "00935"])
         self.assertEqual(list(out["編號"]), [1, 2, 3])
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "預估NAV"].iloc[0]), 181.62)
         self.assertEqual(float(out.loc[out["代碼"] == "0050", "已發行單位(萬)"].iloc[0]), 135000.0)
         self.assertEqual(float(out.loc[out["代碼"] == "00935", "折溢價(%)"].iloc[0]), 2.89)
@@ -2862,6 +2985,8 @@ class ActiveEtfPageTests(unittest.TestCase):
 
         self.assertEqual(list(out["代碼"]), ["0050", "00935"])
         self.assertEqual(list(out["編號"]), [1, 2])
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
         row_0050 = out.loc[out["代碼"] == "0050"].iloc[0]
         row_00935 = out.loc[out["代碼"] == "00935"].iloc[0]
         self.assertEqual(int(row_0050["融資淨變動(張)"]), -123)
@@ -2923,6 +3048,8 @@ class ActiveEtfPageTests(unittest.TestCase):
 
         self.assertEqual(list(out["代碼"]), ["0050"])
         self.assertEqual(str(out.loc[0, "資料日期"]), "2026-03-10")
+        self.assertNotIn("官方主分類", out.columns)
+        self.assertNotIn("官方次分類", out.columns)
         self.assertEqual(float(out.loc[0, "外資買進(張)"]), 7260.3)
         self.assertEqual(float(out.loc[0, "投信淨買賣超(張)"]), 3214.0)
         self.assertEqual(float(out.loc[0, "三大法人合計淨買賣超(張)"]), -120452.27)
