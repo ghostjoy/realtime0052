@@ -121,6 +121,7 @@ uv run realtime0052 sync-twse-etf-daily --start 2026-03-01 --end 2026-03-08
 uv run realtime0052 sync-twse-etf-mis
 uv run realtime0052 export-tw-etf-super-table --out ./tw_etf_super_export_latest.csv
 uv run realtime0052 backtest --symbol 0050 --market TW --strategy buy_hold
+uv run realtime0052 chart-backtest --symbols 0050 --layout single --start 2024-01-01 --end 2026-03-20
 uv run realtime0052 bootstrap --scope both --years 5
 ```
 
@@ -128,6 +129,56 @@ uv run realtime0052 bootstrap --scope both --years 5
 - `export-tw-etf-super-table` 適合放進 `crontab`：會先同步主總表來源 + 官方 ETF 日成交 + 官方 ETF 融資融券 + 官方 MIS + 官方三大法人快取 + `基金規模追蹤`，再輸出 CSV，並把該次匯出摘要寫入 DuckDB `tw_etf_super_export_runs`。
 - 超級大表 CSV 會額外帶入基金規模最近 `10` 個交易日原始欄位，以及 `1 / 5 / 10` 日規模變化摘要，方便直接看資金流入流出。
 - `台股 ETF 全類型總表` 頁面上的官方日成交 / 融資融券 / MIS / 三大法人 / `基金規模追蹤` 區塊都讀本地快取，所以 `crontab` 跑完後，網頁下次開啟或重整時也會看到更新後的資料。
+
+#### CLI `--help` 與圖表匯出
+
+- 除 `serve` 以外，其他 CLI 都可以在沒有先啟動 `uv run streamlit run app.py` 的情況下獨立使用。
+- 既有 CLI 都可直接看 `--help`：
+  - `uv run realtime0052 --help`
+  - `uv run realtime0052 export-tw-etf-super-table --help`
+  - `uv run realtime0052 backtest --help`
+  - `uv run realtime0052 chart-backtest --help`
+- 各指令的獨立 markdown 文件在 [`docs/cli/README.md`](./docs/cli/README.md)
+- `chart-backtest` 會輸出 `PNG`，適合圖表、文件與 AI workflow。
+- `single`：單一標的，預設輸出一張乾淨版 `K線 + Equity + Benchmark` 圖；若要接近回放參考圖，可加 `--reference-annotations`。
+- `combined`：多標的同圖，改成單面板「Benchmark 虛線 + 等權策略線 + 各標的 Buy and Hold 線」的相對倍數比較圖。
+- `combined` 可用 `--include-ew-portfolio` 額外加上 EW portfolio 線；預設不顯示。
+- `split`：多標的輸入但逐檔各輸出一張 `PNG`。
+- 所有模式都固定疊 Benchmark 虛線；台股預設 `^TWII`，美股預設 `^GSPC`，並沿用現有 fallback 邏輯。
+
+```bash
+# 單一標的
+uv run realtime0052 chart-backtest \
+  --symbols 0050 \
+  --layout single \
+  --start 2024-01-01 \
+  --end 2026-03-20
+
+# 單一標的，開啟參考圖標註
+uv run realtime0052 chart-backtest \
+  --symbols 0050 \
+  --layout single \
+  --reference-annotations \
+  --start 2024-01-01 \
+  --end 2026-03-20
+
+# 多標的同圖
+uv run realtime0052 chart-backtest \
+  --symbols 0050,0052,006208 \
+  --layout combined \
+  --market TW \
+  --start 2024-01-01 \
+  --end 2026-03-20
+
+# 多標的個別輸出
+uv run realtime0052 chart-backtest \
+  --symbols 0050,SPY \
+  --layout split \
+  --market auto \
+  --start 2024-01-01 \
+  --end 2026-03-20 \
+  --out-dir ./artifacts/charts
+```
 
 #### `crontab` 範例：每日匯出超級大表
 

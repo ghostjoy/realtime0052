@@ -19,6 +19,13 @@ from services.backtest_runner import (
     parse_symbols,
 )
 from services.bootstrap_loader import run_market_data_bootstrap
+from services.chart_export import (
+    DEFAULT_CHART_THEME,
+    SUPPORTED_CHART_LAYOUTS,
+    SUPPORTED_CHART_STRATEGIES,
+    SUPPORTED_CHART_THEMES,
+    export_backtest_chart_artifact,
+)
 from services.sync_orchestrator import normalize_symbols, sync_symbols_if_needed
 from services.tw_etf_daily_sync import sync_twse_etf_daily_market
 from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
@@ -94,9 +101,10 @@ def cli() -> None:
     type=click.Choice(["backfill", "min_rows", "all"], case_sensitive=False),
     default="backfill",
     show_default=True,
+    help="backfill=補區間, min_rows=補到最少資料列數, all=強制全跑",
 )
-@click.option("--min-rows", default=120, type=int, show_default=True)
-@click.option("--max-workers", default=6, type=int, show_default=True)
+@click.option("--min-rows", default=120, type=int, show_default=True, help="Min rows target for min_rows mode")
+@click.option("--max-workers", default=6, type=int, show_default=True, help="Parallel workers")
 def sync(
     symbols_text: str | None,
     market_text: str,
@@ -105,7 +113,13 @@ def sync(
     min_rows: int,
     max_workers: int,
 ) -> None:
-    """Sync historical bars for symbols."""
+    """Sync historical bars for symbols.
+
+    Examples:
+      uv run realtime0052 sync --help
+      uv run realtime0052 sync --market TW --symbols 0050,0052 --days 60
+      uv run realtime0052 sync --market US --symbols SPY,QQQ --days 120 --mode min_rows --min-rows 250
+    """
     store = _resolve_store()
     market = _normalize_market(market_text)
     symbols = parse_symbols(symbols_text or "")
@@ -146,7 +160,7 @@ def sync(
 @cli.command()
 @click.option("--start", help="Start date (YYYY-MM-DD)")
 @click.option("--end", help="End date (YYYY-MM-DD)")
-@click.option("--lookback-days", default=7, type=int, show_default=True)
+@click.option("--lookback-days", default=7, type=int, show_default=True, help="Fallback lookback window when start/end not provided")
 @click.option("--force", is_flag=True, default=False, help="Re-fetch covered dates")
 def sync_twse_etf_daily(
     start: str | None,
@@ -154,7 +168,13 @@ def sync_twse_etf_daily(
     lookback_days: int,
     force: bool,
 ) -> None:
-    """Sync TWSE ETF official daily market snapshot."""
+    """Sync TWSE ETF official daily market snapshot.
+
+    Examples:
+      uv run realtime0052 sync-twse-etf-daily --help
+      uv run realtime0052 sync-twse-etf-daily --lookback-days 5
+      uv run realtime0052 sync-twse-etf-daily --start 2026-03-01 --end 2026-03-20 --force
+    """
     store = _resolve_store()
     summary = sync_twse_etf_daily_market(
         store=store,
@@ -190,7 +210,13 @@ def sync_twse_etf_mis(
     end: str | None,
     force: bool,
 ) -> None:
-    """Sync TWSE MIS ETF indicator snapshot."""
+    """Sync TWSE MIS ETF indicator snapshot.
+
+    Examples:
+      uv run realtime0052 sync-twse-etf-mis --help
+      uv run realtime0052 sync-twse-etf-mis
+      uv run realtime0052 sync-twse-etf-mis --start 2026-03-01 --end 2026-03-20
+    """
     store = _resolve_store()
     summary = sync_twse_etf_mis_daily(
         store=store,
@@ -235,7 +261,12 @@ def export_tw_etf_super_table(
     daily_lookback_days: int,
     force: bool,
 ) -> None:
-    """Sync sources and export TW ETF super table CSV."""
+    """Sync sources and export the TW ETF super table CSV.
+
+    Examples:
+      uv run realtime0052 export-tw-etf-super-table --help
+      uv run realtime0052 export-tw-etf-super-table --out ./tw_etf_super_export_latest.csv
+    """
     store = _resolve_store()
     result = export_tw_etf_super_table_artifact(
         store=store,
@@ -315,7 +346,12 @@ def backtest(
     no_split_adjustment: bool,
     no_total_return_adjustment: bool,
 ) -> None:
-    """Run backtest and print metrics."""
+    """Run backtest and print core metrics.
+
+    Examples:
+      uv run realtime0052 backtest --help
+      uv run realtime0052 backtest --symbol 0050 --market TW --strategy buy_hold
+    """
     store = _resolve_store()
     symbols = normalize_symbols(parse_symbols(symbol))
     if not symbols:
@@ -395,6 +431,213 @@ def backtest(
 
 
 @cli.command()
+@click.option("--symbols", required=True, help="Comma-separated symbols")
+@click.option(
+    "--layout",
+    type=click.Choice(list(SUPPORTED_CHART_LAYOUTS), case_sensitive=False),
+    default="single",
+    show_default=True,
+    help="single=單一標的單張圖, combined=多標的同圖, split=逐檔各輸出一張",
+)
+@click.option("--market", default="auto", show_default=True, help="auto / TW / US")
+@click.option("--start", required=True, help="Start date (YYYY-MM-DD)")
+@click.option("--end", required=True, help="End date (YYYY-MM-DD)")
+@click.option(
+    "--strategy",
+    type=click.Choice(list(SUPPORTED_CHART_STRATEGIES), case_sensitive=False),
+    default="buy_hold",
+    show_default=True,
+    help="Backtest strategy used to build the chart",
+)
+@click.option("--benchmark", default="auto", show_default=True, help="Benchmark choice per market")
+@click.option("--initial-capital", default=1_000_000.0, type=float, show_default=True)
+@click.option("--fee-rate", type=float, default=None, help="Fee rate override")
+@click.option("--sell-tax", type=float, default=None, help="Sell tax override")
+@click.option("--slippage", type=float, default=None, help="Slippage override")
+@click.option(
+    "--sync-before-run/--no-sync-before-run",
+    default=True,
+    show_default=True,
+    help="Sync missing history before chart export",
+)
+@click.option(
+    "--theme",
+    type=click.Choice(list(SUPPORTED_CHART_THEMES), case_sensitive=False),
+    default=DEFAULT_CHART_THEME,
+    show_default=True,
+    help="Chart theme",
+)
+@click.option("--width", default=1600, type=int, show_default=True, help="PNG width")
+@click.option("--height", default=900, type=int, show_default=True, help="PNG height")
+@click.option("--scale", default=2, type=int, show_default=True, help="PNG scale")
+@click.option("--out", help="Output PNG path for single/combined layouts")
+@click.option("--out-dir", help="Output directory for generated PNG files")
+@click.option("--fast", type=int, default=None, help="Strategy param: fast")
+@click.option("--slow", type=int, default=None, help="Strategy param: slow")
+@click.option("--trend", type=int, default=None, help="Strategy param: trend")
+@click.option("--entry-n", type=int, default=None, help="Strategy param: entry_n")
+@click.option("--exit-n", type=int, default=None, help="Strategy param: exit_n")
+@click.option(
+    "--annotate-extrema",
+    is_flag=True,
+    default=False,
+    help="Single/split only: add highest/lowest price annotations like the reference chart",
+)
+@click.option(
+    "--show-signals",
+    is_flag=True,
+    default=False,
+    help="Single/split only: draw buy/sell signal markers on the price panel",
+)
+@click.option(
+    "--show-fills",
+    is_flag=True,
+    default=False,
+    help="Single/split only: draw buy/sell fill markers on the equity panel",
+)
+@click.option(
+    "--show-trade-path",
+    is_flag=True,
+    default=False,
+    help="Single/split only: connect each trade entry/exit on the equity panel",
+)
+@click.option(
+    "--show-end-marker",
+    is_flag=True,
+    default=False,
+    help="Add a vertical end marker near the right edge of the chart",
+)
+@click.option(
+    "--reference-annotations",
+    is_flag=True,
+    default=False,
+    help="Single/split only: enable extrema, signals, fills, trade path, and end marker together",
+)
+@click.option(
+    "--include-ew-portfolio/--no-include-ew-portfolio",
+    default=False,
+    show_default=True,
+    help="Combined only: include the EW portfolio strategy line on the comparison chart",
+)
+@click.option("--no-split-adjustment", is_flag=True, default=False)
+@click.option("--no-total-return-adjustment", is_flag=True, default=False)
+def chart_backtest(
+    symbols: str,
+    layout: str,
+    market: str,
+    start: str,
+    end: str,
+    strategy: str,
+    benchmark: str,
+    initial_capital: float,
+    fee_rate: float | None,
+    sell_tax: float | None,
+    slippage: float | None,
+    sync_before_run: bool,
+    theme: str,
+    width: int,
+    height: int,
+    scale: int,
+    out: str | None,
+    out_dir: str | None,
+    fast: int | None,
+    slow: int | None,
+    trend: int | None,
+    entry_n: int | None,
+    exit_n: int | None,
+    annotate_extrema: bool,
+    show_signals: bool,
+    show_fills: bool,
+    show_trade_path: bool,
+    show_end_marker: bool,
+    reference_annotations: bool,
+    include_ew_portfolio: bool,
+    no_split_adjustment: bool,
+    no_total_return_adjustment: bool,
+) -> None:
+    """Export backtest charts as PNG for AI workflows.
+
+    Examples:
+      uv run realtime0052 chart-backtest --help
+      uv run realtime0052 chart-backtest --symbols 0050 --layout single --start 2024-01-01 --end 2026-03-20
+      uv run realtime0052 chart-backtest --symbols 0050,0052,006208 --layout combined --start 2024-01-01 --end 2026-03-20
+      uv run realtime0052 chart-backtest --symbols 0050 --layout single --reference-annotations --start 2024-01-01 --end 2026-03-20
+      uv run realtime0052 chart-backtest --symbols 0050,SPY --layout split --market auto --start 2024-01-01 --end 2026-03-20 --out-dir ./artifacts/charts
+    """
+    store = _resolve_store()
+    symbol_list = normalize_symbols(parse_symbols(symbols))
+    if not symbol_list:
+        raise click.ClickException("No valid symbols provided")
+
+    start_dt = _parse_iso_datetime(start, default=datetime.now(tz=timezone.utc) - timedelta(days=365))
+    end_dt = _parse_iso_datetime(end, default=datetime.now(tz=timezone.utc))
+    if start_dt >= end_dt:
+        raise click.ClickException("start must be earlier than end")
+
+    try:
+        result = export_backtest_chart_artifact(
+            store=store,
+            symbols=symbol_list,
+            layout=str(layout).lower(),
+            market=market,
+            start=start_dt,
+            end=end_dt,
+            strategy=str(strategy).lower(),
+            benchmark_choice=benchmark,
+            initial_capital=float(initial_capital),
+            fee_rate=fee_rate,
+            sell_tax=sell_tax,
+            slippage=slippage,
+            sync_before_run=bool(sync_before_run),
+            use_split_adjustment=not no_split_adjustment,
+            use_total_return_adjustment=not no_total_return_adjustment,
+            theme=str(theme).lower(),
+            width=max(320, int(width)),
+            height=max(240, int(height)),
+            scale=max(1, int(scale)),
+            out=out,
+            out_dir=out_dir,
+            fast=fast,
+            slow=slow,
+            trend=trend,
+            entry_n=entry_n,
+            exit_n=exit_n,
+            annotate_extrema=bool(annotate_extrema),
+            show_signals=bool(show_signals),
+            show_fills=bool(show_fills),
+            show_trade_path=bool(show_trade_path),
+            show_end_marker=bool(show_end_marker),
+            reference_annotations=bool(reference_annotations),
+            include_ew_portfolio=bool(include_ew_portfolio),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        lowered = str(exc).lower()
+        if "kaleido" in lowered:
+            raise click.ClickException(
+                "PNG export requires the kaleido package. Run `uv sync` to install updated dependencies."
+            ) from exc
+        raise
+
+    click.echo(
+        "chart_backtest "
+        f"layout={result.get('layout')} "
+        f"format={result.get('format')} "
+        f"requested={int(result.get('requested_count') or 0)} "
+        f"exported={int(result.get('exported_count') or 0)}"
+    )
+    for item in result.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        click.echo(f"- {item.get('symbol')}: {item.get('path')}")
+    for issue in result.get("issues", [])[:10]:
+        click.echo(f"! {issue}")
+    if int(result.get("exported_count") or 0) <= 0:
+        raise click.ClickException("No chart exported")
+
+
+@cli.command()
 @click.option(
     "--scope",
     type=click.Choice(["tw", "us", "both"], case_sensitive=False),
@@ -411,7 +654,13 @@ def backtest(
 )
 @click.option("--min-rows", default=900, type=int, show_default=True)
 def bootstrap(scope: str, years: int, max_workers: int, sync_mode: str, min_rows: int) -> None:
-    """Bootstrap local market data."""
+    """Bootstrap local market data.
+
+    Examples:
+      uv run realtime0052 bootstrap --help
+      uv run realtime0052 bootstrap --scope tw --years 3
+      uv run realtime0052 bootstrap --scope both --years 5 --sync-mode min_rows --min-rows 900
+    """
     store = _resolve_store()
     summary = run_market_data_bootstrap(
         store=store,
@@ -443,7 +692,11 @@ def bootstrap(scope: str, years: int, max_workers: int, sync_mode: str, min_rows
 
 @cli.command()
 def info() -> None:
-    """Show basic runtime configuration."""
+    """Show basic runtime configuration.
+
+    Examples:
+      uv run realtime0052 info
+    """
     click.echo("=== Realtime0052 Info ===")
     click.echo(f"Config source: {get_config_source()}")
     click.echo(
@@ -459,7 +712,11 @@ def info() -> None:
 
 @cli.command()
 def serve() -> None:
-    """Start Streamlit app."""
+    """Start the Streamlit app locally.
+
+    Examples:
+      uv run realtime0052 serve
+    """
     import subprocess
     import sys
 

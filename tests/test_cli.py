@@ -154,6 +154,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("aum_track=synced(2026-03-10)/updated:132", result.output)
         self.assertIn("! daily_market: skipped holiday 2026-03-08", result.output)
 
+    def test_export_tw_etf_super_table_help_lists_options(self):
+        result = self.runner.invoke(cli.cli, ["export-tw-etf-super-table", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Sync sources and export the TW ETF super table CSV.", result.output)
+        self.assertIn("--daily-lookback-days", result.output)
+        self.assertIn("--force", result.output)
+
     @patch("cli._resolve_store")
     @patch("cli.sync_symbols_if_needed")
     @patch("cli.load_and_prepare_symbol_bars")
@@ -202,6 +210,78 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("total_return=10.00%", result.output)
         self.assertIn("sharpe=1.230", result.output)
+
+    def test_chart_backtest_help_lists_core_options(self):
+        result = self.runner.invoke(cli.cli, ["chart-backtest", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Export backtest charts as PNG for AI workflows.", result.output)
+        self.assertIn("--layout", result.output)
+        self.assertIn("--benchmark", result.output)
+        self.assertIn("--out-dir", result.output)
+        self.assertIn("--reference-annotations", result.output)
+        self.assertIn("--annotate-extrema", result.output)
+        self.assertIn("--include-ew-portfolio", result.output)
+
+    def test_every_command_help_exits_zero(self):
+        command_names = list(cli.cli.commands.keys())
+        for command_name in command_names:
+            with self.subTest(command=command_name):
+                result = self.runner.invoke(cli.cli, [command_name, "--help"])
+                self.assertEqual(result.exit_code, 0)
+
+    @patch("cli._resolve_store")
+    @patch("cli.export_backtest_chart_artifact")
+    def test_chart_backtest_invokes_export_service(self, export_mock, resolve_store_mock):
+        resolve_store_mock.return_value = object()
+        export_mock.return_value = {
+            "layout": "combined",
+            "format": "png",
+            "requested_count": 2,
+            "exported_count": 1,
+            "items": [{"symbol": "0050,0052", "path": "/tmp/chart.png"}],
+            "issues": [],
+        }
+
+        result = self.runner.invoke(
+            cli.cli,
+            [
+                "chart-backtest",
+                "--symbols",
+                "0050,0052",
+                "--layout",
+                "combined",
+                "--market",
+                "TW",
+                "--start",
+                "2025-01-01",
+                "--end",
+                "2025-07-31",
+                "--strategy",
+                "buy_hold",
+                "--benchmark",
+                "auto",
+                "--theme",
+                "soft-gray",
+                "--reference-annotations",
+                "--include-ew-portfolio",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        export_mock.assert_called_once()
+        kwargs = export_mock.call_args.kwargs
+        self.assertEqual(kwargs["symbols"], ["0050", "0052"])
+        self.assertEqual(kwargs["layout"], "combined")
+        self.assertEqual(kwargs["market"], "TW")
+        self.assertEqual(kwargs["strategy"], "buy_hold")
+        self.assertEqual(kwargs["benchmark_choice"], "auto")
+        self.assertEqual(kwargs["theme"], "soft-gray")
+        self.assertTrue(kwargs["reference_annotations"])
+        self.assertTrue(kwargs["include_ew_portfolio"])
+        self.assertFalse(kwargs["annotate_extrema"])
+        self.assertIn("format=png", result.output)
+        self.assertIn("/tmp/chart.png", result.output)
 
     @patch("cli._resolve_store")
     @patch("cli.run_market_data_bootstrap")

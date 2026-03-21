@@ -134,6 +134,64 @@ _to_rgba: Any = None
 _ui_palette: Any = None
 
 
+def _format_compact_equity_value(value: float) -> str:
+    amount = float(value)
+    abs_amount = abs(amount)
+    if abs_amount >= 1_000_000_000:
+        return f"{amount / 1_000_000_000:.6f}".rstrip("0").rstrip(".") + "B"
+    if abs_amount >= 1_000_000:
+        return f"{amount / 1_000_000:.6f}".rstrip("0").rstrip(".") + "M"
+    if abs_amount >= 1_000:
+        return f"{amount / 1_000:.6f}".rstrip("0").rstrip(".") + "K"
+    return f"{amount:,.0f}"
+
+
+def _add_equity_summary_annotation(
+    fig: go.Figure,
+    *,
+    equity_series: pd.Series,
+    benchmark_series: pd.Series,
+    palette: Mapping[str, Any],
+    x_paper: float = 1.01,
+    y_paper: float = 0.315,
+) -> None:
+    equity_clean = pd.to_numeric(equity_series, errors="coerce").dropna()
+    benchmark_clean = pd.to_numeric(benchmark_series, errors="coerce").dropna()
+    lines: list[str] = []
+    if not equity_clean.empty:
+        lines.append(
+            "<span style='color:"
+            f"{str(palette['equity'])}"
+            ";'><b>Equity</b></span>: "
+            f"{_format_compact_equity_value(float(equity_clean.iloc[-1]))}"
+        )
+    if not benchmark_clean.empty:
+        lines.append(
+            "<span style='color:"
+            f"{str(palette['benchmark'])}"
+            ";'><b>Benchmark Eq.</b></span>: "
+            f"{_format_compact_equity_value(float(benchmark_clean.iloc[-1]))}"
+        )
+    if not lines:
+        return
+    fig.add_annotation(
+        x=x_paper,
+        y=y_paper,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        showarrow=False,
+        text="<br>".join(lines),
+        font=dict(color=str(palette["text_color"]), size=15),
+        bgcolor=_to_rgba(str(palette["paper_bg"]), 0.94),
+        bordercolor=_to_rgba(str(palette["text_color"]), 0.25),
+        borderwidth=1,
+        borderpad=8,
+    )
+
+
 def configure_runtime(values: Mapping[str, Any]) -> None:
     configure_module_runtime(globals(), REQUIRED_RUNTIME_NAMES, values, module_name=__name__)
 
@@ -3373,6 +3431,17 @@ def _render_backtest_view():
             plot_bgcolor=str(palette["plot_bg"]),
             font=dict(color=str(palette["text_color"])),
         )
+        fig.update_yaxes(tickformat=",.0f", row=1, col=1)
+        fig.update_yaxes(tickformat="~s", row=2, col=1)
+        if not multi_symbol_compare:
+            _add_equity_summary_annotation(
+                fig,
+                equity_series=equity_now["equity"],
+                benchmark_series=benchmark_now,
+                palette=palette,
+                x_paper=1.01,
+                y_paper=0.315,
+            )
         edge_marker_x = _plotly_right_edge_marker_x(bars_now.index)
         if edge_marker_x is not None:
             fig.add_shape(

@@ -17,6 +17,7 @@
   - 主動式頁改依官方 `證券類別 = 主動式ETF` 篩選，不再使用代碼尾碼與名稱關鍵字規則
 - `台股 ETF 全類型總表` 與相關 ETF 總表不再顯示 `官方主分類 / 官方次分類` 欄位；官方分類改為僅作內部判斷與 `類型` 推導使用。
 - `超級大表 CSV` 新增基金規模最近 `10` 個交易日原始欄位，並補上 `1 / 5 / 10` 日規模變化摘要，方便直接比較資金流入流出。
+- 現有 CLI help 文案補強，`export-tw-etf-super-table --help` / `backtest --help` 會顯示更完整的用途與範例，較適合 AI 或排程直接調用。
 
 ### Fixed
 - 修正 `Streamlit` 重跑時 `config_loader.py` 重複初始化 `Hydra` 造成的 `GlobalHydra is already initialized` 啟動錯誤
@@ -32,6 +33,16 @@
   - 移除左欄 `改名` 與 `刪除` 按鈕，保留 `新增筆記`
 
 ### Added
+- 新增 `chart-backtest` CLI：
+  - 支援 `single / combined / split` 三種輸出模式
+  - 輸出統一為 `PNG`
+  - 所有模式都固定疊上 Benchmark 虛線
+  - `combined` 模式改為單面板「Benchmark 虛線 + 等權策略線 + 各標的 Buy and Hold 線」比較圖
+  - `single / split` 模式新增 `--reference-annotations` 與細項 flags，可輸出接近回放參考圖的標註版
+  - `single` 價格軸改為整數顯示，且 `single` / 回測工作台 Plotly 圖新增 `Equity / Benchmark Eq.` 最後值摘要框
+  - `combined` 新增 `--include-ew-portfolio` 開關，預設不顯示 EW portfolio 線，並調整為更高對比配色
+- `pyproject.toml` 新增 `kaleido` 依賴，供 Plotly 靜態輸出 `PNG`
+- 新增 `docs/cli/` 指令文件，逐一說明 `sync / export / backtest / chart-backtest / bootstrap / info / serve` 用法
 - `回測工作台` 新增歷史對齊的 `Chip` 分數與法人籌碼判讀：
   - 法人籌碼改為使用 `<= 回放日` 最近可得的歷史資料，不再用最新日資料解釋過去走勢
   - `指標判讀 / 波段結論 / 判斷表 / 打分數 / 股癌風格敘述` 全部納入籌碼資訊
