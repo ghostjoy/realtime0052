@@ -396,6 +396,7 @@ def _coalesce_tw_etf_super_export_columns(primary: pd.Series, fallback: pd.Serie
 def build_tw_etf_super_export_table(
     *,
     main_frame: pd.DataFrame,
+    aum_frame: pd.DataFrame | None = None,
     daily_market_frame: pd.DataFrame,
     margin_frame: pd.DataFrame | None = None,
     mis_frame: pd.DataFrame,
@@ -403,6 +404,7 @@ def build_tw_etf_super_export_table(
 ) -> pd.DataFrame:
     sources: list[tuple[str, pd.DataFrame]] = [
         ("main", main_frame),
+        ("aum", aum_frame),
         ("daily", daily_market_frame),
     ]
     if isinstance(margin_frame, pd.DataFrame):
@@ -537,11 +539,13 @@ def export_tw_etf_super_table_artifact(
 ) -> dict[str, object]:
     app_module = _load_app_module()
     build_performance_table = app_module._build_tw_etf_all_types_performance_table
+    build_aum_export_frame = getattr(app_module, "_build_tw_etf_aum_export_frame", None)
     build_daily_market_overview = app_module._build_tw_etf_daily_market_overview
     build_margin_overview = app_module._build_tw_etf_margin_overview
     build_mis_overview = app_module._build_tw_etf_mis_overview
     build_three_investors_overview = app_module._build_tw_etf_three_investors_overview
     resolve_latest_trade_day_token = app_module._resolve_latest_tw_trade_day_token
+    load_aum_snapshot_info = getattr(app_module, "_load_tw_etf_aum_snapshot_info", None)
     periods = resolve_tw_etf_super_export_periods(
         ytd_start=ytd_start,
         ytd_end=ytd_end,
@@ -598,9 +602,39 @@ def export_tw_etf_super_table_artifact(
         top_n=0,
         target_trade_date=target_trade_token,
     )
+    aum_snapshot_info = (
+        _call_app_quiet(load_aum_snapshot_info, target_trade_token)
+        if callable(load_aum_snapshot_info)
+        else {}
+    )
+    history_codes = tuple(
+        sorted(
+            {
+                str(code).strip().upper()
+                for code in etf_codes
+                if str(code).strip() and not str(code).strip().startswith("^")
+            }
+            | {
+                str(code).strip().upper()
+                for code in getattr(aum_snapshot_info, "keys", lambda: [])()
+                if str(code).strip()
+            }
+        )
+    )
+    aum_history_df = (
+        store.load_tw_etf_aum_history(etf_codes=history_codes, keep_days=0)
+        if history_codes and hasattr(store, "load_tw_etf_aum_history")
+        else pd.DataFrame()
+    )
+    aum_frame = (
+        _call_app_quiet(build_aum_export_frame, aum_history_df)
+        if callable(build_aum_export_frame)
+        else pd.DataFrame()
+    )
     main_frame = build_tw_etf_all_types_main_export_frame(table_df=table_df, meta=main_meta)
     super_export_df = build_tw_etf_super_export_table(
         main_frame=main_frame,
+        aum_frame=aum_frame,
         daily_market_frame=daily_market_df,
         margin_frame=margin_df,
         mis_frame=mis_df,
@@ -619,6 +653,7 @@ def export_tw_etf_super_table_artifact(
         "frame": _frame_payload(super_export_df),
         "refresh_summary": refresh_summary,
         "main_meta": dict(main_meta or {}),
+        "aum_column_count": int(len(aum_frame.columns)) if isinstance(aum_frame, pd.DataFrame) else 0,
         "daily_market_meta": dict(daily_market_meta or {}),
         "margin_meta": dict(margin_meta or {}),
         "mis_meta": dict(mis_meta or {}),

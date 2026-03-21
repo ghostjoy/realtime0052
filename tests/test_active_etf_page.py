@@ -39,6 +39,7 @@ from app import (
     _build_tw_active_etf_ytd_between,
     _build_tw_etf_all_types_main_table_view,
     _build_tw_etf_all_types_performance_table,
+    _build_tw_etf_aum_export_frame,
     _build_tw_etf_aum_history_wide,
     _build_tw_etf_aum_rows_from_snapshot_info,
     _build_tw_etf_daily_market_overview,
@@ -323,9 +324,23 @@ class ActiveEtfPageTests(unittest.TestCase):
                 }
             ]
         )
+        aum = pd.DataFrame(
+            [
+                {
+                    "代碼": "0050",
+                    "ETF": "元大台灣50",
+                    "基金規模最新(億)": 12491,
+                    "基金規模1日變化(億)": 120.0,
+                    "基金規模1日變化(%)": 0.97,
+                    "基金規模_2026-03-06(億)": 12371,
+                    "基金規模_2026-03-07(億)": 12491,
+                }
+            ]
+        )
 
         out = _build_tw_etf_super_export_table(
             main_frame=main,
+            aum_frame=aum,
             daily_market_frame=daily,
             margin_frame=margin,
             mis_frame=mis,
@@ -344,6 +359,9 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(float(row_0050["融資今日餘額"]), 12630.0)
         self.assertEqual(float(row_0050["融券今日餘額"]), 812.0)
         self.assertEqual(float(row_0050["券資比(%)"]), 6.42)
+        self.assertEqual(float(row_0050["基金規模1日變化(億)"]), 120.0)
+        self.assertEqual(float(row_0050["基金規模1日變化(%)"]), 0.97)
+        self.assertEqual(float(row_0050["基金規模_2026-03-07(億)"]), 12491.0)
         self.assertEqual(str(row_0050["ETF"]), "元大台灣50")
         self.assertEqual(str(row_00999["ETF"]), "測試ETF")
         self.assertEqual(str(row_00999["YTD績效(%)"]), "-")
@@ -1265,6 +1283,61 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(len(date_cols), TW_ETF_AUM_HISTORY_MAX_DATE_COLS)
         self.assertEqual(date_cols[0], f"{trade_dates[10].strftime('%Y-%m-%d')}(億)")
         self.assertEqual(date_cols[-1], f"{trade_dates[-1].strftime('%Y-%m-%d')}(億)")
+
+    def test_build_tw_etf_aum_export_frame_adds_change_summary_and_recent_10_days(self):
+        trade_dates = pd.date_range("2026-01-02", periods=12, freq="B")
+        history = pd.DataFrame(
+            [
+                {
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_date": trade_date.strftime("%Y-%m-%d"),
+                    "aum_billion": 1000.0 + idx * 10.0,
+                }
+                for idx, trade_date in enumerate(trade_dates)
+            ]
+            + [
+                {
+                    "etf_code": "0056",
+                    "etf_name": "元大高股息",
+                    "trade_date": trade_dates[-1].strftime("%Y-%m-%d"),
+                    "aum_billion": 800.0,
+                }
+            ]
+        )
+
+        out = _build_tw_etf_aum_export_frame(history)
+
+        self.assertEqual(
+            list(out.columns[:9]),
+            [
+                "代碼",
+                "ETF",
+                "基金規模最新(億)",
+                "基金規模1日變化(億)",
+                "基金規模1日變化(%)",
+                "基金規模5日變化(億)",
+                "基金規模5日變化(%)",
+                "基金規模10日變化(億)",
+                "基金規模10日變化(%)",
+            ],
+        )
+        raw_cols = [col for col in out.columns if col.startswith("基金規模_")]
+        self.assertEqual(len(raw_cols), 10)
+        self.assertEqual(raw_cols[0], f"基金規模_{trade_dates[2].strftime('%Y-%m-%d')}(億)")
+        self.assertEqual(raw_cols[-1], f"基金規模_{trade_dates[-1].strftime('%Y-%m-%d')}(億)")
+        row_0050 = out.loc[out["代碼"] == "0050"].iloc[0]
+        row_0056 = out.loc[out["代碼"] == "0056"].iloc[0]
+        self.assertEqual(int(row_0050["基金規模最新(億)"]), 1110)
+        self.assertEqual(float(row_0050["基金規模1日變化(億)"]), 10.0)
+        self.assertEqual(float(row_0050["基金規模1日變化(%)"]), 0.9)
+        self.assertEqual(float(row_0050["基金規模5日變化(億)"]), 50.0)
+        self.assertEqual(float(row_0050["基金規模5日變化(%)"]), 4.71)
+        self.assertEqual(float(row_0050["基金規模10日變化(億)"]), 100.0)
+        self.assertEqual(float(row_0050["基金規模10日變化(%)"]), 9.9)
+        self.assertTrue(pd.isna(row_0056["基金規模1日變化(億)"]))
+        self.assertTrue(pd.isna(row_0056["基金規模5日變化(億)"]))
+        self.assertTrue(pd.isna(row_0056["基金規模10日變化(億)"]))
 
     def test_build_tw_etf_aum_rows_from_snapshot_info_keeps_k_suffix_codes(self):
         out = _build_tw_etf_aum_rows_from_snapshot_info(

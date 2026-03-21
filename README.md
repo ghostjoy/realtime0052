@@ -126,6 +126,7 @@ uv run realtime0052 bootstrap --scope both --years 5
 
 - 預載流程會先建立 `symbol_metadata`，再批次同步 `daily_bars`，接著同步 `tw_etf_daily_market` 與 `tw_etf_mis_daily`，最後把任務摘要寫入 `bootstrap_runs`。
 - `export-tw-etf-super-table` 適合放進 `crontab`：會先同步主總表來源 + 官方 ETF 日成交 + 官方 ETF 融資融券 + 官方 MIS + 官方三大法人快取 + `基金規模追蹤`，再輸出 CSV，並把該次匯出摘要寫入 DuckDB `tw_etf_super_export_runs`。
+- 超級大表 CSV 會額外帶入基金規模最近 `10` 個交易日原始欄位，以及 `1 / 5 / 10` 日規模變化摘要，方便直接看資金流入流出。
 - `台股 ETF 全類型總表` 頁面上的官方日成交 / 融資融券 / MIS / 三大法人 / `基金規模追蹤` 區塊都讀本地快取，所以 `crontab` 跑完後，網頁下次開啟或重整時也會看到更新後的資料。
 
 #### `crontab` 範例：每日匯出超級大表

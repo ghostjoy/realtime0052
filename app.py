@@ -422,6 +422,7 @@ def _coalesce_tw_etf_super_export_columns(primary: pd.Series, fallback: pd.Serie
 def _build_tw_etf_super_export_table(
     *,
     main_frame: pd.DataFrame,
+    aum_frame: pd.DataFrame | None = None,
     daily_market_frame: pd.DataFrame,
     margin_frame: pd.DataFrame | None = None,
     mis_frame: pd.DataFrame,
@@ -429,6 +430,7 @@ def _build_tw_etf_super_export_table(
 ) -> pd.DataFrame:
     sources: list[tuple[str, pd.DataFrame]] = [
         ("main", main_frame),
+        ("aum", aum_frame),
         ("daily", daily_market_frame),
     ]
     if isinstance(margin_frame, pd.DataFrame):
@@ -2344,6 +2346,8 @@ PAGE_CARDS = [
 DEFAULT_ACTIVE_PAGE = "台股 ETF 全類型總表"
 DEFAULT_UI_THEME = "灰白專業（Soft Gray）"
 TW_ETF_AUM_HISTORY_MAX_DATE_COLS = 240
+TW_ETF_AUM_EXPORT_MAX_DATE_COLS = 10
+TW_ETF_AUM_EXPORT_CHANGE_LOOKBACKS = (1, 5, 10)
 BACKTEST_RUN_REQUEST_KEY = "bt_requested_run_key"
 CLIENT_VISIT_SESSION_KEY = "client_visit_session_id"
 NOTEBOOK_BODY_STATE_KEY = "notebook_markdown_body"
@@ -6800,6 +6804,131 @@ def _build_tw_etf_aum_history_wide(
     return out
 
 
+def _build_tw_etf_aum_export_frame(
+    history_df: pd.DataFrame,
+    *,
+    raw_date_cols: int = TW_ETF_AUM_EXPORT_MAX_DATE_COLS,
+    change_lookbacks: tuple[int, ...] = TW_ETF_AUM_EXPORT_CHANGE_LOOKBACKS,
+) -> pd.DataFrame:
+    summary_cols = [
+        "代碼",
+        "ETF",
+        "基金規模最新(億)",
+        "基金規模1日變化(億)",
+        "基金規模1日變化(%)",
+        "基金規模5日變化(億)",
+        "基金規模5日變化(%)",
+        "基金規模10日變化(億)",
+        "基金規模10日變化(%)",
+    ]
+    if not isinstance(history_df, pd.DataFrame) or history_df.empty:
+        return pd.DataFrame(columns=summary_cols)
+    required = {"etf_code", "etf_name", "trade_date", "aum_billion"}
+    if not required.issubset(set(history_df.columns)):
+        return pd.DataFrame(columns=summary_cols)
+
+    work = history_df.copy()
+    work["etf_code"] = work["etf_code"].astype(str).str.strip().str.upper()
+    work["etf_name"] = work["etf_name"].astype(str).str.strip()
+    work["trade_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
+    work["aum_billion"] = pd.to_numeric(work["aum_billion"], errors="coerce")
+    work = work.dropna(subset=["trade_date", "aum_billion"])
+    work = work[work["etf_code"] != ""].copy()
+    if work.empty:
+        return pd.DataFrame(columns=summary_cols)
+
+    work = work.sort_values(["trade_date", "etf_code", "etf_name"]).reset_index(drop=True)
+    name_map = (
+        work.assign(_display_name=work["etf_name"].replace({"": pd.NA}))
+        .dropna(subset=["_display_name"])
+        .groupby("etf_code")["_display_name"]
+        .last()
+        .to_dict()
+    )
+    work["trade_date"] = work["trade_date"].dt.strftime("%Y-%m-%d")
+    work = work.dropna(subset=["trade_date"])
+    if work.empty:
+        return pd.DataFrame(columns=summary_cols)
+
+    pivot = work.pivot_table(
+        index="etf_code",
+        columns="trade_date",
+        values="aum_billion",
+        aggfunc="last",
+    )
+    if pivot.empty:
+        return pd.DataFrame(columns=summary_cols)
+
+    pivot = pivot.sort_index().sort_index(axis=1)
+    all_date_cols = [str(col) for col in pivot.columns]
+    if not all_date_cols:
+        return pd.DataFrame(columns=summary_cols)
+
+    try:
+        raw_cols_count = max(1, int(raw_date_cols))
+    except Exception:
+        raw_cols_count = TW_ETF_AUM_EXPORT_MAX_DATE_COLS
+    latest_date = all_date_cols[-1]
+    raw_date_labels = all_date_cols[-raw_cols_count:]
+
+    codes = [str(code).strip().upper() for code in pivot.index.tolist()]
+    out = pd.DataFrame(
+        {
+            "代碼": pd.Series(codes, dtype="string"),
+            "ETF": pd.Series([str(name_map.get(code, code)).strip() or code for code in codes]),
+        }
+    )
+    latest_values = pd.Series(
+        pd.to_numeric(pivot[latest_date], errors="coerce").to_numpy(),
+        index=out.index,
+    )
+    out["基金規模最新(億)"] = _truncate_integer_series(latest_values)
+
+    for lookback in change_lookbacks:
+        lookback_days = int(lookback)
+        label_text = f"基金規模{lookback_days}日變化"
+        if len(all_date_cols) <= lookback_days:
+            out[f"{label_text}(億)"] = pd.Series(np.nan, index=out.index)
+            out[f"{label_text}(%)"] = pd.Series(np.nan, index=out.index)
+            continue
+        ref_date = all_date_cols[-(lookback_days + 1)]
+        ref_values = pd.Series(
+            pd.to_numeric(pivot[ref_date], errors="coerce").to_numpy(),
+            index=out.index,
+        )
+        delta_values = latest_values - ref_values
+        pct_values = pd.Series(np.nan, index=out.index, dtype=float)
+        valid_mask = ref_values > 0
+        pct_values.loc[valid_mask] = (
+            latest_values.loc[valid_mask] / ref_values.loc[valid_mask] - 1.0
+        ) * 100.0
+        out[f"{label_text}(億)"] = _truncate_series(delta_values, digits=2)
+        out[f"{label_text}(%)"] = _truncate_series(pct_values, digits=2)
+
+    for date_label in raw_date_labels:
+        raw_values = pd.Series(
+            pd.to_numeric(pivot[date_label], errors="coerce").to_numpy(),
+            index=out.index,
+        )
+        out[f"基金規模_{date_label}(億)"] = _truncate_integer_series(raw_values)
+
+    ordered = [
+        "代碼",
+        "ETF",
+        "基金規模最新(億)",
+        *[
+            column
+            for lookback in change_lookbacks
+            for column in (
+                f"基金規模{int(lookback)}日變化(億)",
+                f"基金規模{int(lookback)}日變化(%)",
+            )
+        ],
+        *[f"基金規模_{date_label}(億)" for date_label in raw_date_labels],
+    ]
+    return out[[col for col in ordered if col in out.columns]].reset_index(drop=True)
+
+
 def _extract_aum_history_trade_date(label: object) -> pd.Timestamp | None:
     text = str(label or "").strip()
     m = re.search(r"(\d{4}-\d{2}-\d{2})", text)
@@ -10897,9 +11026,29 @@ def _render_tw_etf_all_types_view():
                 disable_backtest_drilldown=True,
             )
 
+        current_aum_snapshot_info = _load_tw_etf_aum_snapshot_info()
+        history_codes = sorted(
+            {
+                str(code).strip().upper()
+                for code in table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist()
+                if str(code).strip()
+            }
+            | set(current_aum_snapshot_info.keys())
+        )
+        history_df = store.load_tw_etf_aum_history(
+            etf_codes=history_codes,
+            keep_days=0,
+        )
+        history_wide = _build_tw_etf_aum_history_wide(
+            history_df,
+            max_date_cols=TW_ETF_AUM_HISTORY_MAX_DATE_COLS,
+        )
+        aum_export_df = _build_tw_etf_aum_export_frame(history_df)
+
         st.markdown("#### 超級大表匯出")
         super_export_df = _build_tw_etf_super_export_table(
             main_frame=table_view_df,
+            aum_frame=aum_export_df,
             daily_market_frame=daily_market_df,
             margin_frame=margin_df,
             mis_frame=mis_df,
@@ -10929,6 +11078,7 @@ def _render_tw_etf_all_types_view():
                 f"匯出摘要：{len(super_export_df)} 列 / {len(super_export_df.columns)} 欄。"
                 "輸出為純文字 CSV，不含點擊導流連結。"
             )
+            st.caption("已含基金規模最近 10 個交易日原始欄位與 1 / 5 / 10 日變化摘要。")
             st.caption(f"下載檔名：`{export_file_name}`")
             if isinstance(export_refresh_summary, dict) and export_refresh_summary:
                 main_refresh_summary = export_refresh_summary.get("main", {})
@@ -10956,23 +11106,6 @@ def _render_tw_etf_all_types_view():
                         preview_limit=2,
                     )
 
-        current_aum_snapshot_info = _load_tw_etf_aum_snapshot_info()
-        history_codes = sorted(
-            {
-                str(code).strip().upper()
-                for code in table_df.get("代碼", pd.Series(dtype=str)).astype(str).tolist()
-                if str(code).strip()
-            }
-            | set(current_aum_snapshot_info.keys())
-        )
-        history_df = store.load_tw_etf_aum_history(
-            etf_codes=history_codes,
-            keep_days=0,
-        )
-        history_wide = _build_tw_etf_aum_history_wide(
-            history_df,
-            max_date_cols=TW_ETF_AUM_HISTORY_MAX_DATE_COLS,
-        )
         history_drilldown_enabled = _render_table_drilldown_toggle_inline(
             scope="tw_etf_all_types_history",
             label="規模追蹤點擊導流",

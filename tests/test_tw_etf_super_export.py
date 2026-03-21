@@ -19,6 +19,7 @@ class _FakeStore:
     def __init__(self):
         self.saved_runs: list[dict[str, object]] = []
         self.saved_aum_snapshots: list[dict[str, object]] = []
+        self.aum_history_calls: list[dict[str, object]] = []
 
     def save_tw_etf_super_export_run(self, **kwargs):
         self.saved_runs.append(dict(kwargs))
@@ -31,6 +32,25 @@ class _FakeStore:
         self.saved_aum_snapshots.append(dict(kwargs))
         rows = kwargs.get("rows")
         return len(rows) if isinstance(rows, list) else 0
+
+    def load_tw_etf_aum_history(self, **kwargs):
+        self.aum_history_calls.append(dict(kwargs))
+        return pd.DataFrame(
+            [
+                {
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_date": "2026-03-07",
+                    "aum_billion": 1234.0,
+                },
+                {
+                    "etf_code": "0050",
+                    "etf_name": "元大台灣50",
+                    "trade_date": "2026-03-10",
+                    "aum_billion": 1250.0,
+                },
+            ]
+        )
 
 
 class TwEtfSuperExportTests(unittest.TestCase):
@@ -153,12 +173,28 @@ class TwEtfSuperExportTests(unittest.TestCase):
                 "last_trade_date": "2026-03-10"
             }
 
+        def build_aum_export_frame(history_df):
+            captured["aum_history_df"] = history_df.copy()
+            return pd.DataFrame(
+                [
+                    {
+                        "代碼": "0050",
+                        "ETF": "元大台灣50",
+                        "基金規模1日變化(億)": 16.0,
+                    }
+                ]
+            )
+
         fake_app = SimpleNamespace(
             _build_tw_etf_all_types_performance_table=build_performance_table,
+            _build_tw_etf_aum_export_frame=build_aum_export_frame,
             _build_tw_etf_daily_market_overview=build_daily_market_overview,
             _build_tw_etf_margin_overview=build_margin_overview,
             _build_tw_etf_mis_overview=build_mis_overview,
             _build_tw_etf_three_investors_overview=build_three_investors_overview,
+            _load_tw_etf_aum_snapshot_info=lambda target_yyyymmdd="": {
+                "0050": {"name": "元大台灣50", "aum_billion": 1250.0}
+            },
             _resolve_latest_tw_trade_day_token=lambda anchor_yyyymmdd=None: str(
                 anchor_yyyymmdd or "20260310"
             ),
@@ -177,7 +213,10 @@ class TwEtfSuperExportTests(unittest.TestCase):
                 ),
                 patch(
                     "services.tw_etf_super_export.build_tw_etf_super_export_table",
-                    return_value=pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                    side_effect=lambda **kwargs: (
+                        captured.__setitem__("super_export_kwargs", dict(kwargs))
+                        or pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}])
+                    ),
                 ),
                 patch(
                     "services.tw_etf_super_export.build_tw_etf_super_export_csv_bytes",
@@ -198,6 +237,14 @@ class TwEtfSuperExportTests(unittest.TestCase):
         self.assertEqual(captured["margin"]["target_trade_date"], "20260310")
         self.assertEqual(captured["mis"]["target_trade_date"], "20260310")
         self.assertEqual(captured["three"]["target_trade_date"], "20260310")
+        self.assertEqual(store.aum_history_calls[0]["etf_codes"], ("0050",))
+        self.assertEqual(store.aum_history_calls[0]["keep_days"], 0)
+        self.assertFalse(captured["aum_history_df"].empty)
+        self.assertIn("aum_frame", captured["super_export_kwargs"])
+        self.assertEqual(
+            float(captured["super_export_kwargs"]["aum_frame"].iloc[0]["基金規模1日變化(億)"]),
+            16.0,
+        )
         self.assertEqual(
             Path(str(result["output_path"])).name,
             "tw_etf_super_export_20260310.csv",
