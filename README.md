@@ -119,7 +119,10 @@ uv run realtime0052 info
 uv run realtime0052 sync --market TW --symbols 0050,0052 --days 60
 uv run realtime0052 sync-twse-etf-daily --start 2026-03-01 --end 2026-03-08
 uv run realtime0052 sync-twse-etf-mis
+uv run realtime0052 sync-tw-etf-constituents
 uv run realtime0052 export-tw-etf-super-table --out ./tw_etf_super_export_latest.csv
+uv run realtime0052 export-tw-etf-report --symbol 0052 --out ./reports/
+uv run realtime0052 export-etf-briefing --out-root ~/Downloads/etf --start 2023-01-01 --single-symbol 00935
 uv run realtime0052 backtest --symbol 0050 --market TW --strategy buy_hold
 uv run realtime0052 chart-backtest --symbols 0050 --layout single --start 2024-01-01 --end 2026-03-20
 uv run realtime0052 bootstrap --scope both --years 5
@@ -136,10 +139,17 @@ uv run realtime0052 bootstrap --scope both --years 5
 - 既有 CLI 都可直接看 `--help`：
   - `uv run realtime0052 --help`
   - `uv run realtime0052 export-tw-etf-super-table --help`
+  - `uv run realtime0052 sync-tw-etf-constituents --help`
+  - `uv run realtime0052 export-tw-etf-report --help`
+  - `uv run realtime0052 export-etf-briefing --help`
   - `uv run realtime0052 backtest --help`
   - `uv run realtime0052 chart-backtest --help`
 - 各指令的獨立 markdown 文件在 [`docs/cli/README.md`](./docs/cli/README.md)
+- 單檔 ETF 報表包的完整說明在 [`docs/tw-etf-report-bundle.md`](./docs/tw-etf-report-bundle.md)
+- `export-etf-briefing` 會一次輸出大表 CSV、科技型/主動式名單、combined/single 圖、HTML 戰報與 FB 文案，適合做每日簡報包。
 - `chart-backtest` 會輸出 `PNG`，適合圖表、文件與 AI workflow。
+- `sync-tw-etf-constituents` 會把台股 ETF 成分股快照寫進 DuckDB `market_snapshots`，並產生 JSON / Markdown log。
+- `export-tw-etf-report` 會輸出單一 ETF 的資料夾報表包，內含單檔總表、MIS、三大法人、基金規模、成分股、技術指標、回測圖、熱力圖與 sync log。
 - `single`：單一標的，預設輸出一張乾淨版 `K線 + Equity + Benchmark` 圖；若要接近回放參考圖，可加 `--reference-annotations`。
 - `combined`：多標的同圖，改成單面板「Benchmark 虛線 + 等權策略線 + 各標的 Buy and Hold 線」的相對倍數比較圖。
 - `combined` 可用 `--include-ew-portfolio` 額外加上 EW portfolio 線；預設不顯示。

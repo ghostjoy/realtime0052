@@ -10,6 +10,25 @@
 
 ## [Unreleased]
 
+### Added
+- 新增 `export-etf-briefing` CLI：
+  - 可一鍵輸出 ETF 戰報資料夾到 `~/Downloads/etf` 或指定目錄
+  - 內含 `超級大表 CSV / 科技型與主動式名單 CSV / combined 圖 / 單檔圖 / HTML 戰報 / FB 文案`
+  - 主文採 `司馬懿` 風格敘事，另保留 `manifest.json` 與 `news_sources.json` 供追溯
+- 新增 `sync-tw-etf-constituents` CLI：
+  - 可掃描全市場或指定台股 ETF 成分股
+  - 以 DuckDB `market_snapshots` 保存歷史 constituent snapshots
+  - 會輸出 JSON / Markdown log，明確記錄 `updated / unchanged / missing / error`
+- 新增 `export-tw-etf-report` CLI：
+  - 可輸出單一台股 ETF 的資料夾報表包
+  - 檔名全部帶 ETF 代碼，例如 `0052_summary.md`、`0052_backtest.png`
+  - 報表包內含 overview / 日成交 / 融資融券 / MIS / 三大法人 / 基金規模 / 成分股 / 技術指標 / 圖檔 / sync log
+- 新增文件：
+  - `docs/cli/sync-tw-etf-constituents.md`
+  - `docs/cli/export-tw-etf-report.md`
+  - `docs/cli/export-etf-briefing.md`
+  - `docs/tw-etf-report-bundle.md`
+
 ### Changed
 - `台股 ETF 全類型總表`、`2026 YTD 前十大股利型、配息型 ETF`、`2026 YTD 主動式 ETF` 改採 TWSE ETF e添富官方分類：
   - `類型` 改回保留語意分類（如 `科技型 / 股利型 / 市值型`），優先由官方 `主題/因子` 推導，不再被 `台股ETF` 這類資產主分類覆蓋
@@ -20,6 +39,10 @@
 - 現有 CLI help 文案補強，`export-tw-etf-super-table --help` / `backtest --help` 會顯示更完整的用途與範例，較適合 AI 或排程直接調用。
 
 ### Fixed
+- 修正 `sync-tw-etf-constituents` 在未帶 `--symbols` 時的全市場名單解析：
+  - 不再直接呼叫需要 `ytd_start/ytd_end` 的績效表 helper
+  - 改優先使用 TWSE 官方 ETF profile map 解析全市場 ETF 代碼
+  - 因此 `sync-tw-etf-constituents` 現在可直接不帶 `--symbols` 執行
 - 修正 `Streamlit` 重跑時 `config_loader.py` 重複初始化 `Hydra` 造成的 `GlobalHydra is already initialized` 啟動錯誤
 - 修正 `筆記本` 頁面缺少 `markdown-it-py` 依賴時的啟動錯誤：
   - `pyproject.toml` 補上 `markdown-it-py`

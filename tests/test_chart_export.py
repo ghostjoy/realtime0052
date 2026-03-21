@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from services.chart_export import export_backtest_chart_artifact
+from services.chart_export import _build_multi_line_styles, export_backtest_chart_artifact
 
 
 def _bars_frame(
@@ -16,10 +16,11 @@ def _bars_frame(
     start: str = "2025-01-01",
     periods: int = 140,
     base: float = 100.0,
+    slope: float = 0.6,
 ) -> pd.DataFrame:
     index = pd.date_range(start=start, periods=periods, freq="B", tz="UTC")
     step = pd.Series(range(periods), index=index, dtype=float)
-    close = base + step * 0.6
+    close = base + step * float(slope)
     frame = pd.DataFrame(
         {
             "open": close - 0.3,
@@ -63,7 +64,7 @@ class FakeStore:
 
 class ChartExportTests(unittest.TestCase):
     def setUp(self):
-        tw_symbol = _bars_frame(base=120.0)
+        tw_symbol = _bars_frame(base=120.0, slope=1.2)
         tw_bench = _bars_frame(base=100.0)
         us_symbol = _bars_frame(base=300.0)
         us_bench = _bars_frame(base=4500.0)
@@ -168,12 +169,14 @@ class ChartExportTests(unittest.TestCase):
         trace_names = [trace.name for trace in fig.data]
         self.assertIn("Benchmark (^TWII)", trace_names)
         self.assertNotIn("Buy and Hold (EW Portfolio)", trace_names)
-        self.assertIn("Buy and Hold (0050 元大台灣50)", trace_names)
-        self.assertIn("Buy and Hold (0052 富邦科技)", trace_names)
+        self.assertIn("Buy and Hold (0050 元大台灣50) *", trace_names)
+        self.assertIn("Buy and Hold (0052 富邦科技) *", trace_names)
         self.assertEqual(fig.data[0].type, "scatter")
         self.assertEqual(fig.layout.yaxis.title.text, None)
         self.assertGreaterEqual(min(fig.data[0].y), 1.0)
         self.assertEqual(fig.layout.legend.orientation, "v")
+        self.assertIn("* = final value above benchmark", trace_names)
+        self.assertEqual(trace_names[0], "Benchmark (^TWII)")
 
     @patch("services.chart_export._write_figure_image")
     def test_combined_layout_can_include_ew_portfolio_line(self, write_mock):
@@ -208,7 +211,7 @@ class ChartExportTests(unittest.TestCase):
         )
 
         trace_names = [trace.name for trace in captured[0].data]
-        self.assertIn("Buy and Hold (EW Portfolio)", trace_names)
+        self.assertIn("Buy and Hold (EW Portfolio) *", trace_names)
 
     @patch("services.chart_export._write_figure_image")
     def test_single_layout_reference_annotations_add_markers(self, write_mock):
@@ -316,6 +319,14 @@ class ChartExportTests(unittest.TestCase):
                 height=900,
                 scale=2,
             )
+
+    def test_build_multi_line_styles_keeps_all_asset_lines_solid(self):
+        styles = _build_multi_line_styles(
+            ["00988A", "00992A", "00994A", "00991A", "00987A", "00981A", "00985A", "00990A", "00995A"],
+            palette={"asset_palette": ["#1D4ED8", "#DC2626", "#059669", "#D97706", "#7C3AED", "#0891B2", "#BE123C", "#65A30D"]},
+        )
+        self.assertEqual(styles["00981A"]["dash"], "solid")
+        self.assertEqual(styles["00995A"]["dash"], "solid")
 
 
 if __name__ == "__main__":

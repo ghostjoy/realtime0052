@@ -12,6 +12,17 @@ from plotly.subplots import make_subplots
 from ui.charts import render_lightweight_live_chart, render_lightweight_multi_line_chart
 from ui.shared.runtime import configure_module_runtime
 
+MULTI_LINE_COLORS: tuple[str, ...] = (
+    "#1D4ED8",
+    "#DC2626",
+    "#059669",
+    "#D97706",
+    "#7C3AED",
+    "#0891B2",
+    "#BE123C",
+    "#65A30D",
+)
+
 REQUIRED_RUNTIME_NAMES = (
     "_apply_plotly_watermark",
     "_apply_unified_benchmark_hover",
@@ -95,6 +106,26 @@ def _plotly_right_edge_marker_x(index_values: object) -> pd.Timestamp | None:
     return pd.Timestamp(idx[-1])
 
 
+def build_multi_line_styles(
+    symbols: list[str],
+    *,
+    colors: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, dict[str, str]]:
+    ordered = sorted({str(sym or "").strip().upper() for sym in symbols if str(sym or "").strip()})
+    if not ordered:
+        return {}
+    color_cycle = [str(color) for color in (colors or MULTI_LINE_COLORS) if str(color).strip()]
+    if not color_cycle:
+        color_cycle = list(MULTI_LINE_COLORS)
+    styles: dict[str, dict[str, str]] = {}
+    for idx, sym in enumerate(ordered):
+        styles[sym] = {
+            "color": color_cycle[idx % len(color_cycle)],
+            "dash": "solid",
+        }
+    return styles
+
+
 def _render_benchmark_lines_chart(
     *,
     lines: list[dict[str, Any]],
@@ -104,6 +135,7 @@ def _render_benchmark_lines_chart(
     annotate_extrema: bool = False,
     extrema_series_name: str | None = None,
     watermark_text: str = "",
+    highlight_above_benchmark_boxes: bool = False,
 ):
     palette = _ui_palette()
     renderer = _benchmark_renderer()
@@ -118,17 +150,68 @@ def _render_benchmark_lines_chart(
             return
         st.caption("lightweight-charts 渲染失敗，已自動回退 Plotly。")
 
-    fig = go.Figure()
-    plotted_series: list[tuple[str, pd.Series]] = []
-    secondary_axis_trace_idx: int | None = None
+    benchmark_latest: float | None = None
+    if highlight_above_benchmark_boxes:
+        for line in lines:
+            series = line.get("series")
+            if not isinstance(series, pd.Series) or series.empty or not bool(line.get("is_benchmark")):
+                continue
+            numeric = pd.to_numeric(series, errors="coerce").dropna()
+            if numeric.empty:
+                continue
+            benchmark_latest = float(numeric.iloc[-1])
+            break
+
+    prepared_lines: list[dict[str, Any]] = []
     for line in lines:
         series = line.get("series")
         if not isinstance(series, pd.Series) or series.empty:
             continue
+        numeric = pd.to_numeric(series, errors="coerce").dropna()
+        if numeric.empty:
+            continue
+        prepared_lines.append(
+            {
+                "line": line,
+                "series": series,
+                "numeric": numeric,
+                "latest_value": float(numeric.iloc[-1]),
+                "is_benchmark": bool(line.get("is_benchmark")),
+            }
+        )
+
+    if highlight_above_benchmark_boxes and len(prepared_lines) > 1:
+        benchmark_lines = [item for item in prepared_lines if item["is_benchmark"]]
+        other_lines = [item for item in prepared_lines if not item["is_benchmark"]]
+        other_lines.sort(key=lambda item: item["latest_value"], reverse=True)
+        prepared_lines = benchmark_lines + other_lines
+
+    fig = go.Figure()
+    plotted_series: list[tuple[str, pd.Series]] = []
+    secondary_axis_trace_idx: int | None = None
+    for item in prepared_lines:
+        line = item["line"]
+        series = item["series"]
+        numeric = item["numeric"]
         color = str(line.get("color", palette["equity"]))
         width = float(line.get("width", 2.0) or 2.0)
         dash = str(line.get("dash", "solid"))
         name = str(line.get("name", "Series"))
+        if (
+            highlight_above_benchmark_boxes
+            and benchmark_latest is not None
+            and not item["is_benchmark"]
+            and item["latest_value"] > benchmark_latest
+        ):
+            name = f"{name} *"
+        line_color = color
+        if (
+            highlight_above_benchmark_boxes
+            and benchmark_latest is not None
+            and not item["is_benchmark"]
+            and item["latest_value"] <= benchmark_latest
+        ):
+            line_color = _to_rgba(color, 0.58)
         hover_code = str(line.get("hover_code", name))
         value_label = str(line.get("value_label", "Value"))
         y_format = str(line.get("y_format", ",.0f"))
@@ -138,7 +221,7 @@ def _render_benchmark_lines_chart(
                 y=series.values,
                 mode="lines",
                 name=name,
-                line=dict(color=color, width=width, dash=dash),
+                line=dict(color=line_color, width=width, dash=dash),
                 hovertemplate=_hovertemplate_with_code(
                     hover_code, value_label=value_label, y_format=y_format
                 ),
@@ -162,6 +245,17 @@ def _render_benchmark_lines_chart(
                 hoverinfo="skip",
                 showlegend=False,
                 yaxis="y2",
+            )
+        )
+    if highlight_above_benchmark_boxes:
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                name="* = final value above benchmark",
+                line=dict(color="rgba(0,0,0,0)", width=0.1),
+                hoverinfo="skip",
             )
         )
 
@@ -225,7 +319,7 @@ def _render_benchmark_lines_chart(
                     borderwidth=1,
                 )
 
-    legend_name_len = max((len(str(line.get("name", ""))) for line in lines), default=12)
+    legend_name_len = max((len(str(trace.name or "")) for trace in fig.data), default=12)
     axis_tick_gutter = 108
     legend_right_margin = int(min(620, max(300, axis_tick_gutter + legend_name_len * 7 + 56)))
     fig.update_layout(
@@ -651,6 +745,7 @@ def _render_indicator_panels(
 
 
 __all__ = [
+    "build_multi_line_styles",
     "_plotly_datetime_axis_range_with_right_padding",
     "_plotly_right_edge_marker_x",
     "_render_benchmark_lines_chart",

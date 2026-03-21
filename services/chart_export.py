@@ -770,6 +770,23 @@ def _style_figure(fig: go.Figure, *, palette: dict[str, object], height: int, ti
     )
 
 
+def _build_multi_line_styles(
+    symbols: list[str],
+    *,
+    palette: dict[str, object],
+) -> dict[str, dict[str, str]]:
+    ordered = sorted({str(sym or "").strip().upper() for sym in symbols if str(sym or "").strip()})
+    if not ordered:
+        return {}
+    color_cycle = [str(color) for color in list(palette.get("asset_palette", [])) if str(color).strip()]
+    if not color_cycle:
+        color_cycle = ["#1D4ED8", "#DC2626", "#059669", "#D97706", "#7C3AED", "#0891B2", "#BE123C", "#65A30D"]
+    styles: dict[str, dict[str, str]] = {}
+    for idx, sym in enumerate(ordered):
+        styles[sym] = {"color": color_cycle[idx % len(color_cycle)], "dash": "solid"}
+    return styles
+
+
 def _build_single_symbol_backtest_figure(
     payload: SymbolChartPayload,
     *,
@@ -1069,54 +1086,87 @@ def _build_combined_backtest_figure(
     include_ew_portfolio: bool = False,
 ) -> go.Figure:
     fig = go.Figure()
-    palette_cycle = list(palette["asset_palette"])
     benchmark_label = payload.benchmark_symbol or "Benchmark"
     benchmark_series = _normalize_to_base_one(payload.benchmark_equity)
     strategy_series = _normalize_to_base_one(payload.strategy_equity)
     strategy_line_name = "Buy and Hold (EW Portfolio)" if strategy == "buy_hold" else "Strategy Equity"
+    benchmark_latest = (
+        float(pd.to_numeric(benchmark_series, errors="coerce").dropna().iloc[-1])
+        if not benchmark_series.empty
+        else None
+    )
+    style_map = _build_multi_line_styles(list(payload.per_symbol_buy_hold.keys()), palette=palette)
+    trace_specs: list[dict[str, object]] = []
     if not benchmark_series.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=benchmark_series.index,
-                y=benchmark_series.values,
-                mode="lines",
-                name=f"Benchmark ({benchmark_label})",
-                line=_benchmark_line_style(palette, width=2.0),
-            )
+        trace_specs.append(
+            {
+                "name": f"Benchmark ({benchmark_label})",
+                "series": benchmark_series,
+                "line": _benchmark_line_style(palette, width=2.0),
+                "latest_value": benchmark_latest if benchmark_latest is not None else float("-inf"),
+                "is_benchmark": True,
+            }
         )
     if include_ew_portfolio and not strategy_series.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=strategy_series.index,
-                y=strategy_series.values,
-                mode="lines",
-                name=strategy_line_name,
-                line={
-                    "color": str(palette["buy_hold"] if strategy == "buy_hold" else palette["equity"]),
-                    "width": 2.2,
-                },
-            )
+        latest_value = float(pd.to_numeric(strategy_series, errors="coerce").dropna().iloc[-1])
+        strategy_trace_name = strategy_line_name
+        if benchmark_latest is not None and latest_value > benchmark_latest:
+            strategy_trace_name = f"{strategy_trace_name} *"
+        strategy_color = str(palette["buy_hold"] if strategy == "buy_hold" else palette["equity"])
+        if benchmark_latest is not None and latest_value <= benchmark_latest:
+            strategy_color = _to_rgba(strategy_color, 0.58)
+        trace_specs.append(
+            {
+                "name": strategy_trace_name,
+                "series": strategy_series,
+                "line": {"color": strategy_color, "width": 2.2, "dash": "solid"},
+                "latest_value": latest_value,
+                "is_benchmark": False,
+            }
         )
     all_index: list[pd.Index] = []
     if not benchmark_series.empty:
         all_index.append(benchmark_series.index)
     if include_ew_portfolio and not strategy_series.empty:
         all_index.append(strategy_series.index)
-    for idx, symbol in enumerate(sorted(payload.per_symbol_buy_hold.keys())):
+    for symbol in sorted(payload.per_symbol_buy_hold.keys()):
         series = _normalize_to_base_one(payload.per_symbol_buy_hold[symbol])
         if series.empty:
             continue
-        color = palette_cycle[idx % len(palette_cycle)]
+        style = style_map.get(symbol, {"color": "#1D4ED8", "dash": "solid"})
+        latest_value = float(pd.to_numeric(series, errors="coerce").dropna().iloc[-1])
+        color = str(style["color"])
+        trace_name = f"Buy and Hold ({_format_symbol_label(symbol, payload.symbol_names)})"
+        if benchmark_latest is not None and latest_value > benchmark_latest:
+            trace_name = f"{trace_name} *"
+        elif benchmark_latest is not None:
+            color = _to_rgba(color, 0.58)
+        trace_specs.append(
+            {
+                "name": trace_name,
+                "series": series,
+                "line": {"color": color, "width": 1.9, "dash": str(style["dash"])},
+                "latest_value": latest_value,
+                "is_benchmark": False,
+            }
+        )
+        all_index.append(series.index)
+    if len(trace_specs) > 1:
+        benchmark_specs = [item for item in trace_specs if bool(item["is_benchmark"])]
+        other_specs = [item for item in trace_specs if not bool(item["is_benchmark"])]
+        other_specs.sort(key=lambda item: float(item["latest_value"]), reverse=True)
+        trace_specs = benchmark_specs + other_specs
+    for item in trace_specs:
+        series = item["series"]
         fig.add_trace(
             go.Scatter(
                 x=series.index,
                 y=series.values,
                 mode="lines",
-                name=f"Buy and Hold ({_format_symbol_label(symbol, payload.symbol_names)})",
-                line={"color": color, "width": 1.9},
+                name=str(item["name"]),
+                line=dict(item["line"]),
             )
         )
-        all_index.append(series.index)
     if all_index:
         merged_index = pd.DatetimeIndex(sorted(set().union(*[list(idx) for idx in all_index])))
         padded_x_range = _plotly_datetime_axis_range_with_right_padding(merged_index)
@@ -1135,6 +1185,17 @@ def _build_combined_backtest_figure(
         legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=1.01),
         margin=dict(l=16, r=300, t=64, b=20),
     )
+    if benchmark_latest is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                name="* = final value above benchmark",
+                line=dict(color="rgba(0,0,0,0)", width=0.1),
+                hoverinfo="skip",
+            )
+        )
     fig.update_yaxes(tickformat=".3~g")
     edge_marker_x = _plotly_right_edge_marker_x(strategy_series.index if not strategy_series.empty else [])
     if edge_marker_x is not None:

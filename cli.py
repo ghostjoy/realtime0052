@@ -26,9 +26,18 @@ from services.chart_export import (
     SUPPORTED_CHART_THEMES,
     export_backtest_chart_artifact,
 )
+from services.etf_briefing import (
+    DEFAULT_ETF_BRIEFING_NEWS_WINDOW_DAYS,
+    DEFAULT_ETF_BRIEFING_SINGLE_SYMBOL,
+    DEFAULT_ETF_BRIEFING_START,
+    DEFAULT_ETF_BRIEFING_THEME,
+    export_etf_briefing_artifact,
+)
 from services.sync_orchestrator import normalize_symbols, sync_symbols_if_needed
+from services.tw_etf_constituent_sync import sync_tw_etf_constituent_snapshots
 from services.tw_etf_daily_sync import sync_twse_etf_daily_market
 from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
+from services.tw_etf_report import export_tw_etf_report_artifact
 from services.tw_etf_super_export import export_tw_etf_super_table_artifact
 
 
@@ -319,6 +328,199 @@ def export_tw_etf_super_table(
     if isinstance(issues, list):
         for issue in issues[:10]:
             click.echo(f"! {issue}")
+
+
+@cli.command()
+@click.option("--symbols", help="Comma-separated TW ETF symbols. Defaults to all TW ETFs in the export universe.")
+@click.option("--force", is_flag=True, default=False, help="Force remote refresh before comparing snapshots")
+@click.option("--max-workers", default=4, type=int, show_default=True, help="Parallel workers for constituent fetch")
+@click.option(
+    "--full-refresh/--incremental",
+    default=False,
+    show_default=True,
+    help="full-refresh=force remote fetch for every ETF, incremental=only fetch current snapshots and compare with latest stored snapshot",
+)
+@click.option("--log-dir", help="Directory for JSON/Markdown sync logs")
+def sync_tw_etf_constituents(
+    symbols: str | None,
+    force: bool,
+    max_workers: int,
+    full_refresh: bool,
+    log_dir: str | None,
+) -> None:
+    """Sync TW ETF constituent snapshots into DuckDB market_snapshots.
+
+    This command can run independently without starting Streamlit first.
+
+    Examples:
+      uv run realtime0052 sync-tw-etf-constituents --help
+      uv run realtime0052 sync-tw-etf-constituents
+      uv run realtime0052 sync-tw-etf-constituents --symbols 0050,0052 --full-refresh
+    """
+    store = _resolve_store()
+    symbol_list = normalize_symbols(parse_symbols(symbols or ""))
+    result = sync_tw_etf_constituent_snapshots(
+        store=store,
+        symbols=symbol_list or None,
+        force=bool(force),
+        max_workers=max(1, int(max_workers)),
+        full_refresh=bool(full_refresh),
+        log_dir=log_dir,
+    )
+    click.echo(
+        "sync_tw_etf_constituents "
+        f"etf_count={int(result.get('etf_count') or 0)} "
+        f"updated={int(result.get('updated_count') or 0)} "
+        f"unchanged={int(result.get('unchanged_count') or 0)} "
+        f"missing={int(result.get('missing_count') or 0)} "
+        f"errors={int(result.get('error_count') or 0)}"
+    )
+    click.echo(
+        f"log_json={result.get('json_log_path')} "
+        f"log_md={result.get('markdown_log_path')}"
+    )
+    for issue in list(result.get("issues") or [])[:10]:
+        click.echo(f"! {issue}")
+
+
+@cli.command()
+@click.option("--symbol", required=True, help="Single TW ETF symbol, for example 0052")
+@click.option("--out", help="Output root directory. A report folder named tw_etf_report_<symbol>_<trade_day> will be created under it.")
+@click.option(
+    "--sync-constituents/--no-sync-constituents",
+    default=True,
+    show_default=True,
+    help="Run the TW ETF constituent market-wide sync before building the single-symbol report bundle",
+)
+@click.option("--ytd-start", help="YTD start date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--ytd-end", help="YTD end date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--compare-start", help="Compare period start date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--compare-end", help="Compare period end date (YYYY-MM-DD or YYYYMMDD)")
+@click.option("--backtest-start", help="Backtest/chart/indicator start date (YYYY-MM-DD)")
+@click.option("--backtest-end", help="Backtest/chart/indicator end date (YYYY-MM-DD)")
+@click.option("--daily-lookback-days", default=14, type=int, show_default=True)
+@click.option("--force", is_flag=True, default=False, help="Force re-fetch for covered official datasets")
+@click.option("--log-dir", help="Directory for external JSON/Markdown sync logs")
+def export_tw_etf_report(
+    symbol: str,
+    out: str | None,
+    sync_constituents: bool,
+    ytd_start: str | None,
+    ytd_end: str | None,
+    compare_start: str | None,
+    compare_end: str | None,
+    backtest_start: str | None,
+    backtest_end: str | None,
+    daily_lookback_days: int,
+    force: bool,
+    log_dir: str | None,
+) -> None:
+    """Export a single TW ETF report bundle with tables, charts, indicators, and logs.
+
+    This command can run independently without starting Streamlit first.
+
+    Examples:
+      uv run realtime0052 export-tw-etf-report --help
+      uv run realtime0052 export-tw-etf-report --symbol 0052 --out ./reports/
+      uv run realtime0052 export-tw-etf-report --symbol 0052 --backtest-start 2023-01-01 --backtest-end 2026-03-21
+    """
+    symbols = normalize_symbols(parse_symbols(symbol))
+    if len(symbols) != 1:
+        raise click.ClickException("export-tw-etf-report requires exactly one TW ETF symbol")
+    store = _resolve_store()
+    result = export_tw_etf_report_artifact(
+        store=store,
+        symbol=symbols[0],
+        out=out,
+        ytd_start=ytd_start,
+        ytd_end=ytd_end,
+        compare_start=compare_start,
+        compare_end=compare_end,
+        backtest_start=backtest_start,
+        backtest_end=backtest_end,
+        daily_lookback_days=max(1, int(daily_lookback_days)),
+        force=bool(force),
+        sync_constituents=bool(sync_constituents),
+        log_dir=log_dir,
+    )
+    click.echo(
+        "export_tw_etf_report "
+        f"symbol={result.get('symbol')} "
+        f"trade_date={result.get('trade_date_anchor')} "
+        f"backtest={result.get('backtest_start')}->{result.get('backtest_end')}"
+    )
+    click.echo(
+        f"report_dir={result.get('report_dir')} "
+        f"files={int(result.get('file_count') or 0)}"
+    )
+    click.echo(
+        f"bundle_log_json={result.get('bundle_log_json_path')} "
+        f"bundle_log_md={result.get('bundle_log_markdown_path')}"
+    )
+    for issue in list(result.get("issues") or [])[:10]:
+        click.echo(f"! {issue}")
+
+
+@cli.command()
+@click.option("--out-root", help="Output root directory. Defaults to ~/Downloads/etf")
+@click.option("--start", "briefing_start", default=DEFAULT_ETF_BRIEFING_START, show_default=True, help="Chart/report start date (YYYY-MM-DD)")
+@click.option("--end", "briefing_end", help="Chart/report end date (YYYY-MM-DD). Defaults to today.")
+@click.option("--single-symbol", default=DEFAULT_ETF_BRIEFING_SINGLE_SYMBOL, show_default=True, help="Single ETF symbol for the focused single-chart section")
+@click.option(
+    "--theme",
+    type=click.Choice(list(SUPPORTED_CHART_THEMES), case_sensitive=False),
+    default=DEFAULT_ETF_BRIEFING_THEME,
+    show_default=True,
+    help="Chart theme for generated PNG files",
+)
+@click.option("--news-window-days", default=DEFAULT_ETF_BRIEFING_NEWS_WINDOW_DAYS, type=int, show_default=True, help="Lookback window for public geopolitics news collection")
+@click.option(
+    "--include-extra-splits/--no-include-extra-splits",
+    default=True,
+    show_default=True,
+    help="Also export split chart packs for tech ETFs and active ETFs",
+)
+def export_etf_briefing(
+    out_root: str | None,
+    briefing_start: str,
+    briefing_end: str | None,
+    single_symbol: str,
+    theme: str,
+    news_window_days: int,
+    include_extra_splits: bool,
+) -> None:
+    """Export a one-shot ETF briefing bundle with CSVs, charts, HTML, and FB copy.
+
+    This command can run independently without starting Streamlit first.
+
+    Examples:
+      uv run realtime0052 export-etf-briefing --help
+      uv run realtime0052 export-etf-briefing
+      uv run realtime0052 export-etf-briefing --out-root ~/Downloads/etf --start 2023-01-01 --single-symbol 00935
+    """
+    store = _resolve_store()
+    result = export_etf_briefing_artifact(
+        store=store,
+        out_root=out_root,
+        start=briefing_start,
+        end=briefing_end,
+        single_symbol=single_symbol,
+        theme=theme,
+        news_window_days=max(1, int(news_window_days)),
+        include_extra_splits=bool(include_extra_splits),
+    )
+    click.echo(
+        "export_etf_briefing "
+        f"dir={result.get('briefing_dir')} "
+        f"super_csv={result.get('super_export_csv')}"
+    )
+    click.echo(
+        f"report_html={result.get('report_html')} "
+        f"fb_text={result.get('fb_text')} "
+        f"news_sources={result.get('news_sources')}"
+    )
+    for issue in list(result.get("issues") or [])[:10]:
+        click.echo(f"! {issue}")
 
 
 @cli.command()

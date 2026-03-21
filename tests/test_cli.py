@@ -163,6 +163,170 @@ class CliTests(unittest.TestCase):
         self.assertIn("--force", result.output)
 
     @patch("cli._resolve_store")
+    @patch("cli.sync_tw_etf_constituent_snapshots")
+    def test_sync_tw_etf_constituents_outputs_summary(self, sync_mock, resolve_store_mock):
+        resolve_store_mock.return_value = object()
+        sync_mock.return_value = {
+            "etf_count": 2,
+            "updated_count": 1,
+            "unchanged_count": 1,
+            "missing_count": 0,
+            "error_count": 0,
+            "issues": ["0052: missing overseas rows"],
+            "json_log_path": "/tmp/constituents.json",
+            "markdown_log_path": "/tmp/constituents.md",
+        }
+
+        result = self.runner.invoke(
+            cli.cli,
+            [
+                "sync-tw-etf-constituents",
+                "--symbols",
+                "0050,0052",
+                "--force",
+                "--max-workers",
+                "3",
+                "--full-refresh",
+                "--log-dir",
+                "/tmp/logs",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        sync_mock.assert_called_once()
+        kwargs = sync_mock.call_args.kwargs
+        self.assertEqual(kwargs["symbols"], ["0050", "0052"])
+        self.assertTrue(kwargs["force"])
+        self.assertEqual(kwargs["max_workers"], 3)
+        self.assertTrue(kwargs["full_refresh"])
+        self.assertEqual(kwargs["log_dir"], "/tmp/logs")
+        self.assertIn("updated=1 unchanged=1", result.output)
+        self.assertIn("log_json=/tmp/constituents.json", result.output)
+        self.assertIn("! 0052: missing overseas rows", result.output)
+
+    def test_sync_tw_etf_constituents_help_lists_options(self):
+        result = self.runner.invoke(cli.cli, ["sync-tw-etf-constituents", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Sync TW ETF constituent snapshots into DuckDB market_snapshots.", result.output)
+        self.assertIn("--max-workers", result.output)
+        self.assertIn("--full-refresh", result.output)
+
+    @patch("cli._resolve_store")
+    @patch("cli.export_tw_etf_report_artifact")
+    def test_export_tw_etf_report_outputs_summary(self, export_mock, resolve_store_mock):
+        resolve_store_mock.return_value = object()
+        export_mock.return_value = {
+            "symbol": "0052",
+            "trade_date_anchor": "20260320",
+            "backtest_start": "2023-01-01",
+            "backtest_end": "2026-03-21",
+            "report_dir": "/tmp/tw_etf_report_0052_20260320",
+            "file_count": 13,
+            "bundle_log_json_path": "/tmp/0052_sync_log.json",
+            "bundle_log_markdown_path": "/tmp/0052_sync_log.md",
+            "issues": ["aum delayed by one day"],
+        }
+
+        result = self.runner.invoke(
+            cli.cli,
+            [
+                "export-tw-etf-report",
+                "--symbol",
+                "0052",
+                "--out",
+                "/tmp/reports",
+                "--backtest-start",
+                "2023-01-01",
+                "--backtest-end",
+                "2026-03-21",
+                "--daily-lookback-days",
+                "21",
+                "--force",
+                "--log-dir",
+                "/tmp/logs",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        export_mock.assert_called_once()
+        kwargs = export_mock.call_args.kwargs
+        self.assertEqual(kwargs["symbol"], "0052")
+        self.assertEqual(kwargs["out"], "/tmp/reports")
+        self.assertEqual(kwargs["backtest_start"], "2023-01-01")
+        self.assertEqual(kwargs["backtest_end"], "2026-03-21")
+        self.assertEqual(kwargs["daily_lookback_days"], 21)
+        self.assertTrue(kwargs["force"])
+        self.assertTrue(kwargs["sync_constituents"])
+        self.assertEqual(kwargs["log_dir"], "/tmp/logs")
+        self.assertIn("report_dir=/tmp/tw_etf_report_0052_20260320", result.output)
+        self.assertIn("files=13", result.output)
+        self.assertIn("! aum delayed by one day", result.output)
+
+    def test_export_tw_etf_report_help_lists_options(self):
+        result = self.runner.invoke(cli.cli, ["export-tw-etf-report", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Export a single TW ETF report bundle", result.output)
+        self.assertIn("--sync-constituents", result.output)
+        self.assertIn("--backtest-start", result.output)
+
+    @patch("cli._resolve_store")
+    @patch("cli.export_etf_briefing_artifact")
+    def test_export_etf_briefing_outputs_summary(self, export_mock, resolve_store_mock):
+        resolve_store_mock.return_value = object()
+        export_mock.return_value = {
+            "briefing_dir": "/tmp/briefing_20260322",
+            "super_export_csv": "/tmp/briefing_20260322/tw_etf_super_export_20260322.csv",
+            "report_html": "/tmp/briefing_20260322/report_sima_yi.html",
+            "fb_text": "/tmp/briefing_20260322/fb_post_sima_yi.txt",
+            "news_sources": "/tmp/briefing_20260322/news_sources.json",
+            "issues": ["active symbols trimmed to chartable set"],
+        }
+
+        result = self.runner.invoke(
+            cli.cli,
+            [
+                "export-etf-briefing",
+                "--out-root",
+                "/tmp/out",
+                "--start",
+                "2023-01-01",
+                "--end",
+                "2026-03-22",
+                "--single-symbol",
+                "00935",
+                "--theme",
+                "soft-gray",
+                "--news-window-days",
+                "10",
+                "--include-extra-splits",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        export_mock.assert_called_once()
+        kwargs = export_mock.call_args.kwargs
+        self.assertEqual(kwargs["out_root"], "/tmp/out")
+        self.assertEqual(kwargs["start"], "2023-01-01")
+        self.assertEqual(kwargs["end"], "2026-03-22")
+        self.assertEqual(kwargs["single_symbol"], "00935")
+        self.assertEqual(kwargs["theme"], "soft-gray")
+        self.assertEqual(kwargs["news_window_days"], 10)
+        self.assertTrue(kwargs["include_extra_splits"])
+        self.assertIn("dir=/tmp/briefing_20260322", result.output)
+        self.assertIn("report_sima_yi.html", result.output)
+        self.assertIn("! active symbols trimmed to chartable set", result.output)
+
+    def test_export_etf_briefing_help_lists_options(self):
+        result = self.runner.invoke(cli.cli, ["export-etf-briefing", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Export a one-shot ETF briefing bundle", result.output)
+        self.assertIn("--single-symbol", result.output)
+        self.assertIn("--news-window-days", result.output)
+
+    @patch("cli._resolve_store")
     @patch("cli.sync_symbols_if_needed")
     @patch("cli.load_and_prepare_symbol_bars")
     @patch("cli.execute_backtest_run")

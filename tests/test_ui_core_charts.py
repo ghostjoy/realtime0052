@@ -94,3 +94,48 @@ def test_render_benchmark_lines_chart_adds_hidden_right_axis_mirror_for_single_s
     assert fig.layout.legend.x > 1.09
     assert len(fig.layout.shapes) == 1
     assert pd.Timestamp(fig.layout.shapes[0].x0) == idx[-1]
+
+
+def test_render_benchmark_lines_chart_marks_boxes_above_benchmark_with_star():
+    captured: dict[str, Any] = {}
+    _configure_test_runtime(captured)
+    idx = pd.date_range("2026-03-01", periods=3, freq="D", tz="UTC")
+    charts._render_benchmark_lines_chart(
+        lines=[
+            {
+                "name": "Strategy Equity",
+                "series": pd.Series([100, 112, 128], index=idx),
+                "color": "#2563EB",
+            },
+            {
+                "name": "Benchmark Equity",
+                "series": pd.Series([100, 106, 109], index=idx),
+                "color": "#475569",
+                "is_benchmark": True,
+            },
+            {
+                "name": "Buy-and-Hold（0052）",
+                "series": pd.Series([100, 104, 105], index=idx),
+                "color": "#F59E0B",
+            },
+        ],
+        height=420,
+        chart_key="unit_test_highlight_boxes_chart",
+        enable_lightweight=False,
+        highlight_above_benchmark_boxes=True,
+    )
+
+    fig = captured["fig"]
+    trace_names = [str(trace.name) for trace in fig.data]
+    assert trace_names[0] == "Benchmark Equity"
+    assert trace_names[1] == "Strategy Equity *"
+    assert any(name.startswith("Buy-and-Hold（0052）") for name in trace_names)
+    assert "* = final value above benchmark" in trace_names
+
+
+def test_build_multi_line_styles_keeps_all_asset_lines_solid():
+    styles = charts.build_multi_line_styles(
+        ["00988A", "00992A", "00994A", "00991A", "00987A", "00981A", "00985A", "00990A", "00995A"]
+    )
+    assert styles["00981A"]["dash"] == "solid"
+    assert styles["00995A"]["dash"] == "solid"

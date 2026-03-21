@@ -54,6 +54,7 @@ from services.sync_orchestrator import sync_symbols_if_needed
 from state_keys import BT_KEYS
 from ui.charts import render_lightweight_kline_equity_chart
 from ui.core.charts import (
+    build_multi_line_styles,
     _plotly_datetime_axis_range_with_right_padding,
     _plotly_right_edge_marker_x,
     _render_benchmark_lines_chart,
@@ -3691,6 +3692,7 @@ def _render_backtest_view():
                         "color": str(bench_style["color"]),
                         "width": float(bench_style["width"]),
                         "dash": str(bench_style["dash"]),
+                        "is_benchmark": True,
                         "hover_code": benchmark_symbol or "BENCHMARK",
                         "value_label": "Normalized",
                         "y_format": ".4f",
@@ -3710,20 +3712,21 @@ def _render_backtest_view():
                             "y_format": ".4f",
                         }
                     )
-                asset_palette = list(palette["asset_palette"])
-                asset_color_idx = 0
+                asset_styles = build_multi_line_styles(
+                    [c.split(":", 1)[1] for c in norm.columns if c.startswith("asset:")],
+                    colors=list(palette["asset_palette"]),
+                )
                 for col in [c for c in norm.columns if c.startswith("asset:")]:
                     sym = col.split(":", 1)[1]
                     sym_label = _tw_label(sym)
-                    line_color = asset_palette[asset_color_idx % len(asset_palette)]
-                    asset_color_idx += 1
+                    style = asset_styles.get(sym, {"color": "#1f77b4", "dash": "solid"})
                     chart_lines.append(
                         {
                             "name": f"Buy and Hold ({sym_label})",
                             "series": norm[col],
-                            "color": str(line_color),
+                            "color": str(style["color"]),
                             "width": 1.6,
-                            "dash": "solid",
+                            "dash": str(style["dash"]),
                             "hover_code": sym_label,
                             "value_label": "Normalized",
                             "y_format": ".4f",
@@ -3748,6 +3751,7 @@ def _render_backtest_view():
                     annotate_extrema=not multi_symbol_compare,
                     extrema_series_name=extrema_target,
                     watermark_text=benchmark_watermark_text,
+                    highlight_above_benchmark_boxes=multi_symbol_compare,
                 )
 
                 bench_perf = runner_series_metrics(comp_view["benchmark"])

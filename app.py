@@ -3854,18 +3854,9 @@ def _series_metrics_basic(series: pd.Series) -> dict[str, float]:
 
 
 def _build_symbol_line_styles(symbols: list[str]) -> dict[str, dict[str, str]]:
-    ordered = sorted({str(sym or "").strip().upper() for sym in symbols if str(sym or "").strip()})
-    out: dict[str, dict[str, str]] = {}
-    if not ordered:
-        return out
-    color_count = len(ACTIVE_ETF_LINE_COLORS)
-    dash_count = len(ACTIVE_ETF_LINE_DASHES)
-    for idx, sym in enumerate(ordered):
-        out[sym] = {
-            "color": ACTIVE_ETF_LINE_COLORS[idx % color_count],
-            "dash": ACTIVE_ETF_LINE_DASHES[(idx // color_count) % dash_count],
-        }
-    return out
+    from ui.core.charts import build_multi_line_styles
+
+    return build_multi_line_styles(symbols)
 
 
 def _benchmark_candidates_tw(choice: str, *, allow_twii_fallback: bool = False) -> list[str]:
@@ -11857,6 +11848,7 @@ def _render_top10_etf_2026_ytd_view(
                     "color": str(style["color"]),
                     "width": float(style["width"]),
                     "dash": str(style["dash"]),
+                    "is_benchmark": True,
                     "hover_code": benchmark_label,
                     "value_label": "Equity",
                     "y_format": ",.0f",
@@ -11889,6 +11881,7 @@ def _render_top10_etf_2026_ytd_view(
             lines=chart_lines,
             height=460,
             chart_key=f"{page_key_prefix}_benchmark_chart",
+            highlight_above_benchmark_boxes=True,
         )
 
         summary_rows: list[dict[str, object]] = []
@@ -12710,6 +12703,7 @@ def _render_active_etf_2026_ytd_view():
                         "color": str(style["color"]),
                         "width": float(style["width"]),
                         "dash": str(style["dash"]),
+                        "is_benchmark": True,
                         "hover_code": benchmark_label,
                         "value_label": "Equity",
                         "y_format": ",.0f",
@@ -12742,6 +12736,7 @@ def _render_active_etf_2026_ytd_view():
                 lines=chart_lines,
                 height=460,
                 chart_key=f"{key_prefix}_benchmark",
+                highlight_above_benchmark_boxes=True,
             )
 
             summary_rows: list[dict[str, object]] = []
@@ -15430,6 +15425,7 @@ def _render_tw_etf_rotation_view():
                 "color": str(style["color"]),
                 "width": float(style["width"]),
                 "dash": str(style["dash"]),
+                "is_benchmark": True,
                 "hover_code": benchmark_label,
                 "value_label": "Equity",
                 "y_format": ",.0f",
@@ -15452,6 +15448,7 @@ def _render_tw_etf_rotation_view():
         lines=chart_lines,
         height=500,
         chart_key="rotation_benchmark",
+        highlight_above_benchmark_boxes=True,
     )
 
     metrics = payload.get("metrics", {})
