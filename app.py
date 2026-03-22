@@ -2319,10 +2319,10 @@ PAGE_CARDS = [
     {"key": "即時看盤", "desc": "台股/美股即時報價、即時走勢與技術快照。"},
     {"key": "回測工作台", "desc": "日K同步、策略回測、回放與績效比較。"},
     {
-        "key": "2026 YTD 前十大股利型、配息型 ETF",
-        "desc": "2026 年截至今日的台股高股息主題 ETF 報酬率前十名（TWSE 官方主題/因子）。",
+        "key": "YTD股利型ETF",
+        "desc": "2026 年截至今日的台股股利型 ETF 全部排行（依本專案 `類型` 分類）。",
     },
-    {"key": "2026 YTD 前十大 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前十名。"},
+    {"key": "YTD top15 ETF", "desc": "2026 年截至今日的台股 ETF 報酬率前15名。"},
     {
         "key": "台股 ETF 全類型總表",
         "desc": "台股 ETF 全名單與 2025/2026 YTD/大盤勝負比較。",
@@ -2330,7 +2330,7 @@ PAGE_CARDS = [
     {"key": "2025 後20大最差勁 ETF", "desc": "2025 全年區間台股 ETF 報酬率後20名。"},
     {"key": "共識代表 ETF", "desc": "以前10 ETF 成分股交集，找出最具代表性的單一 ETF。"},
     {"key": "兩檔 ETF 推薦", "desc": "以共識代表+低重疊動能，收斂為兩檔建議組合。"},
-    {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效（依 TWSE 官方分類）。"},
+    {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效（依本專案 `類型` 分類）。"},
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
     {"key": "熱力圖總表", "desc": "集中管理你開啟過的 ETF 熱力圖與釘選卡片。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
@@ -5723,6 +5723,34 @@ TWSE_ETF_OFFICIAL_MAIN_TYPES = (
     "主動式ETF",
 )
 TWSE_ETF_HIGH_DIVIDEND_TAGS = ("高股息", "高息低波動")
+TW_ETF_SEMANTIC_TYPE_VALUES = (
+    "市值型",
+    "股利型",
+    "科技型",
+    "金融型",
+    "永續ESG型",
+    "產業主題型",
+    "海外市場型",
+    "債券收益型",
+    "平衡收益型",
+    "股票槓反型",
+    "債券槓反型",
+    "期貨商品型",
+    "期貨槓反型",
+    "主動式",
+    "其他",
+)
+TW_ETF_OFFICIAL_MAIN_TO_SEMANTIC_TYPES: dict[str, tuple[str, ...]] = {
+    "台股ETF": ("市值型", "股利型", "科技型", "金融型", "永續ESG型", "產業主題型", "其他"),
+    "國外股票ETF": ("海外市場型",),
+    "債券及固定收益ETF": ("債券收益型",),
+    "多資產ETF": ("平衡收益型",),
+    "股票槓反ETF": ("股票槓反型",),
+    "債券槓反ETF": ("債券槓反型",),
+    "期貨ETF": ("期貨商品型",),
+    "期貨槓反ETF": ("期貨槓反型",),
+    "主動式ETF": ("主動式",),
+}
 
 
 def _decode_tw_etf_official_profile_payload(
@@ -6150,6 +6178,34 @@ def _official_secondary_contains_any(value: object, tags: tuple[str, ...]) -> bo
         return False
     parts = {part.strip() for part in text.split("、") if part.strip()}
     return any(str(tag).strip() in parts for tag in tags if str(tag).strip())
+
+
+def _collect_requested_tw_etf_types(
+    *,
+    type_filter: object = "",
+    official_main_type_filter: object = "",
+    official_secondary_tag_filters: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    requested: list[str] = []
+    type_token = str(type_filter or "").strip()
+    if type_token:
+        if type_token in TW_ETF_SEMANTIC_TYPE_VALUES:
+            requested.append(type_token)
+        else:
+            requested.extend(TW_ETF_OFFICIAL_MAIN_TO_SEMANTIC_TYPES.get(type_token, ()))
+    main_type_token = str(official_main_type_filter or "").strip()
+    if main_type_token:
+        requested.extend(TW_ETF_OFFICIAL_MAIN_TO_SEMANTIC_TYPES.get(main_type_token, ()))
+    secondary_tags = tuple(
+        str(tag).strip() for tag in official_secondary_tag_filters if str(tag).strip()
+    )
+    if secondary_tags and any(tag in TWSE_ETF_HIGH_DIVIDEND_TAGS for tag in secondary_tags):
+        requested.append("股利型")
+    deduped: list[str] = []
+    for token in requested:
+        if token and token not in deduped:
+            deduped.append(token)
+    return tuple(deduped)
 
 
 def _resolve_tw_etf_official_labels(
@@ -7474,33 +7530,14 @@ def _build_tw_etf_top10_between(
         index_col_candidates=("標的指數",),
         target_yyyymmdd=end_used,
     )
-    merged["type"] = merged.get("類型", pd.Series(dtype=str))
-    type_filter_text = str(type_filter or "").strip()
-    main_type_filter_text = str(official_main_type_filter or "").strip()
-    secondary_tag_filters = tuple(
-        str(tag).strip() for tag in official_secondary_tag_filters if str(tag).strip()
+    merged["type"] = merged.get("類型", pd.Series(dtype=str, index=merged.index)).astype(str)
+    requested_types = _collect_requested_tw_etf_types(
+        type_filter=type_filter,
+        official_main_type_filter=official_main_type_filter,
+        official_secondary_tag_filters=official_secondary_tag_filters,
     )
-    if main_type_filter_text:
-        merged = merged[merged["官方主分類"] == main_type_filter_text].copy()
-    if secondary_tag_filters:
-        merged = merged[
-            merged["官方次分類"].map(
-                lambda value: _official_secondary_contains_any(value, secondary_tag_filters)
-            )
-        ].copy()
-    if type_filter_text:
-        if type_filter_text in TWSE_ETF_OFFICIAL_MAIN_TYPES:
-            merged = merged[merged["官方主分類"] == type_filter_text].copy()
-        elif type_filter_text == "股利型":
-            merged = merged[
-                merged["官方次分類"].map(
-                    lambda value: _official_secondary_contains_any(
-                        value, TWSE_ETF_HIGH_DIVIDEND_TAGS
-                    )
-                )
-            ].copy()
-        else:
-            merged = merged[merged["type"] == type_filter_text].copy()
+    if requested_types:
+        merged = merged[merged["type"].isin(requested_types)].copy()
     if merged.empty:
         return pd.DataFrame(), start_used, end_used, 0
     universe_count = int(len(merged))
@@ -7554,7 +7591,7 @@ def _build_tw_active_etf_ytd_between(
         name_col_candidates=("ETF",),
         target_yyyymmdd=end_used,
     )
-    end_active_df = end_active_df[end_active_df["官方主分類"] == "主動式ETF"].copy()
+    end_active_df = end_active_df[end_active_df["類型"].astype(str) == "主動式"].copy()
     if not end_active_df.empty:
         end_active_df = end_active_df.rename(columns={"代碼": "code", "ETF": "name"})
     if end_active_df.empty and not symbols:
@@ -10262,10 +10299,10 @@ def _render_tw_etf_top10_page(
     start_yyyymmdd: str,
     end_yyyymmdd: str,
     *,
-    top_n: int = 10,
+    top_n: int = 15,
     sort_ascending: bool = False,
-    count_label: str = "前10檔數",
-    ratio_label: str = "前10占比",
+    count_label: str = "前15檔數",
+    ratio_label: str = "前15占比",
     empty_warning_text: str = "目前沒有可顯示的 ETF 排行資料。",
 ):
     st.subheader(title)
@@ -10351,7 +10388,7 @@ def _render_tw_etf_top10_page(
         st.markdown(
             "\n".join(
                 [
-                    "- `類型`：優先用 TWSE `主題/因子` 推導語意分類（如 `科技型`、`股利型`、`市值型`），不足時再回退既有名稱/代碼規則。",
+                    "- `類型`：本專案自有語意分類欄位；會參考官方資料，但統一以專案規則整理，頁面篩選也都以 `類型` 為準。",
                 ]
             )
         )
@@ -10359,12 +10396,15 @@ def _render_tw_etf_top10_page(
 
 def _render_top10_etf_2025_view():
     _render_top10_etf_2026_ytd_view(
-        page_title="2026 年截至今日前十大高股息主題 ETF（台股）",
+        page_title="YTD股利型ETF（台股）",
         page_key_prefix="top10_dividend_etf_ytd",
+        top_n=99999,
         etf_type_filter="股利型",
-        card_subject_label="前十大高股息主題 ETF",
-        strategy_label="前十大高股息主題ETF等權",
-        empty_warning_text="目前沒有可顯示的高股息主題 ETF 排行資料。",
+        count_label="全部檔數",
+        ratio_label="母體占比",
+        card_subject_label="YTD股利型ETF",
+        strategy_label="YTD全部股利型等權",
+        empty_warning_text="目前沒有可顯示的 YTD股利型ETF 排行資料。",
     )
 
 
@@ -10374,7 +10414,7 @@ def _render_tw_etf_all_types_view():
 
     title_col, refresh_col, full_refresh_col, quick_export_col = st.columns([4, 1, 1, 1.35])
     with title_col:
-        st.subheader("台股 ETF 全類型總表（TWSE 官方分類，2025 / 2026 YTD）")
+        st.subheader("台股 ETF 全類型總表（自有類型分類，2025 / 2026 YTD）")
     with refresh_col:
         refresh_market = st.button(
             "更新最新市況",
@@ -10530,7 +10570,7 @@ def _render_tw_etf_all_types_view():
             disable_backtest_drilldown=True,
         )
         st.caption("表格採可捲動模式，畫面約可顯示 30 列。")
-        st.caption("分類欄位說明：`類型` 為語意分類，優先參考 TWSE 官方 `主題/因子`。")
+        st.caption("分類欄位說明：`類型` 為本專案自有語意分類欄位，供所有 ETF 頁面統一篩選使用。")
 
         st.markdown("#### 官方 ETF 日成交總表")
         daily_market_refresh = st.button(
@@ -11295,11 +11335,11 @@ def _render_bottom20_etf_2025_view():
 
 def _render_top10_etf_2026_ytd_view(
     *,
-    page_title: str = "2026 年截至今日前十大 ETF（台股）",
+    page_title: str = "YTD top15 ETF（台股）",
     page_key_prefix: str = "top10_etf_ytd",
     start_target: str = "20251231",
     end_target: str | None = None,
-    top_n: int = 10,
+    top_n: int = 15,
     sort_ascending: bool = False,
     etf_type_filter: str | None = None,
     exclude_split_event: bool = False,
@@ -11309,13 +11349,13 @@ def _render_top10_etf_2026_ytd_view(
     compare_col_label: str = "2025績效(%)",
     performance_col_label: str = "YTD績效(%)",
     underperform_col_label: str | None = None,
-    count_label: str = "前10檔數",
-    ratio_label: str = "前10占比",
+    count_label: str = "前15檔數",
+    ratio_label: str = "前15占比",
     benchmark_period_note: str = "同本頁比較區間",
     compare_period_caption_label: str = "2025 對照區間",
-    card_subject_label: str = "前十大 ETF",
-    strategy_label: str = "前十大ETF等權",
-    empty_warning_text: str = "目前沒有可顯示的 ETF 排行資料。",
+    card_subject_label: str = "YTD top15 ETF",
+    strategy_label: str = "YTD top15ETF等權",
+    empty_warning_text: str = "目前沒有可顯示的 YTD top15 ETF 排行資料。",
 ):
     store = _history_store()
     etf_type_filter_text = str(etf_type_filter or "").strip()
@@ -11529,30 +11569,10 @@ def _render_top10_etf_2026_ytd_view(
         m2.metric("母體檔數（可比較）", str(universe_count))
         m3.metric(ratio_label, top10_ratio_text)
         type_series = top10_etf_df.get("類型", pd.Series(dtype=str)).astype(str)
-        official_secondary_series = top10_etf_df.get("官方次分類", pd.Series(dtype=str)).astype(
-            str
-        )
         if etf_type_filter_text == "股利型":
-            m4.metric(
-                "高股息",
-                str(
-                    int(
-                        official_secondary_series.map(
-                            lambda value: _official_secondary_contains_any(value, ("高股息",))
-                        ).sum()
-                    )
-                ),
-            )
-            m5.metric(
-                "高息低波動",
-                str(
-                    int(
-                        official_secondary_series.map(
-                            lambda value: _official_secondary_contains_any(value, ("高息低波動",))
-                        ).sum()
-                    )
-                ),
-            )
+            avg_return = pd.to_numeric(top10_etf_df.get(performance_col_label), errors="coerce").mean()
+            m4.metric("股利型檔數", str(int((type_series == "股利型").sum())))
+            m5.metric("平均績效(%)", "—" if pd.isna(avg_return) else f"{float(avg_return):.2f}")
         else:
             m4.metric("市值型", str(int((type_series == "市值型").sum())))
             m5.metric("科技型", str(int((type_series == "科技型").sum())))
@@ -11602,9 +11622,7 @@ def _render_top10_etf_2026_ytd_view(
         if daily_price_used or daily_end_used:
             st.caption(f"同日價格基準日：{daily_price_used or daily_end_used}")
         if etf_type_filter_text:
-            st.caption(
-                "篩選條件：僅納入 TWSE 官方 `主題/因子` 含 `高股息` 或 `高息低波動` 的 ETF。"
-            )
+            st.caption(f"篩選條件：僅納入 `類型 = {etf_type_filter_text}` 的 ETF。")
         if exclude_split_event:
             st.caption("區間處理：已排除區間內含分割事件的標的（避免價格比較失真）。")
         if rank_by_underperform:
@@ -11635,7 +11653,7 @@ def _render_top10_etf_2026_ytd_view(
                 merged_link_config.update(table_link_config)
         styled_table_df = _style_tw_today_move_table(table_display)
         if page_key_prefix in {"top10_etf_ytd", "top10_dividend_etf_ytd"}:
-            # 固定顯示完整 11 列（台股大盤 + 前10），方便一次截圖。
+            # 固定顯示完整當前排行列數（含台股大盤），方便一次截圖。
             table_height = min(640, 42 + max(1, int(len(table_df))) * 36)
             st.dataframe(
                 styled_table_df,
@@ -11708,7 +11726,7 @@ def _render_top10_etf_2026_ytd_view(
         st.markdown(
             "\n".join(
                 [
-                    "- `類型`：優先用 TWSE `主題/因子` 推導語意分類（如 `科技型`、`股利型`、`市值型`），不足時再回退既有名稱/代碼規則。",
+                    "- `類型`：本專案自有語意分類欄位；會參考官方資料，但統一以專案規則整理，頁面篩選也都以 `類型` 為準。",
                 ]
             )
         )
@@ -12527,7 +12545,7 @@ def _render_active_etf_2026_ytd_view():
         st.caption(
             "報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`大盤超額(%) = YTD績效 - 大盤報酬`。"
         )
-        st.caption("主動式篩選：僅納入 TWSE 官方 `證券類別 = 主動式ETF` 的標的。")
+        st.caption("主動式篩選：僅納入 `類型 = 主動式` 的標的。")
         table_drilldown_enabled = _render_table_drilldown_toggle_inline(
             scope="active_etf_ytd_main",
             label="主動式排行表點擊導流",
@@ -13449,18 +13467,18 @@ def _render_tutorial_view():
                 "什麼時候用": "驗證策略與參數",
             },
             {
-                "分頁": "2026 YTD 前十大股利型、配息型 ETF",
-                "你會看到什麼": "2026 年迄今高股息主題 Top10、2025 對照、大盤勝負、Benchmark 對照卡",
+                "分頁": "YTD股利型ETF",
+                "你會看到什麼": "2026 年迄今股利型全排行、2025 對照、大盤勝負、Benchmark 對照卡",
                 "什麼時候用": "看今年高股息族群領先 ETF",
             },
             {
-                "分頁": "2026 YTD 前十大 ETF",
-                "你會看到什麼": "2026 年迄今 Top10、2025 對照、大盤勝負、Benchmark 對照卡",
+                "分頁": "YTD top15 ETF",
+                "你會看到什麼": "2026 年迄今 Top15、2025 對照、大盤勝負、Benchmark 對照卡",
                 "什麼時候用": "看今年領先 ETF",
             },
             {
                 "分頁": "台股 ETF 全類型總表",
-                "你會看到什麼": "台股 ETF 全名單、TWSE 官方分類、2025/2026YTD 與大盤勝負",
+                "你會看到什麼": "台股 ETF 全名單、自有類型分類、2025/2026YTD 與大盤勝負",
                 "什麼時候用": "一次盤點全市場 ETF 的跨年度相對強弱",
             },
             {
@@ -13533,7 +13551,7 @@ def _render_tutorial_view():
             [
                 "1. 到 `回測工作台`，先跑一個 `buy_hold`（單檔、近 1~3 年）。",
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
-                "3. 再到 `2026 YTD 前十大 ETF`、`2026 YTD 前十大股利型、配息型 ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較；其中高股息頁與全類型頁已採 TWSE 官方分類，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
+                "3. 再到 `YTD top15 ETF`、`YTD股利型ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較；這些頁面的 ETF 分類都以本專案 `類型` 欄位為準，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
                 "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00735 / 0050 / 0052 熱力圖`。",
                 "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
             ]
@@ -13545,7 +13563,7 @@ def _render_tutorial_view():
     cache_df = pd.DataFrame(
         [
             {
-                "項目": "更新最新市況（Top10/主動式）",
+                "項目": "更新最新市況（Top15/主動式）",
                 "作用": "清除該頁快取並重抓最新快照",
                 "不按會怎樣": "會先顯示上次可用結果",
             },
@@ -13649,7 +13667,7 @@ def _render_tutorial_view():
     )
     st.dataframe(threshold_df, width="stretch", hide_index=True)
 
-    st.markdown("### 6) 指標怎麼讀（Top10/主動式/Benchmark）")
+    st.markdown("### 6) 指標怎麼讀（Top15/主動式/Benchmark）")
     metric_df = pd.DataFrame(
         [
             {"欄位": "YTD績效(%)", "意思": "今年截至目前區間報酬"},
@@ -13832,7 +13850,7 @@ def _render_tutorial_view():
             [
                 "1. 先在 `回測工作台` 用 `buy_hold` 跑單檔，確認資料與報表都正常。",
                 "2. 再改成 `sma_trend_filter` 或 `donchian_breakout`，比較是否優於 `buy_hold`。",
-                "3. 接著用 `2026 YTD 前十大 ETF` + `2026 YTD 前十大股利型、配息型 ETF` + `台股 ETF 全類型總表` + `2025 後20大最差勁 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合；高股息與主動式頁面都已採 TWSE 官方分類母體。",
+                "3. 接著用 `YTD top15 ETF` + `YTD股利型ETF` + `台股 ETF 全類型總表` + `2025 後20大最差勁 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合；高股息與主動式頁面都已改用本專案 `類型` 欄位作為母體篩選。",
                 "4. 最後才進 `ETF 輪動策略`、`2026 YTD 主動式 ETF` 與各熱力圖做進階判讀。",
             ]
         )
@@ -15977,8 +15995,8 @@ def main():
     page_renderers = {
         "即時看盤": _render_live_view,
         "回測工作台": _render_backtest_view,
-        "2026 YTD 前十大股利型、配息型 ETF": _render_top10_etf_2025_view,
-        "2026 YTD 前十大 ETF": _render_top10_etf_2026_ytd_view,
+        "YTD股利型ETF": _render_top10_etf_2025_view,
+        "YTD top15 ETF": _render_top10_etf_2026_ytd_view,
         "台股 ETF 全類型總表": _render_tw_etf_all_types_view,
         "2025 後20大最差勁 ETF": _render_bottom20_etf_2025_view,
         "共識代表 ETF": _render_consensus_representative_etf_view,

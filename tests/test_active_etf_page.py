@@ -17,14 +17,14 @@ from app import (
     ACTIVE_ETF_LINE_COLORS,
     BACKTEST_REPLAY_SCHEMA_VERSION,
     DEFAULT_ACTIVE_PAGE,
-    TWSE_ETF_HIGH_DIVIDEND_TAGS,
     TW_ETF_AUM_HISTORY_MAX_DATE_COLS,
+    TWSE_ETF_HIGH_DIVIDEND_TAGS,
     _append_missing_tw_etf_rows_from_aum_snapshot,
     _apply_unified_benchmark_hover,
     _attach_rank_movement_columns,
-    _attach_tw_etf_official_category_columns,
     _attach_tw_etf_aum_column,
     _attach_tw_etf_management_fee_column,
+    _attach_tw_etf_official_category_columns,
     _auto_run_daily_incremental_refresh,
     _benchmark_candidates_tw,
     _blend_hex_color,
@@ -61,11 +61,11 @@ from app import (
     _consensus_threshold_candidates,
     _consume_heatmap_drilldown_query,
     _dataframe_with_backtest_drilldown,
+    _decode_tw_etf_official_profile_payload,
     _decorate_dataframe_backtest_links,
     _decorate_tw_etf_aum_history_links,
     _decorate_tw_etf_name_heatmap_links,
     _decorate_tw_etf_top10_ytd_table,
-    _decode_tw_etf_official_profile_payload,
     _dynamic_heatmap_page_renderers,
     _extract_client_ip_from_headers,
     _fetch_twse_snapshot_with_fallback,
@@ -1959,6 +1959,81 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertNotIn("官方主分類", out.columns)
         self.assertNotIn("官方次分類", out.columns)
 
+    def test_build_tw_active_etf_ytd_between_uses_semantic_type_filter(self):
+        _build_tw_active_etf_ytd_between.clear()
+
+        start_df = pd.DataFrame(
+            [
+                {"code": "00980A", "name": "甲", "close": 50.0},
+                {"code": "00981A", "name": "乙", "close": 80.0},
+                {"code": "00935", "name": "丙", "close": 80.0},
+            ]
+        )
+        end_df = pd.DataFrame(
+            [
+                {"code": "00993A", "name": "丁", "close": 120.0},
+                {"code": "00980A", "name": "甲", "close": 45.0},
+                {"code": "00935", "name": "丙", "close": 150.0},
+                {"code": "00981A", "name": "乙", "close": 100.0},
+            ]
+        )
+
+        def _bars(rows: list[tuple[str, float]]) -> pd.DataFrame:
+            idx = pd.to_datetime([d for d, _ in rows], utc=True)
+            closes = [float(v) for _, v in rows]
+            return pd.DataFrame(
+                {
+                    "open": closes,
+                    "high": closes,
+                    "low": closes,
+                    "close": closes,
+                    "volume": [0.0] * len(closes),
+                },
+                index=idx,
+            )
+
+        class _FakeStore:
+            def __init__(self):
+                self._bars_map = {
+                    "00981A": _bars([("2026-01-02", 80.0), ("2026-02-14", 100.0)]),
+                    "00993A": _bars([("2026-02-03", 100.0), ("2026-02-14", 120.0)]),
+                    "00980A": _bars([("2026-01-02", 50.0), ("2026-02-14", 45.0)]),
+                }
+
+            def load_daily_bars(self, symbol, market, start=None, end=None):
+                return self._bars_map.get(str(symbol), pd.DataFrame())
+
+            def sync_symbol_history(self, symbol, market, start=None, end=None):
+                return SimpleNamespace(error=None)
+
+        def _attach_semantic_categories(frame, **kwargs):
+            out = frame.copy()
+            out["類型"] = out["代碼"].astype(str).map(
+                {
+                    "00980A": "主動式",
+                    "00981A": "主動式",
+                    "00993A": "主動式",
+                    "00935": "科技型",
+                }
+            )
+            out["官方主分類"] = ""
+            out["官方次分類"] = ""
+            return out
+
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20251231", start_df), ("20260214", end_df)],
+            ),
+            patch("app._attach_tw_etf_official_category_columns", side_effect=_attach_semantic_categories),
+            patch("app._history_store", return_value=_FakeStore()),
+            patch("app.known_split_events", return_value=[]),
+        ):
+            out, _, _ = _build_tw_active_etf_ytd_between("20260101", "20260216")
+
+        self.assertEqual(list(out["代碼"]), ["00981A", "00993A", "00980A"])
+        self.assertNotIn("00935", list(out["代碼"]))
+
     def test_build_tw_etf_top10_between_returns_universe_count(self):
         _build_tw_etf_top10_between.clear()
 
@@ -2137,6 +2212,55 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertTrue((out["類型"] == "股利型").all())
         self.assertNotIn("官方主分類", out.columns)
         self.assertNotIn("官方次分類", out.columns)
+
+    def test_build_tw_etf_top10_between_type_filter_uses_semantic_type(self):
+        _build_tw_etf_top10_between.clear()
+
+        start_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "甲", "close": 100.0},
+                {"code": "0056", "name": "乙", "close": 30.0},
+                {"code": "00929", "name": "丙", "close": 20.0},
+            ]
+        )
+        end_df = pd.DataFrame(
+            [
+                {"code": "0050", "name": "甲", "close": 120.0},
+                {"code": "0056", "name": "乙", "close": 33.0},
+                {"code": "00929", "name": "丙", "close": 25.0},
+            ]
+        )
+
+        def _attach_semantic_categories(frame, **kwargs):
+            out = frame.copy()
+            out["類型"] = out["code"].astype(str).map(
+                {
+                    "0050": "市值型",
+                    "0056": "股利型",
+                    "00929": "股利型",
+                }
+            )
+            out["官方主分類"] = "台股ETF"
+            out["官方次分類"] = ""
+            return out
+
+        with (
+            patch(
+                "app._fetch_twse_snapshot_with_fallback",
+                side_effect=[("20251231", start_df), ("20260214", end_df)],
+            ),
+            patch("app._attach_tw_etf_official_category_columns", side_effect=_attach_semantic_categories),
+            patch("app.known_split_events", return_value=[]),
+        ):
+            out, _, _, universe_count = _build_tw_etf_top10_between(
+                "20260101",
+                "20260216",
+                type_filter="股利型",
+            )
+
+        self.assertEqual(universe_count, 2)
+        self.assertEqual(list(out["代碼"]), ["00929", "0056"])
+        self.assertTrue((out["類型"] == "股利型").all())
 
     def test_build_tw_etf_top10_between_bottom_n(self):
         _build_tw_etf_top10_between.clear()
