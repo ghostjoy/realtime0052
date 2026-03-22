@@ -24,6 +24,7 @@ uv run realtime0052 export-tw-etf-report --help
 - `--daily-lookback-days 14`
 - `--force`
 - `--log-dir ./logs/`
+- `--heatmap-only`：只輸出成分股熱力圖 PNG
 
 ## 範例
 
@@ -31,6 +32,7 @@ uv run realtime0052 export-tw-etf-report --help
 uv run realtime0052 export-tw-etf-report --symbol 0052 --out ./reports/
 uv run realtime0052 export-tw-etf-report --symbol 0052 --backtest-start 2023-01-01 --backtest-end 2026-03-21
 uv run realtime0052 export-tw-etf-report --symbol 0052 --no-sync-constituents --out ./reports/
+uv run realtime0052 export-tw-etf-report --symbol 0052 --heatmap-only --out ./0052_constituent_heatmap.png
 ```
 
 ## 報表包內容
@@ -65,6 +67,7 @@ tw_etf_report_0052_20260321/
 
 - 若未指定 `--backtest-start / --backtest-end`，回測、圖表與技術指標會使用可得全區間
 - 預設會先執行一次台股 ETF 成分股掃描
+- `--heatmap-only` 模式只輸出成分股熱力圖 PNG；`--out` 可直接指定 `.png` 檔名，或指定目錄後自動命名
 - sync log 會記錄：
   - 哪些資料表有更新
   - 哪些資料表沒有更新

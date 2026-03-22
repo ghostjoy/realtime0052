@@ -28,6 +28,12 @@ uv run realtime0052 sync-tw-etf-constituents --help
 uv run realtime0052 export-tw-etf-report --symbol 0052 --out ./reports/
 ```
 
+若只想單獨輸出成分股熱力圖：
+
+```bash
+uv run realtime0052 export-tw-etf-report --symbol 0052 --heatmap-only --out ./0052_constituent_heatmap.png
+```
+
 報表包會輸出成資料夾，檔名全部帶 ETF 代碼，方便多檔混放時一眼辨識。
 
 範例：

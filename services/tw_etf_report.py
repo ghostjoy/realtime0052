@@ -34,6 +34,13 @@ from utils import normalize_ohlcv_frame
 
 DEFAULT_TW_ETF_REPORT_ROOT = Path("artifacts") / "reports"
 DEFAULT_TW_ETF_REPORT_LOG_DIR = Path("artifacts") / "logs"
+REPORT_HEATMAP_EXCESS_COLORSCALE = [
+    [0.0, "rgba(230,98,90,0.55)"],
+    [0.25, "rgba(244,164,96,0.38)"],
+    [0.5, "rgba(241,245,249,0.18)"],
+    [0.75, "rgba(125,211,192,0.34)"],
+    [1.0, "rgba(94,234,212,0.55)"],
+]
 _INDICATOR_COLUMNS = [
     "sma_5",
     "sma_20",
@@ -317,6 +324,76 @@ def export_tw_etf_report_artifact(
     }
 
 
+def export_tw_etf_constituent_heatmap_artifact(
+    *,
+    store: HistoryStore,
+    symbol: str,
+    out: str | None = None,
+    backtest_start: str | None = None,
+    backtest_end: str | None = None,
+    ytd_end: str | None = None,
+    force: bool = False,
+    sync_constituents: bool = True,
+    log_dir: str | Path | None = None,
+) -> dict[str, object]:
+    etf_code = str(symbol or "").strip().upper()
+    if not etf_code:
+        raise ValueError("symbol is required")
+
+    app_module = _load_app_module()
+    periods = resolve_tw_etf_super_export_periods(ytd_end=ytd_end)
+    target_trade_token = (
+        str(_call_app_quiet(app_module._resolve_latest_tw_trade_day_token, periods["ytd_end"])).strip()
+        or periods["ytd_end"]
+    )
+    if bool(sync_constituents):
+        sync_tw_etf_constituent_snapshots(
+            store=store,
+            symbols=None,
+            force=bool(force),
+            max_workers=4,
+            full_refresh=False,
+            log_dir=log_dir or DEFAULT_TW_ETF_CONSTITUENT_LOG_DIR,
+        )
+    constituent_rows, constituent_source, constituent_issue = _resolve_single_etf_constituents(
+        store=store,
+        app_module=app_module,
+        symbol=etf_code,
+        force=bool(force),
+    )
+    range_start_dt, range_end_dt = _resolve_backtest_window(
+        backtest_start=backtest_start,
+        backtest_end=backtest_end,
+    )
+    output_path = resolve_tw_etf_constituent_heatmap_output_path(
+        symbol=etf_code,
+        trade_token=target_trade_token,
+        out=out,
+    )
+    issues: list[str] = []
+    if constituent_issue:
+        issues.append(str(constituent_issue))
+    if not _write_constituent_heatmap(
+        store=store,
+        symbol=etf_code,
+        constituent_rows=constituent_rows,
+        output_path=output_path,
+        start_dt=range_start_dt,
+        end_dt=range_end_dt,
+    ):
+        raise RuntimeError("constituent heatmap skipped because TW constituent rows were unavailable")
+    return {
+        "symbol": etf_code,
+        "trade_date_anchor": target_trade_token,
+        "output_path": str(output_path),
+        "backtest_start": range_start_dt.date().isoformat(),
+        "backtest_end": range_end_dt.date().isoformat(),
+        "constituent_count": int(len(constituent_rows)),
+        "constituent_source": constituent_source,
+        "issues": issues,
+    }
+
+
 def resolve_tw_etf_report_output_dir(
     *,
     symbol: str,
@@ -334,6 +411,29 @@ def resolve_tw_etf_report_output_dir(
     if candidate.suffix:
         return candidate
     return candidate / dir_name
+
+
+def resolve_tw_etf_constituent_heatmap_output_path(
+    *,
+    symbol: str,
+    trade_token: str,
+    out: str | None = None,
+) -> Path:
+    code = str(symbol or "").strip().upper()
+    token = str(trade_token or "").strip() or "latest"
+    file_name = f"{code}_constituent_heatmap_{token}.png"
+    if not str(out or "").strip():
+        return resolve_tw_etf_report_output_dir(symbol=code, trade_token=token, out=None) / f"{code}_constituent_heatmap.png"
+    candidate = Path(str(out).strip()).expanduser()
+    if candidate.suffix.lower() == ".png":
+        return candidate
+    if candidate.exists() and candidate.is_dir():
+        return candidate / file_name
+    if str(candidate).endswith("/"):
+        return candidate / file_name
+    if candidate.suffix:
+        return candidate
+    return candidate / file_name
 
 
 def _build_single_etf_frames(
@@ -647,18 +747,12 @@ def _build_constituent_heatmap_figure(
                 z=z,
                 text=text,
                 texttemplate="%{text}",
-                textfont=dict(size=12, color="#F8FAFC"),
+                textfont=dict(size=12, color="#111827"),
                 customdata=custom,
                 zmin=-max_abs,
                 zmax=max_abs,
                 zmid=0.0,
-                colorscale=[
-                    [0.0, "#8B1E3F"],
-                    [0.45, "#D97706"],
-                    [0.5, "#475569"],
-                    [0.55, "#0EA5E9"],
-                    [1.0, "#166534"],
-                ],
+                colorscale=REPORT_HEATMAP_EXCESS_COLORSCALE,
                 xgap=6,
                 ygap=6,
                 hoverongaps=False,

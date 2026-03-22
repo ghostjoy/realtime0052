@@ -263,6 +263,49 @@ class CliTests(unittest.TestCase):
         self.assertIn("files=13", result.output)
         self.assertIn("! aum delayed by one day", result.output)
 
+    @patch("cli._resolve_store")
+    @patch("cli.export_tw_etf_constituent_heatmap_artifact")
+    def test_export_tw_etf_report_heatmap_only_outputs_summary(
+        self, export_mock, resolve_store_mock
+    ):
+        resolve_store_mock.return_value = object()
+        export_mock.return_value = {
+            "symbol": "0052",
+            "trade_date_anchor": "20260320",
+            "backtest_start": "2023-01-01",
+            "backtest_end": "2026-03-21",
+            "output_path": "/tmp/0052_constituent_heatmap.png",
+            "constituent_count": 50,
+            "issues": ["constituents snapshot fell back to cache"],
+        }
+
+        result = self.runner.invoke(
+            cli.cli,
+            [
+                "export-tw-etf-report",
+                "--symbol",
+                "0052",
+                "--heatmap-only",
+                "--out",
+                "/tmp/0052_constituent_heatmap.png",
+                "--backtest-start",
+                "2023-01-01",
+                "--backtest-end",
+                "2026-03-21",
+                "--no-sync-constituents",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        export_mock.assert_called_once()
+        kwargs = export_mock.call_args.kwargs
+        self.assertEqual(kwargs["symbol"], "0052")
+        self.assertEqual(kwargs["out"], "/tmp/0052_constituent_heatmap.png")
+        self.assertFalse(kwargs["sync_constituents"])
+        self.assertIn("path=/tmp/0052_constituent_heatmap.png", result.output)
+        self.assertIn("constituents=50", result.output)
+        self.assertIn("! constituents snapshot fell back to cache", result.output)
+
     def test_export_tw_etf_report_help_lists_options(self):
         result = self.runner.invoke(cli.cli, ["export-tw-etf-report", "--help"])
 
@@ -270,6 +313,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Export a single TW ETF report bundle", result.output)
         self.assertIn("--sync-constituents", result.output)
         self.assertIn("--backtest-start", result.output)
+        self.assertIn("--heatmap-only", result.output)
 
     @patch("cli._resolve_store")
     @patch("cli.export_etf_briefing_artifact")

@@ -12,6 +12,7 @@ import pandas as pd
 from services.tw_etf_constituent_sync import TW_ETF_CONSTITUENTS_DATASET_KEY
 from services.tw_etf_report import (
     _build_constituent_heatmap_figure,
+    export_tw_etf_constituent_heatmap_artifact,
     export_tw_etf_report_artifact,
 )
 
@@ -84,7 +85,7 @@ class TwEtfReportTests(unittest.TestCase):
                     "symbol": f"{2300 + i}",
                     "name": f"公司{i}",
                     "weight_pct": 5.0 + i,
-                    "asset_return_pct": 10.0 + i,
+                    "strategy_return_pct": 10.0 + i,
                     "benchmark_return_pct": 4.0,
                     "excess_pct": 6.0 + i,
                     "status": "OK",
@@ -101,6 +102,66 @@ class TwEtfReportTests(unittest.TestCase):
         self.assertEqual(len(fig.data[0]["z"]), 3)
         self.assertEqual(len(fig.data[0]["z"][0]), 6)
         self.assertEqual(str(fig.layout.title.text), "0052 成分股熱力圖（相對大盤）")
+        self.assertEqual(fig.data[0]["textfont"]["color"], "#111827")
+
+    def test_export_constituent_heatmap_artifact_writes_single_png(self):
+        store = _FakeStore()
+        store.save_market_snapshot(
+            dataset_key=TW_ETF_CONSTITUENTS_DATASET_KEY,
+            market="TW",
+            symbol="0052",
+            interval="constituents",
+            source="moneydj_basic0007b_full",
+            payload={
+                "rows": [
+                    {
+                        "rank": 1,
+                        "symbol": "2330.TW",
+                        "tw_code": "2330",
+                        "name": "台積電",
+                        "market": "TW",
+                        "weight_pct": 55.5,
+                    }
+                ],
+                "source": "moneydj_basic0007b_full",
+            },
+        )
+
+        fake_app = SimpleNamespace(
+            _resolve_latest_tw_trade_day_token=lambda anchor_yyyymmdd=None: str(
+                anchor_yyyymmdd or "20260320"
+            ),
+            _load_etf_constituents_rows=lambda service, etf_code, force_refresh_constituents=False: (
+                [],
+                "moneydj_basic0007b_full",
+                "",
+            ),
+            _market_service=lambda: object(),
+        )
+
+        def _fake_heatmap(**kwargs):
+            Path(str(kwargs["output_path"])).write_bytes(b"png")
+            return True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "0052_heatmap.png"
+            with (
+                patch("services.tw_etf_report._load_app_module", return_value=fake_app),
+                patch("services.tw_etf_report._write_constituent_heatmap", side_effect=_fake_heatmap),
+            ):
+                result = export_tw_etf_constituent_heatmap_artifact(
+                    store=store,
+                    symbol="0052",
+                    out=str(out_path),
+                    sync_constituents=False,
+                    ytd_end="20260320",
+                    backtest_start="2026-03-17",
+                    backtest_end="2026-03-20",
+                )
+
+            self.assertTrue(out_path.exists())
+            self.assertEqual(str(result["output_path"]), str(out_path))
+            self.assertEqual(str(result["trade_date_anchor"]), "20260320")
 
     def test_export_report_bundle_creates_symbol_prefixed_files(self):
         store = _FakeStore()

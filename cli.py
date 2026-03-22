@@ -37,7 +37,10 @@ from services.sync_orchestrator import normalize_symbols, sync_symbols_if_needed
 from services.tw_etf_constituent_sync import sync_tw_etf_constituent_snapshots
 from services.tw_etf_daily_sync import sync_twse_etf_daily_market
 from services.tw_etf_mis_sync import sync_twse_etf_mis_daily
-from services.tw_etf_report import export_tw_etf_report_artifact
+from services.tw_etf_report import (
+    export_tw_etf_constituent_heatmap_artifact,
+    export_tw_etf_report_artifact,
+)
 from services.tw_etf_super_export import export_tw_etf_super_table_artifact
 
 
@@ -401,6 +404,7 @@ def sync_tw_etf_constituents(
 @click.option("--daily-lookback-days", default=14, type=int, show_default=True)
 @click.option("--force", is_flag=True, default=False, help="Force re-fetch for covered official datasets")
 @click.option("--log-dir", help="Directory for external JSON/Markdown sync logs")
+@click.option("--heatmap-only", is_flag=True, default=False, help="Only export the constituent heatmap PNG")
 def export_tw_etf_report(
     symbol: str,
     out: str | None,
@@ -414,6 +418,7 @@ def export_tw_etf_report(
     daily_lookback_days: int,
     force: bool,
     log_dir: str | None,
+    heatmap_only: bool,
 ) -> None:
     """Export a single TW ETF report bundle with tables, charts, indicators, and logs.
 
@@ -423,11 +428,37 @@ def export_tw_etf_report(
       uv run realtime0052 export-tw-etf-report --help
       uv run realtime0052 export-tw-etf-report --symbol 0052 --out ./reports/
       uv run realtime0052 export-tw-etf-report --symbol 0052 --backtest-start 2023-01-01 --backtest-end 2026-03-21
+      uv run realtime0052 export-tw-etf-report --symbol 0052 --heatmap-only --out ./0052_constituent_heatmap.png
     """
     symbols = normalize_symbols(parse_symbols(symbol))
     if len(symbols) != 1:
         raise click.ClickException("export-tw-etf-report requires exactly one TW ETF symbol")
     store = _resolve_store()
+    if bool(heatmap_only):
+        result = export_tw_etf_constituent_heatmap_artifact(
+            store=store,
+            symbol=symbols[0],
+            out=out,
+            backtest_start=backtest_start,
+            backtest_end=backtest_end,
+            ytd_end=ytd_end,
+            force=bool(force),
+            sync_constituents=bool(sync_constituents),
+            log_dir=log_dir,
+        )
+        click.echo(
+            "export_tw_etf_constituent_heatmap "
+            f"symbol={result.get('symbol')} "
+            f"trade_date={result.get('trade_date_anchor')} "
+            f"backtest={result.get('backtest_start')}->{result.get('backtest_end')}"
+        )
+        click.echo(
+            f"path={result.get('output_path')} "
+            f"constituents={int(result.get('constituent_count') or 0)}"
+        )
+        for issue in list(result.get("issues") or [])[:10]:
+            click.echo(f"! {issue}")
+        return
     result = export_tw_etf_report_artifact(
         store=store,
         symbol=symbols[0],
