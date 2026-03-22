@@ -39,6 +39,8 @@ DEFAULT_WRITEBACK_WORKERS = 2
 MAX_WRITEBACK_WORKERS = 8
 DEFAULT_DAILY_DELTA_COMPACT_THRESHOLD = 24
 DEFAULT_INTRADAY_DELTA_COMPACT_THRESHOLD = 48
+DEFAULT_CONNECT_RETRY_ATTEMPTS = 6
+DEFAULT_CONNECT_RETRY_DELAY_SEC = 1.0
 ICLOUD_DOCS_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
 DEFAULT_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_DB_FILENAME
 DEFAULT_LEGACY_ICLOUD_DB_PATH = ICLOUD_DOCS_ROOT / "codexapp" / DEFAULT_LEGACY_SQLITE_FILENAME
@@ -69,6 +71,17 @@ class _LockedDuckConnection:
 
 class DuckHistoryStore:
     backend_name = "duckdb"
+
+    @staticmethod
+    def _is_retryable_duckdb_connect_error(message: object) -> bool:
+        text = str(message or "").strip().lower()
+        if not text:
+            return False
+        if "could not set lock on file" in text:
+            return True
+        if "conflicting lock is held" in text:
+            return True
+        return "unique file handle conflict" in text
 
     @staticmethod
     def _compute_daily_vwap_series(frame: pd.DataFrame) -> pd.Series:
@@ -296,9 +309,21 @@ class DuckHistoryStore:
     def _connect(self) -> duckdb.DuckDBPyConnection:
         self._duck_conn_lock.acquire()
         try:
-            conn = duckdb.connect(str(self.db_path))
-            conn.execute("PRAGMA threads=4")
-            return _LockedDuckConnection(conn, self._duck_conn_lock)
+            last_exc: Exception | None = None
+            for attempt in range(DEFAULT_CONNECT_RETRY_ATTEMPTS):
+                try:
+                    conn = duckdb.connect(str(self.db_path))
+                    conn.execute("PRAGMA threads=4")
+                    return _LockedDuckConnection(conn, self._duck_conn_lock)
+                except Exception as exc:
+                    last_exc = exc
+                    is_last_attempt = attempt >= (DEFAULT_CONNECT_RETRY_ATTEMPTS - 1)
+                    if is_last_attempt or not self._is_retryable_duckdb_connect_error(exc):
+                        raise
+                    time.sleep(DEFAULT_CONNECT_RETRY_DELAY_SEC * float(attempt + 1))
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("DuckDB connect failed without an exception")
         except Exception:
             self._duck_conn_lock.release()
             raise

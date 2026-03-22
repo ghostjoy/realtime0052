@@ -251,6 +251,128 @@ class TwEtfSuperExportTests(unittest.TestCase):
         )
         self.assertEqual(str(result["trade_date_anchor"]), "20260310")
 
+    def test_export_uses_main_meta_date_for_final_trade_anchor(self):
+        store = _FakeStore()
+
+        fake_app = SimpleNamespace(
+            _build_tw_etf_all_types_performance_table=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {"ytd_end_used": "2026-03-20"},
+            ),
+            _build_tw_etf_aum_export_frame=lambda history_df: pd.DataFrame(),
+            _build_tw_etf_daily_market_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {"last_trade_date": "2026-03-19"},
+            ),
+            _build_tw_etf_margin_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {"last_trade_date": "2026-03-19"},
+            ),
+            _build_tw_etf_mis_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {"last_trade_date": "2026-03-19"},
+            ),
+            _build_tw_etf_three_investors_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {"last_trade_date": "2026-03-19"},
+            ),
+            _load_tw_etf_aum_snapshot_info=lambda target_yyyymmdd="": {},
+            _resolve_latest_tw_trade_day_token=lambda anchor_yyyymmdd=None: "20260319",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch("services.tw_etf_super_export._load_app_module", return_value=fake_app),
+                patch(
+                    "services.tw_etf_super_export._sync_tw_etf_super_export_sources",
+                    return_value={
+                        "main": {"status": "synced", "used_trade_date": "20260319"},
+                        "mis": {"latest_date": "2026-03-19"},
+                    },
+                ),
+                patch(
+                    "services.tw_etf_super_export.build_tw_etf_all_types_main_export_frame",
+                    return_value=pd.DataFrame([{"代碼": "0050"}]),
+                ),
+                patch(
+                    "services.tw_etf_super_export.build_tw_etf_super_export_table",
+                    return_value=pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                ),
+                patch(
+                    "services.tw_etf_super_export.build_tw_etf_super_export_csv_bytes",
+                    return_value=b"csv",
+                ),
+                patch("services.tw_etf_super_export._frame_payload", return_value={"rows": []}),
+            ):
+                result = export_tw_etf_super_table_artifact(
+                    store=store,
+                    out=tmpdir,
+                    ytd_end="20260322",
+                )
+
+        self.assertEqual(Path(str(result["output_path"])).name, "tw_etf_super_export_20260320.csv")
+        self.assertEqual(str(result["trade_date_anchor"]), "20260320")
+        self.assertEqual(store.saved_runs[0]["trade_date_anchor"], "20260320")
+
+    def test_export_uses_mis_date_when_main_meta_has_no_trade_date(self):
+        store = _FakeStore()
+
+        fake_app = SimpleNamespace(
+            _build_tw_etf_all_types_performance_table=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {},
+            ),
+            _build_tw_etf_aum_export_frame=lambda history_df: pd.DataFrame(),
+            _build_tw_etf_daily_market_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {},
+            ),
+            _build_tw_etf_margin_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {},
+            ),
+            _build_tw_etf_mis_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {"last_trade_date": "2026-03-20"},
+            ),
+            _build_tw_etf_three_investors_overview=lambda **kwargs: (
+                pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                {},
+            ),
+            _load_tw_etf_aum_snapshot_info=lambda target_yyyymmdd="": {},
+            _resolve_latest_tw_trade_day_token=lambda anchor_yyyymmdd=None: "20260319",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch("services.tw_etf_super_export._load_app_module", return_value=fake_app),
+                patch(
+                    "services.tw_etf_super_export._sync_tw_etf_super_export_sources",
+                    return_value={},
+                ),
+                patch(
+                    "services.tw_etf_super_export.build_tw_etf_all_types_main_export_frame",
+                    return_value=pd.DataFrame([{"代碼": "0050"}]),
+                ),
+                patch(
+                    "services.tw_etf_super_export.build_tw_etf_super_export_table",
+                    return_value=pd.DataFrame([{"代碼": "0050", "ETF": "元大台灣50"}]),
+                ),
+                patch(
+                    "services.tw_etf_super_export.build_tw_etf_super_export_csv_bytes",
+                    return_value=b"csv",
+                ),
+                patch("services.tw_etf_super_export._frame_payload", return_value={"rows": []}),
+            ):
+                result = export_tw_etf_super_table_artifact(
+                    store=store,
+                    out=tmpdir,
+                    ytd_end="20260322",
+                )
+
+        self.assertEqual(Path(str(result["output_path"])).name, "tw_etf_super_export_20260320.csv")
+        self.assertEqual(str(result["trade_date_anchor"]), "20260320")
+
 
 if __name__ == "__main__":
     unittest.main()

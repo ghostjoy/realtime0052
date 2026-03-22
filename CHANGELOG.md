@@ -30,6 +30,7 @@
   - `docs/tw-etf-report-bundle.md`
 
 ### Changed
+- `2026 YTD 主動式 ETF` 卡片改名為 `YTD Active ETF`，導覽卡、頁面標題、功能地圖與文件同步更新。
 - `2026 YTD` 兩張排行卡片調整為 Top15：
   - `2026 YTD 前十大 ETF` 改名為 `YTD top15 ETF`，並改為取前 `15` 檔
   - `2026 YTD 前十大股利型、配息型 ETF` 先改名為 `YTD top15 股利型`，後續再改為 `YTD股利型ETF`，並改為顯示完整股利型母體
@@ -47,6 +48,15 @@
 - 現有 CLI help 文案補強，`export-tw-etf-super-table --help` / `backtest --help` 會顯示更完整的用途與範例，較適合 AI 或排程直接調用。
 
 ### Fixed
+- 修正 `YTD Active ETF` 誤納入非 ETF `A` 尾碼股票：
+  - `主動式` fallback 不再把所有 `A` 尾碼代碼直接視為主動式 ETF
+  - 主動式卡片母體新增 ETF 身分檢查，排除 `2002A / 6958A` 這類非 ETF 股票
+- 修正 `export-tw-etf-report` 輸出的成分股熱力圖 PNG 版型：
+  - 不再把所有成分股攤成單列長條熱力圖
+  - 改為多列方塊布局並依成分股數自動調整圖片高度，讓文字與超額報酬資訊可讀
+- 修正 `export-tw-etf-super-table` 的日期回退與檔名脫鉤問題：
+  - `TWSE 交易日` 快取改為按指定日期查詢，不再誤用最新一筆 snapshot 判斷其他日期
+  - `trade_date_anchor` 與輸出 CSV 檔名改為依最終匯出內容的實際資料日期收斂，避免較晚產出的報告反而落回較早交易日
 - 修正 `sync-tw-etf-constituents` 在未帶 `--symbols` 時的全市場名單解析：
   - 不再直接呼叫需要 `ytd_start/ytd_end` 的績效表 helper
   - 改優先使用 TWSE 官方 ETF profile map 解析全市場 ETF 代碼

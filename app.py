@@ -2330,7 +2330,7 @@ PAGE_CARDS = [
     {"key": "2025 後20大最差勁 ETF", "desc": "2025 全年區間台股 ETF 報酬率後20名。"},
     {"key": "共識代表 ETF", "desc": "以前10 ETF 成分股交集，找出最具代表性的單一 ETF。"},
     {"key": "兩檔 ETF 推薦", "desc": "以共識代表+低重疊動能，收斂為兩檔建議組合。"},
-    {"key": "2026 YTD 主動式 ETF", "desc": "台股主動式 ETF 在 2026 年截至今日的 Buy & Hold 績效（依本專案 `類型` 分類）。"},
+    {"key": "YTD Active ETF", "desc": "台股 Active ETF 在 2026 年截至今日的 Buy & Hold 績效（依本專案 `類型` 分類）。"},
     {"key": "ETF 輪動策略", "desc": "6檔台股ETF月頻輪動與基準對照。"},
     {"key": "熱力圖總表", "desc": "集中管理你開啟過的 ETF 熱力圖與釘選卡片。"},
     {"key": "00910 熱力圖", "desc": "00910 成分股回測的相對大盤熱力圖。"},
@@ -4969,6 +4969,13 @@ def _render_page_cards_nav() -> str:
     return render_page_cards_nav(cards=cards, default_active_page=DEFAULT_ACTIVE_PAGE)
 
 
+def _normalize_active_page_key(page_key: object) -> str:
+    token = str(page_key or "").strip()
+    if token == "2026 YTD 主動式 ETF":
+        return "YTD Active ETF"
+    return token
+
+
 TWSE_SNAPSHOT_DATASET_KEY = "twse_mi_index_allbut0999"
 TWSE_THREE_INVESTORS_DATASET_KEY = "twse_t86_three_investors"
 TWSE_THREE_INVESTORS_SOURCE = "twse_t86_three_investors"
@@ -6534,10 +6541,31 @@ def _is_twse_trading_day(target_yyyymmdd: str) -> bool:
     if not re.fullmatch(r"\d{8}", token):
         return False
     store = _history_store()
-    loader = getattr(store, "load_latest_market_snapshot", None)
-    if callable(loader):
+    window_loader = getattr(store, "load_market_snapshot_window", None)
+    if callable(window_loader):
         try:
-            cached = loader(
+            rows = window_loader(
+                dataset_key="twse_trading_day_flag",
+                market="TW",
+                symbol="ALL",
+                interval="1d",
+                asof_start=token,
+                asof_end=token,
+                limit=1,
+            )
+        except Exception:
+            rows = []
+        cached = rows[0] if isinstance(rows, list) and rows else None
+        if isinstance(cached, dict):
+            payload = cached.get("payload")
+            if isinstance(payload, dict):
+                cached_flag = payload.get("is_trading")
+                if isinstance(cached_flag, bool):
+                    return cached_flag
+    latest_loader = getattr(store, "load_latest_market_snapshot", None)
+    if callable(latest_loader):
+        try:
+            cached = latest_loader(
                 dataset_key="twse_trading_day_flag",
                 market="TW",
                 symbol="ALL",
@@ -7285,7 +7313,7 @@ def _classify_tw_etf(name: str, code: str = "") -> str:
     code_text = str(code or "").strip().upper()
     if code_text and code_text in TW_ETF_TYPE_WHITELIST:
         return str(TW_ETF_TYPE_WHITELIST[code_text])
-    if code_text.endswith("A"):
+    if _is_tw_active_etf(code_text, text):
         return "主動式"
     if not text:
         return "其他"
@@ -7591,7 +7619,15 @@ def _build_tw_active_etf_ytd_between(
         name_col_candidates=("ETF",),
         target_yyyymmdd=end_used,
     )
-    end_active_df = end_active_df[end_active_df["類型"].astype(str) == "主動式"].copy()
+    type_mask = end_active_df["類型"].astype(str) == "主動式"
+    identity_mask = end_active_df.apply(
+        lambda row: (
+            str(row.get("官方主分類", "")).strip() == "主動式ETF"
+            or _is_tw_active_etf(str(row.get("代碼", "")), str(row.get("ETF", "")))
+        ),
+        axis=1,
+    )
+    end_active_df = end_active_df[type_mask & identity_mask].copy()
     if not end_active_df.empty:
         end_active_df = end_active_df.rename(columns={"代碼": "code", "ETF": "name"})
     if end_active_df.empty and not symbols:
@@ -12316,7 +12352,7 @@ def _render_active_etf_2026_ytd_view():
     store = _history_store()
     title_col, refresh_col = st.columns([6, 1])
     with title_col:
-        st.subheader("2026 年主動式 ETF YTD（Buy & Hold）")
+        st.subheader("YTD Active ETF（Buy & Hold）")
     with refresh_col:
         refresh_market = st.button(
             "更新最新市況", key="active_etf_ytd_update_market", width="stretch", type="primary"
@@ -12341,7 +12377,7 @@ def _render_active_etf_2026_ytd_view():
 
     with st.container(border=True):
         _render_card_section_header(
-            "主動式 ETF 績效卡", "台股主動式 ETF，2026 YTD Buy & Hold（復權版）。"
+            "Active ETF 績效卡", "台股 Active ETF，2026 YTD Buy & Hold（復權版）。"
         )
         try:
             etf_df, start_used, end_used = _build_tw_active_etf_ytd_between(
@@ -12350,7 +12386,7 @@ def _render_active_etf_2026_ytd_view():
             if "YTD報酬(%)" in etf_df.columns and "YTD績效(%)" not in etf_df.columns:
                 etf_df = etf_df.rename(columns={"YTD報酬(%)": "YTD績效(%)"}).copy()
             if etf_df.empty:
-                st.warning("目前沒有可顯示的台股主動式 ETF YTD 資料。")
+                st.warning("目前沒有可顯示的台股 Active ETF YTD 資料。")
                 return
             etf_symbols = tuple(
                 str(x).strip().upper()
@@ -12370,7 +12406,7 @@ def _render_active_etf_2026_ytd_view():
                 if str(row.get("代碼", "")).strip() and pd.notna(row.get("YTD報酬(%)"))
             }
         except Exception as exc:
-            st.error(f"無法建立主動式 ETF YTD 清單：{exc}")
+            st.error(f"無法建立 Active ETF YTD 清單：{exc}")
             return
         market_return_pct: float | None = None
         market_symbol_used = ""
@@ -12547,10 +12583,10 @@ def _render_active_etf_2026_ytd_view():
         st.caption(
             "報酬計算：Buy & Hold（復權版，套用已知 split 事件）；`大盤超額(%) = YTD績效 - 大盤報酬`。"
         )
-        st.caption("主動式篩選：僅納入 `類型 = 主動式` 的標的。")
+        st.caption("Active ETF 篩選：僅納入 `類型 = 主動式` 且符合主動式 ETF 身分的標的。")
         table_drilldown_enabled = _render_table_drilldown_toggle_inline(
             scope="active_etf_ytd_main",
-            label="主動式排行表點擊導流",
+            label="Active ETF 排行表點擊導流",
             default=True,
         )
         table_display = table_df
@@ -13499,8 +13535,8 @@ def _render_tutorial_view():
                 "什麼時候用": "想快速落地成可執行兩檔組合",
             },
             {
-                "分頁": "2026 YTD 主動式 ETF",
-                "你會看到什麼": "主動式 ETF 排行、2025 對照、大盤勝負、Benchmark 對照卡",
+                "分頁": "YTD Active ETF",
+                "你會看到什麼": "Active ETF 排行、2025 對照、大盤勝負、Benchmark 對照卡",
                 "什麼時候用": "追蹤主動式 ETF 表現",
             },
             {
@@ -13555,7 +13591,7 @@ def _render_tutorial_view():
                 "2. 確認你看得懂 `總報酬/CAGR/MDD/Sharpe` 與成交明細。",
                 "3. 再到 `YTD top15 ETF`、`YTD股利型ETF`、`台股 ETF 全類型總表` 與 `2025 後20大最差勁 ETF` 看橫向比較；這些頁面的 ETF 分類都以本專案 `類型` 欄位為準，接著看 `共識代表 ETF` 收斂核心，再用 `兩檔 ETF 推薦` 產出可執行組合。",
                 "4. 想看 ETF 內部成分股強弱，再進 `00910 / 00935 / 00735 / 0050 / 0052 熱力圖`。",
-                "5. 最後才用 `ETF 輪動策略` 或 `2026 YTD 主動式 ETF` 做進階比較。",
+                "5. 最後才用 `ETF 輪動策略` 或 `YTD Active ETF` 做進階比較。",
             ]
         )
     )
@@ -13853,7 +13889,7 @@ def _render_tutorial_view():
                 "1. 先在 `回測工作台` 用 `buy_hold` 跑單檔，確認資料與報表都正常。",
                 "2. 再改成 `sma_trend_filter` 或 `donchian_breakout`，比較是否優於 `buy_hold`。",
                 "3. 接著用 `YTD top15 ETF` + `YTD股利型ETF` + `台股 ETF 全類型總表` + `2025 後20大最差勁 ETF` + `共識代表 ETF` + `兩檔 ETF 推薦` 做橫向排名、收斂與落地組合；高股息與主動式頁面都已改用本專案 `類型` 欄位作為母體篩選。",
-                "4. 最後才進 `ETF 輪動策略`、`2026 YTD 主動式 ETF` 與各熱力圖做進階判讀。",
+                "4. 最後才進 `ETF 輪動策略`、`YTD Active ETF` 與各熱力圖做進階判讀。",
             ]
         )
     )
@@ -15985,15 +16021,17 @@ def main():
     _consume_heatmap_drilldown_query()
     _consume_backtest_drilldown_query()
     _auto_run_daily_incremental_refresh(_history_store())
-    current_page_hint = str(
+    current_page_hint = _normalize_active_page_key(
         st.session_state.get("active_page", DEFAULT_ACTIVE_PAGE) or DEFAULT_ACTIVE_PAGE
     )
+    st.session_state["active_page"] = current_page_hint
     client_ctx = _capture_client_visit_context(page_hint=current_page_hint)
     _render_app_title()
     _render_connection_status_near_title(client_ctx)
     st.caption(_runtime_stack_caption())
     _render_design_toolbox()
-    active_page = _render_page_cards_nav()
+    active_page = _normalize_active_page_key(_render_page_cards_nav())
+    st.session_state["active_page"] = active_page
     page_renderers = {
         "即時看盤": _render_live_view,
         "回測工作台": _render_backtest_view,
@@ -16003,6 +16041,7 @@ def main():
         "2025 後20大最差勁 ETF": _render_bottom20_etf_2025_view,
         "共識代表 ETF": _render_consensus_representative_etf_view,
         "兩檔 ETF 推薦": _render_two_etf_pick_view,
+        "YTD Active ETF": _render_active_etf_2026_ytd_view,
         "2026 YTD 主動式 ETF": _render_active_etf_2026_ytd_view,
         "ETF 輪動策略": _render_tw_etf_rotation_view,
         "熱力圖總表": _render_heatmap_hub_view,

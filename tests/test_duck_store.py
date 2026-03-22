@@ -945,6 +945,45 @@ class DuckStoreTests(unittest.TestCase):
             self.assertIn("rollback", calls)
             self.assertIn("close", calls)
 
+    def test_connect_retries_retryable_duckdb_lock_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=_NoopService(),
+                auto_migrate_legacy_sqlite=False,
+            )
+
+            class _FakeConn:
+                def execute(self, sql: str):
+                    return self
+
+                def close(self):
+                    return None
+
+            lock_error = RuntimeError(
+                'IO Error: Could not set lock on file "history.duckdb": '
+                "Conflicting lock is held in other process"
+            )
+            fake_conn = _FakeConn()
+            sleep_calls: list[float] = []
+            with (
+                patch(
+                    "storage.duck_store.duckdb.connect",
+                    side_effect=[lock_error, lock_error, fake_conn],
+                ) as connect_mock,
+                patch("storage.duck_store.time.sleep", side_effect=lambda value: sleep_calls.append(float(value))),
+            ):
+                conn = store._connect()
+                try:
+                    self.assertTrue(hasattr(conn, "execute"))
+                finally:
+                    conn.close()
+
+            self.assertEqual(int(connect_mock.call_count), 3)
+            self.assertEqual(sleep_calls, [1.0, 2.0])
+
     def test_market_snapshot_roundtrip_and_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

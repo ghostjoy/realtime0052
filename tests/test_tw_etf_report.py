@@ -10,7 +10,10 @@ from unittest.mock import patch
 import pandas as pd
 
 from services.tw_etf_constituent_sync import TW_ETF_CONSTITUENTS_DATASET_KEY
-from services.tw_etf_report import export_tw_etf_report_artifact
+from services.tw_etf_report import (
+    _build_constituent_heatmap_figure,
+    export_tw_etf_report_artifact,
+)
 
 
 class _FakeStore:
@@ -74,6 +77,31 @@ class _FakeStore:
 
 
 class TwEtfReportTests(unittest.TestCase):
+    def test_build_constituent_heatmap_figure_wraps_tiles_into_rows(self):
+        rows_df = pd.DataFrame(
+            [
+                {
+                    "symbol": f"{2300 + i}",
+                    "name": f"公司{i}",
+                    "weight_pct": 5.0 + i,
+                    "asset_return_pct": 10.0 + i,
+                    "benchmark_return_pct": 4.0,
+                    "excess_pct": 6.0 + i,
+                    "status": "OK",
+                }
+                for i in range(13)
+            ]
+        )
+
+        fig, width, height = _build_constituent_heatmap_figure(symbol="0052", rows_df=rows_df)
+
+        self.assertEqual(width, 1320)
+        self.assertEqual(height, 660)
+        self.assertEqual(len(fig.data), 1)
+        self.assertEqual(len(fig.data[0]["z"]), 3)
+        self.assertEqual(len(fig.data[0]["z"][0]), 6)
+        self.assertEqual(str(fig.layout.title.text), "0052 成分股熱力圖（相對大盤）")
+
     def test_export_report_bundle_creates_symbol_prefixed_files(self):
         store = _FakeStore()
         store.save_market_snapshot(

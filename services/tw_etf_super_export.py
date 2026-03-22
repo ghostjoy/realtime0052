@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import io
 import math
+import re
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -111,6 +112,64 @@ def resolve_tw_etf_super_export_output_path(
     if str(candidate).endswith("/"):
         return candidate / file_name
     return candidate
+
+
+def _normalize_trade_date_token(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{8}", text):
+        return text
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return ""
+    return pd.Timestamp(parsed).strftime("%Y%m%d")
+
+
+def _resolve_tw_etf_super_export_trade_token(
+    *,
+    export_frame: pd.DataFrame,
+    main_meta: dict[str, object] | None = None,
+    daily_market_meta: dict[str, object] | None = None,
+    margin_meta: dict[str, object] | None = None,
+    mis_meta: dict[str, object] | None = None,
+    three_investors_meta: dict[str, object] | None = None,
+    fallback_token: str = "",
+) -> str:
+    meta_candidates: list[object] = []
+    if isinstance(main_meta, dict):
+        meta_candidates.extend(
+            [
+                main_meta.get("daily_end_used"),
+                main_meta.get("market_daily_end_used"),
+                main_meta.get("ytd_end_used"),
+            ]
+        )
+    if isinstance(daily_market_meta, dict):
+        meta_candidates.append(daily_market_meta.get("last_trade_date"))
+    if isinstance(margin_meta, dict):
+        meta_candidates.append(margin_meta.get("last_trade_date"))
+    if isinstance(mis_meta, dict):
+        meta_candidates.append(mis_meta.get("last_trade_date"))
+    if isinstance(three_investors_meta, dict):
+        meta_candidates.append(three_investors_meta.get("last_trade_date"))
+    for candidate in meta_candidates:
+        token = _normalize_trade_date_token(candidate)
+        if token:
+            return token
+    if (
+        isinstance(export_frame, pd.DataFrame)
+        and not export_frame.empty
+        and "日期" in export_frame.columns
+    ):
+        series = export_frame.get("日期")
+        if isinstance(series, pd.Series):
+            valid_tokens = [
+                token for token in series.map(_normalize_trade_date_token).tolist() if token
+            ]
+            if valid_tokens:
+                return max(valid_tokens)
+    return _normalize_trade_date_token(fallback_token)
 
 
 def _clear_export_related_caches(app_module) -> None:
@@ -643,7 +702,15 @@ def export_tw_etf_super_table_artifact(
     if super_export_df.empty:
         raise RuntimeError("no super export data generated")
 
-    trade_token = target_trade_token
+    trade_token = _resolve_tw_etf_super_export_trade_token(
+        export_frame=super_export_df,
+        main_meta=dict(main_meta or {}),
+        daily_market_meta=dict(daily_market_meta or {}),
+        margin_meta=dict(margin_meta or {}),
+        mis_meta=dict(mis_meta or {}),
+        three_investors_meta=dict(three_investors_meta or {}),
+        fallback_token=target_trade_token,
+    ) or target_trade_token
     output_path = resolve_tw_etf_super_export_output_path(trade_token=trade_token, out=out)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     csv_bytes = build_tw_etf_super_export_csv_bytes(super_export_df)

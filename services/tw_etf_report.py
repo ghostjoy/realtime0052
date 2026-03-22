@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -582,6 +583,114 @@ def _write_aum_chart(*, frame: pd.DataFrame, output_path: Path, symbol: str) -> 
     fig.write_image(str(output_path), format="png", width=1600, height=700, scale=2)
 
 
+def _build_constituent_heatmap_figure(
+    *,
+    symbol: str,
+    rows_df: pd.DataFrame,
+) -> tuple[go.Figure, int, int]:
+    if not isinstance(rows_df, pd.DataFrame) or rows_df.empty:
+        raise RuntimeError("no constituent heatmap rows available")
+
+    frame = rows_df.copy()
+    frame["symbol"] = frame["symbol"].astype(str).str.strip()
+    frame["name"] = frame["name"].astype(str).str.strip()
+    frame["excess_pct"] = pd.to_numeric(frame["excess_pct"], errors="coerce")
+    frame["asset_return_pct"] = pd.to_numeric(frame["asset_return_pct"], errors="coerce")
+    frame["benchmark_return_pct"] = pd.to_numeric(frame["benchmark_return_pct"], errors="coerce")
+    frame = frame.dropna(subset=["excess_pct", "asset_return_pct", "benchmark_return_pct"])
+    if frame.empty:
+        raise RuntimeError("constituent heatmap rows became empty after normalization")
+    frame = frame.sort_values("excess_pct", ascending=False).reset_index(drop=True)
+
+    tiles_per_row = min(6, max(1, int(len(frame))))
+    tile_rows = int(math.ceil(len(frame) / max(1, tiles_per_row)))
+    z = [[math.nan for _ in range(tiles_per_row)] for _ in range(tile_rows)]
+    text = [["" for _ in range(tiles_per_row)] for _ in range(tile_rows)]
+    custom = [[[None] * 5 for _ in range(tiles_per_row)] for _ in range(tile_rows)]
+
+    for i, row in frame.iterrows():
+        r = i // tiles_per_row
+        c = i % tiles_per_row
+        excess_pct = float(row["excess_pct"])
+        asset_return_pct = float(row["asset_return_pct"])
+        benchmark_return_pct = float(row["benchmark_return_pct"])
+        label = str(row["symbol"]).strip()
+        name_text = str(row.get("name", "")).strip()
+        weight_val = pd.to_numeric(row.get("weight_pct"), errors="coerce")
+        weight_text = f"{float(weight_val):.2f}%" if pd.notna(weight_val) else "—"
+        z[r][c] = excess_pct
+        if name_text:
+            text[r][c] = f"<b>{label}</b><br>{name_text}<br>權重 {weight_text}<br>{excess_pct:+.2f}%"
+        else:
+            text[r][c] = f"<b>{label}</b><br>權重 {weight_text}<br>{excess_pct:+.2f}%"
+        custom[r][c] = [
+            asset_return_pct,
+            benchmark_return_pct,
+            str(row.get("status") or ""),
+            name_text,
+            weight_text,
+        ]
+
+    valid_values = [
+        abs(float(value))
+        for value in frame["excess_pct"].tolist()
+        if pd.notna(value)
+    ]
+    max_abs = max(valid_values) if valid_values else 0.15
+    max_abs = max(0.15, float(max_abs))
+
+    fig = go.Figure(
+        data=[
+            go.Heatmap(
+                z=z,
+                text=text,
+                texttemplate="%{text}",
+                textfont=dict(size=12, color="#F8FAFC"),
+                customdata=custom,
+                zmin=-max_abs,
+                zmax=max_abs,
+                zmid=0.0,
+                colorscale=[
+                    [0.0, "#8B1E3F"],
+                    [0.45, "#D97706"],
+                    [0.5, "#475569"],
+                    [0.55, "#0EA5E9"],
+                    [1.0, "#166534"],
+                ],
+                xgap=6,
+                ygap=6,
+                hoverongaps=False,
+                colorbar=dict(title="超額報酬 %", thickness=14, len=0.8),
+                hovertemplate=(
+                    "公司：%{customdata[3]}<br>"
+                    "策略報酬：%{customdata[0]:+.2f}%<br>"
+                    "大盤報酬：%{customdata[1]:+.2f}%<br>"
+                    "超額：%{z:+.2f}%<br>"
+                    "狀態：%{customdata[2]}<br>"
+                    "權重：%{customdata[4]}"
+                    "<extra></extra>"
+                ),
+            )
+        ]
+    )
+    fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, autorange="reversed")
+
+    width = max(960, 220 * tiles_per_row)
+    height = max(420, 180 * tile_rows + 120)
+    fig.update_layout(
+        title=f"{symbol} 成分股熱力圖（相對大盤）",
+        template="plotly_white",
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(color="#0F172A", size=14),
+        margin=dict(l=20, r=20, t=60, b=20),
+        width=width,
+        height=height,
+    )
+    return fig, width, height
+
+
 def _write_constituent_heatmap(
     *,
     store: HistoryStore,
@@ -644,45 +753,10 @@ def _write_constituent_heatmap(
     )
     if not rows:
         return False
-    rows_df = pd.DataFrame(rows).sort_values("excess_pct", ascending=False).reset_index(drop=True)
-    z = [rows_df["excess_pct"].astype(float).tolist()]
-    text = [[f"{row['symbol']}<br>{float(row['excess_pct']):+.2f}%" for _, row in rows_df.iterrows()]]
-    fig = go.Figure(
-        data=[
-            go.Heatmap(
-                z=z,
-                text=text,
-                texttemplate="%{text}",
-                textfont=dict(size=12, color="#F8FAFC"),
-                zmid=0.0,
-                colorscale=[
-                    [0.0, "#8B1E3F"],
-                    [0.45, "#D97706"],
-                    [0.5, "#475569"],
-                    [0.55, "#0EA5E9"],
-                    [1.0, "#166534"],
-                ],
-                xgap=6,
-                ygap=6,
-                hoverongaps=False,
-                colorbar=dict(title="超額報酬 %"),
-                hovertemplate="symbol=%{text}<extra></extra>",
-            )
-        ]
-    )
-    fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
-    fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False)
-    fig.update_layout(
-        title=f"{symbol} 成分股熱力圖（相對大盤）",
-        template="plotly_white",
-        paper_bgcolor="#FFFFFF",
-        plot_bgcolor="#FFFFFF",
-        font=dict(color="#0F172A", size=14),
-        margin=dict(l=20, r=20, t=60, b=20),
-        height=340,
-    )
+    rows_df = pd.DataFrame(rows)
+    fig, width, height = _build_constituent_heatmap_figure(symbol=symbol, rows_df=rows_df)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_image(str(output_path), format="png", width=1800, height=700, scale=2)
+    fig.write_image(str(output_path), format="png", width=width, height=height, scale=2)
     return True
 
 

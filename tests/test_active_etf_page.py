@@ -1533,6 +1533,65 @@ class ActiveEtfPageTests(unittest.TestCase):
             out = _recent_twse_trading_days(anchor_yyyymmdd="20260112", count=3, max_scan_days=7)
         self.assertEqual(out, ["20260107", "20260108", "20260109"])
 
+    def test_is_twse_trading_day_uses_exact_date_cache_window(self):
+        class _FakeStore:
+            def load_market_snapshot_window(self, **kwargs):
+                token = str(kwargs.get("asof_start") or "").strip()
+                if token == "20260320":
+                    return [
+                        {
+                            "asof": datetime(2026, 3, 20, tzinfo=timezone.utc),
+                            "payload": {"date": "20260320", "is_trading": True},
+                            "fetched_at": datetime(2026, 3, 22, 12, 30, tzinfo=timezone.utc),
+                        }
+                    ]
+                if token == "20260319":
+                    return [
+                        {
+                            "asof": datetime(2026, 3, 19, tzinfo=timezone.utc),
+                            "payload": {"date": "20260319", "is_trading": True},
+                            "fetched_at": datetime(2026, 3, 22, 14, 30, tzinfo=timezone.utc),
+                        }
+                    ]
+                return []
+
+            def load_latest_market_snapshot(self, **kwargs):
+                return {
+                    "asof": datetime(2026, 3, 19, tzinfo=timezone.utc),
+                    "payload": {"date": "20260319", "is_trading": True},
+                    "fetched_at": datetime(2026, 3, 22, 14, 30, tzinfo=timezone.utc),
+                }
+
+        app._is_twse_trading_day.clear()
+        with (
+            patch("app._history_store", return_value=_FakeStore()),
+            patch("requests.get") as requests_get,
+        ):
+            out = app._is_twse_trading_day("20260320")
+
+        self.assertTrue(out)
+        requests_get.assert_not_called()
+
+    def test_is_twse_trading_day_returns_false_when_network_fails_without_exact_cache(self):
+        class _FakeStore:
+            def load_market_snapshot_window(self, **kwargs):
+                return []
+
+            def load_latest_market_snapshot(self, **kwargs):
+                return {
+                    "asof": datetime(2026, 3, 19, tzinfo=timezone.utc),
+                    "payload": {"date": "20260319", "is_trading": True},
+                }
+
+        app._is_twse_trading_day.clear()
+        with (
+            patch("app._history_store", return_value=_FakeStore()),
+            patch("requests.get", side_effect=RuntimeError("network down")),
+        ):
+            out = app._is_twse_trading_day("20260320")
+
+        self.assertFalse(out)
+
     def test_format_weight_pct_label(self):
         self.assertEqual(_format_weight_pct_label(3.456), "3.46%")
         self.assertEqual(_format_weight_pct_label(""), "—")
@@ -1761,7 +1820,9 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="0061"), "海外市場型")
         self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00981T"), "平衡收益型")
         self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00995A"), "主動式")
-        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00999A"), "主動式")
+        self.assertEqual(_classify_tw_etf("完全不含關鍵字", code="00999A"), "其他")
+        self.assertEqual(_classify_tw_etf("中鋼特", code="2002A"), "其他")
+        self.assertEqual(_classify_tw_etf("意藍甲特", code="6958A"), "其他")
 
     def test_decode_tw_etf_official_profile_payload(self):
         payload = {
@@ -1967,14 +2028,16 @@ class ActiveEtfPageTests(unittest.TestCase):
                 {"code": "00980A", "name": "甲", "close": 50.0},
                 {"code": "00981A", "name": "乙", "close": 80.0},
                 {"code": "00935", "name": "丙", "close": 80.0},
+                {"code": "2002A", "name": "中鋼特", "close": 40.0},
             ]
         )
         end_df = pd.DataFrame(
             [
-                {"code": "00993A", "name": "丁", "close": 120.0},
-                {"code": "00980A", "name": "甲", "close": 45.0},
+                {"code": "00993A", "name": "主動丁", "close": 120.0},
+                {"code": "00980A", "name": "主動甲", "close": 45.0},
                 {"code": "00935", "name": "丙", "close": 150.0},
-                {"code": "00981A", "name": "乙", "close": 100.0},
+                {"code": "00981A", "name": "主動乙", "close": 100.0},
+                {"code": "2002A", "name": "中鋼特", "close": 42.0},
             ]
         )
 
@@ -1998,6 +2061,7 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "00981A": _bars([("2026-01-02", 80.0), ("2026-02-14", 100.0)]),
                     "00993A": _bars([("2026-02-03", 100.0), ("2026-02-14", 120.0)]),
                     "00980A": _bars([("2026-01-02", 50.0), ("2026-02-14", 45.0)]),
+                    "2002A": _bars([("2026-01-02", 40.0), ("2026-02-14", 42.0)]),
                 }
 
             def load_daily_bars(self, symbol, market, start=None, end=None):
@@ -2013,10 +2077,19 @@ class ActiveEtfPageTests(unittest.TestCase):
                     "00980A": "主動式",
                     "00981A": "主動式",
                     "00993A": "主動式",
+                    "2002A": "主動式",
                     "00935": "科技型",
                 }
             )
-            out["官方主分類"] = ""
+            out["官方主分類"] = out["代碼"].astype(str).map(
+                {
+                    "00980A": "主動式ETF",
+                    "00981A": "主動式ETF",
+                    "00993A": "主動式ETF",
+                    "2002A": "",
+                    "00935": "",
+                }
+            )
             out["官方次分類"] = ""
             return out
 
@@ -2033,6 +2106,7 @@ class ActiveEtfPageTests(unittest.TestCase):
 
         self.assertEqual(list(out["代碼"]), ["00981A", "00993A", "00980A"])
         self.assertNotIn("00935", list(out["代碼"]))
+        self.assertNotIn("2002A", list(out["代碼"]))
 
     def test_build_tw_etf_top10_between_returns_universe_count(self):
         _build_tw_etf_top10_between.clear()
