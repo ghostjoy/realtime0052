@@ -595,9 +595,11 @@ def _build_constituent_heatmap_figure(
     frame["symbol"] = frame["symbol"].astype(str).str.strip()
     frame["name"] = frame["name"].astype(str).str.strip()
     frame["excess_pct"] = pd.to_numeric(frame["excess_pct"], errors="coerce")
-    frame["asset_return_pct"] = pd.to_numeric(frame["asset_return_pct"], errors="coerce")
+    if "strategy_return_pct" not in frame.columns and "asset_return_pct" in frame.columns:
+        frame["strategy_return_pct"] = frame["asset_return_pct"]
+    frame["strategy_return_pct"] = pd.to_numeric(frame["strategy_return_pct"], errors="coerce")
     frame["benchmark_return_pct"] = pd.to_numeric(frame["benchmark_return_pct"], errors="coerce")
-    frame = frame.dropna(subset=["excess_pct", "asset_return_pct", "benchmark_return_pct"])
+    frame = frame.dropna(subset=["excess_pct", "strategy_return_pct", "benchmark_return_pct"])
     if frame.empty:
         raise RuntimeError("constituent heatmap rows became empty after normalization")
     frame = frame.sort_values("excess_pct", ascending=False).reset_index(drop=True)
@@ -612,7 +614,7 @@ def _build_constituent_heatmap_figure(
         r = i // tiles_per_row
         c = i % tiles_per_row
         excess_pct = float(row["excess_pct"])
-        asset_return_pct = float(row["asset_return_pct"])
+        strategy_return_pct = float(row["strategy_return_pct"])
         benchmark_return_pct = float(row["benchmark_return_pct"])
         label = str(row["symbol"]).strip()
         name_text = str(row.get("name", "")).strip()
@@ -624,7 +626,7 @@ def _build_constituent_heatmap_figure(
         else:
             text[r][c] = f"<b>{label}</b><br>權重 {weight_text}<br>{excess_pct:+.2f}%"
         custom[r][c] = [
-            asset_return_pct,
+            strategy_return_pct,
             benchmark_return_pct,
             str(row.get("status") or ""),
             name_text,
