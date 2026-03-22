@@ -222,7 +222,7 @@ def default_cost_params(market_code: str, symbol_list: list[str]) -> tuple[float
 def series_metrics(series: pd.Series) -> dict[str, float]:
     if series is None or series.empty:
         return {"total_return": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "sharpe": 0.0}
-    returns = series.pct_change().fillna(0.0)
+    returns = series.pct_change(fill_method=None).fillna(0.0)
     running_max = series.cummax()
     drawdown = series / running_max - 1.0
     years = max((series.index[-1] - series.index[0]).days / 365.25, 1 / 365.25)

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -35,12 +36,14 @@ from utils import normalize_ohlcv_frame
 DEFAULT_TW_ETF_REPORT_ROOT = Path("artifacts") / "reports"
 DEFAULT_TW_ETF_REPORT_LOG_DIR = Path("artifacts") / "logs"
 REPORT_HEATMAP_EXCESS_COLORSCALE = [
-    [0.0, "rgba(230,98,90,0.55)"],
-    [0.25, "rgba(244,164,96,0.38)"],
-    [0.5, "rgba(241,245,249,0.18)"],
-    [0.75, "rgba(125,211,192,0.34)"],
-    [1.0, "rgba(94,234,212,0.55)"],
+    [0.00, "rgba(239,68,68,0.78)"],
+    [0.24, "rgba(248,113,113,0.58)"],
+    [0.50, "rgba(148,163,184,0.18)"],
+    [0.76, "rgba(52,211,153,0.58)"],
+    [1.00, "rgba(5,150,105,0.78)"],
 ]
+REPORT_HEATMAP_TEXT_COLOR = "#0F172A"
+REPORT_HEATMAP_FONT_FAMILY = "Noto Sans TC, Segoe UI, sans-serif"
 _INDICATOR_COLUMNS = [
     "sma_5",
     "sma_20",
@@ -107,7 +110,7 @@ def export_tw_etf_report_artifact(
     if bool(sync_constituents):
         constituent_sync_summary = sync_tw_etf_constituent_snapshots(
             store=store,
-            symbols=None,
+            symbols=[etf_code],
             force=bool(force),
             max_workers=4,
             full_refresh=False,
@@ -349,18 +352,12 @@ def export_tw_etf_constituent_heatmap_artifact(
     if bool(sync_constituents):
         sync_tw_etf_constituent_snapshots(
             store=store,
-            symbols=None,
+            symbols=[etf_code],
             force=bool(force),
             max_workers=4,
             full_refresh=False,
             log_dir=log_dir or DEFAULT_TW_ETF_CONSTITUENT_LOG_DIR,
         )
-    constituent_rows, constituent_source, constituent_issue = _resolve_single_etf_constituents(
-        store=store,
-        app_module=app_module,
-        symbol=etf_code,
-        force=bool(force),
-    )
     range_start_dt, range_end_dt = _resolve_backtest_window(
         backtest_start=backtest_start,
         backtest_end=backtest_end,
@@ -371,24 +368,72 @@ def export_tw_etf_constituent_heatmap_artifact(
         out=out,
     )
     issues: list[str] = []
+    universe_id = f"TW:{etf_code}"
+    cached_rows_df = (
+        _load_matching_cached_constituent_heatmap_rows(
+            store=store,
+            universe_id=universe_id,
+            start_dt=range_start_dt,
+            end_dt=range_end_dt,
+        )
+        if not bool(sync_constituents)
+        else pd.DataFrame()
+    )
+    if not cached_rows_df.empty:
+        _write_constituent_heatmap_rows(
+            symbol=etf_code,
+            rows_df=cached_rows_df,
+            output_path=output_path,
+        )
+        issues.append("reused heatmap_runs cache")
+        return {
+            "symbol": etf_code,
+            "trade_date_anchor": target_trade_token,
+            "output_path": str(output_path),
+            "backtest_start": range_start_dt.date().isoformat(),
+            "backtest_end": range_end_dt.date().isoformat(),
+            "constituent_count": int(len(cached_rows_df)),
+            "constituent_source": "heatmap_runs_cache",
+            "issues": issues,
+        }
+
+    constituent_rows, constituent_source, constituent_issue = _resolve_single_etf_constituents(
+        store=store,
+        app_module=app_module,
+        symbol=etf_code,
+        force=bool(force),
+    )
     if constituent_issue:
         issues.append(str(constituent_issue))
-    if not _write_constituent_heatmap(
+
+    rows_df, benchmark_symbol = _compute_constituent_heatmap_rows(
         store=store,
-        symbol=etf_code,
         constituent_rows=constituent_rows,
-        output_path=output_path,
         start_dt=range_start_dt,
         end_dt=range_end_dt,
-    ):
+    )
+    if rows_df.empty:
         raise RuntimeError("constituent heatmap skipped because TW constituent rows were unavailable")
+    _write_constituent_heatmap_rows(
+        symbol=etf_code,
+        rows_df=rows_df,
+        output_path=output_path,
+    )
+    payload = _build_constituent_heatmap_cache_payload(
+        rows_df=rows_df,
+        benchmark_symbol=benchmark_symbol,
+        start_dt=range_start_dt,
+        end_dt=range_end_dt,
+        universe_count=len(constituent_rows),
+    )
+    store.save_heatmap_run(universe_id=universe_id, payload=payload)
     return {
         "symbol": etf_code,
         "trade_date_anchor": target_trade_token,
         "output_path": str(output_path),
         "backtest_start": range_start_dt.date().isoformat(),
         "backtest_end": range_end_dt.date().isoformat(),
-        "constituent_count": int(len(constituent_rows)),
+        "constituent_count": int(len(rows_df)),
         "constituent_source": constituent_source,
         "issues": issues,
     }
@@ -567,6 +612,59 @@ def _resolve_backtest_window(
     return start_dt, end_dt
 
 
+def _load_matching_cached_constituent_heatmap_rows(
+    *,
+    store: HistoryStore,
+    universe_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> pd.DataFrame:
+    cached_run = store.load_latest_heatmap_run(universe_id)
+    payload = cached_run.payload if cached_run else {}
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    if str(payload.get("strategy") or "").strip() != "buy_hold":
+        return pd.DataFrame()
+    if str(payload.get("benchmark_symbol") or "").strip().upper() != "^TWII":
+        return pd.DataFrame()
+    if str(payload.get("start_date") or "").strip() != start_dt.date().isoformat():
+        return pd.DataFrame()
+    if str(payload.get("end_date") or "").strip() != end_dt.date().isoformat():
+        return pd.DataFrame()
+    selected_count = payload.get("selected_count")
+    universe_count = payload.get("universe_count")
+    if selected_count is not None and universe_count is not None:
+        if int(selected_count or 0) != int(universe_count or 0):
+            return pd.DataFrame()
+    rows_df = pd.DataFrame(payload.get("rows") or [])
+    if rows_df.empty:
+        return pd.DataFrame()
+    return rows_df
+
+
+def _build_constituent_heatmap_cache_payload(
+    *,
+    rows_df: pd.DataFrame,
+    benchmark_symbol: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    universe_count: int,
+) -> dict[str, object]:
+    clean_df = rows_df.copy()
+    clean_df = clean_df.where(pd.notna(clean_df), None)
+    return {
+        "rows": clean_df.to_dict(orient="records"),
+        "benchmark_symbol": str(benchmark_symbol or "").strip().upper(),
+        "selected_count": int(max(0, universe_count)),
+        "universe_count": int(max(0, universe_count)),
+        "start_date": start_dt.date().isoformat(),
+        "end_date": end_dt.date().isoformat(),
+        "strategy": "buy_hold",
+        "strategy_label": "Buy & Hold",
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
 def _filter_symbol_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
     if not isinstance(frame, pd.DataFrame) or frame.empty or "代碼" not in frame.columns:
         return pd.DataFrame(columns=getattr(frame, "columns", []))
@@ -704,11 +802,12 @@ def _build_constituent_heatmap_figure(
         raise RuntimeError("constituent heatmap rows became empty after normalization")
     frame = frame.sort_values("excess_pct", ascending=False).reset_index(drop=True)
 
-    tiles_per_row = min(6, max(1, int(len(frame))))
-    tile_rows = int(math.ceil(len(frame) / max(1, tiles_per_row)))
-    z = [[math.nan for _ in range(tiles_per_row)] for _ in range(tile_rows)]
-    text = [["" for _ in range(tiles_per_row)] for _ in range(tile_rows)]
-    custom = [[[None] * 5 for _ in range(tiles_per_row)] for _ in range(tile_rows)]
+    tiles_per_row = 8
+    tile_rows = int(math.ceil(len(frame) / tiles_per_row))
+    z = np.full((tile_rows, tiles_per_row), np.nan)
+    text = np.full((tile_rows, tiles_per_row), "", dtype=object)
+    custom = np.empty((tile_rows, tiles_per_row, 5), dtype=object)
+    custom[:, :, :] = None
 
     for i, row in frame.iterrows():
         r = i // tiles_per_row
@@ -720,12 +819,12 @@ def _build_constituent_heatmap_figure(
         name_text = str(row.get("name", "")).strip()
         weight_val = pd.to_numeric(row.get("weight_pct"), errors="coerce")
         weight_text = f"{float(weight_val):.2f}%" if pd.notna(weight_val) else "—"
-        z[r][c] = excess_pct
+        z[r, c] = excess_pct
         if name_text:
-            text[r][c] = f"<b>{label}</b><br>{name_text}<br>權重 {weight_text}<br>{excess_pct:+.2f}%"
+            text[r, c] = f"<b>{label}</b><br>{name_text}<br>權重 {weight_text}<br>{excess_pct:+.2f}%"
         else:
-            text[r][c] = f"<b>{label}</b><br>權重 {weight_text}<br>{excess_pct:+.2f}%"
-        custom[r][c] = [
+            text[r, c] = f"<b>{label}</b><br>權重 {weight_text}<br>{excess_pct:+.2f}%"
+        custom[r, c] = [
             strategy_return_pct,
             benchmark_return_pct,
             str(row.get("status") or ""),
@@ -733,13 +832,15 @@ def _build_constituent_heatmap_figure(
             weight_text,
         ]
 
-    valid_values = [
-        abs(float(value))
-        for value in frame["excess_pct"].tolist()
-        if pd.notna(value)
-    ]
-    max_abs = max(valid_values) if valid_values else 0.15
-    max_abs = max(0.15, float(max_abs))
+    finite = np.abs(frame["excess_pct"].to_numpy(dtype=float))
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        max_abs = 1.0
+    else:
+        raw_max = float(np.nanmax(finite))
+        p85 = float(np.nanpercentile(finite, 85))
+        capped = min(raw_max, p85 * 1.35)
+        max_abs = max(0.01, max(0.15, capped))
 
     fig = go.Figure(
         data=[
@@ -747,7 +848,11 @@ def _build_constituent_heatmap_figure(
                 z=z,
                 text=text,
                 texttemplate="%{text}",
-                textfont=dict(size=12, color="#111827"),
+                textfont=dict(
+                    size=12,
+                    color=REPORT_HEATMAP_TEXT_COLOR,
+                    family=REPORT_HEATMAP_FONT_FAMILY,
+                ),
                 customdata=custom,
                 zmin=-max_abs,
                 zmax=max_abs,
@@ -756,7 +861,7 @@ def _build_constituent_heatmap_figure(
                 xgap=6,
                 ygap=6,
                 hoverongaps=False,
-                colorbar=dict(title="超額報酬 %", thickness=14, len=0.8),
+                colorbar=dict(title="相對大盤 %", thickness=14, len=0.8),
                 hovertemplate=(
                     "公司：%{customdata[3]}<br>"
                     "策略報酬：%{customdata[0]:+.2f}%<br>"
@@ -772,30 +877,28 @@ def _build_constituent_heatmap_figure(
     fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
     fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, autorange="reversed")
 
-    width = max(960, 220 * tiles_per_row)
-    height = max(420, 180 * tile_rows + 120)
+    width = 1280
+    height = max(280, 90 * tile_rows)
     fig.update_layout(
         title=f"{symbol} 成分股熱力圖（相對大盤）",
         template="plotly_white",
         paper_bgcolor="#FFFFFF",
         plot_bgcolor="#FFFFFF",
-        font=dict(color="#0F172A", size=14),
-        margin=dict(l=20, r=20, t=60, b=20),
+        font=dict(color=REPORT_HEATMAP_TEXT_COLOR, size=14, family=REPORT_HEATMAP_FONT_FAMILY),
+        margin=dict(l=10, r=10, t=52, b=10),
         width=width,
         height=height,
     )
     return fig, width, height
 
 
-def _write_constituent_heatmap(
+def _compute_constituent_heatmap_rows(
     *,
     store: HistoryStore,
-    symbol: str,
     constituent_rows: list[dict[str, object]],
-    output_path: Path,
     start_dt: datetime,
     end_dt: datetime,
-) -> bool:
+) -> tuple[pd.DataFrame, str]:
     tw_rows = []
     for row in constituent_rows:
         if not isinstance(row, dict):
@@ -804,28 +907,39 @@ def _write_constituent_heatmap(
         code = str(row.get("tw_code") or "").strip().upper()
         if market == "TW" and code:
             tw_rows.append(row)
+    weight_map: dict[str, float] = {}
+    for row in tw_rows:
+        code = str(row.get("tw_code") or "").strip().upper()
+        if not code:
+            continue
+        weight_val = pd.to_numeric(row.get("weight_pct"), errors="coerce")
+        if pd.isna(weight_val):
+            continue
+        existing = weight_map.get(code)
+        if existing is None or float(weight_val) > float(existing):
+            weight_map[code] = float(weight_val)
     run_symbols = sorted({str(row.get("tw_code") or "").strip().upper() for row in tw_rows if str(row.get("tw_code") or "").strip()})
     if not run_symbols:
-        return False
+        return pd.DataFrame(), ""
     benchmark_result = load_tw_benchmark_close(
         store=store,
         choice="twii",
         start_dt=start_dt,
         end_dt=end_dt,
-        sync_first=True,
+        sync_first=False,
         allow_twii_fallback=False,
     )
     benchmark_close = benchmark_result.close
     if len(benchmark_close) < 2:
-        return False
+        return pd.DataFrame(), ""
     prepared = prepare_heatmap_bars(
         store=store,
         symbols=run_symbols,
         start_dt=start_dt,
         end_dt=end_dt,
         min_required=20,
-        sync_before_run=True,
-        parallel_sync=False,
+        sync_before_run=False,
+        parallel_sync=True,
         lazy_sync_on_insufficient=True,
         normalize_ohlcv_frame=normalize_ohlcv_frame,
     )
@@ -848,11 +962,48 @@ def _write_constituent_heatmap(
         max_workers=1,
     )
     if not rows:
-        return False
-    rows_df = pd.DataFrame(rows)
+        return pd.DataFrame(), ""
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        symbol_token = str(item.get("symbol") or "").strip().upper()
+        item["weight_pct"] = weight_map.get(symbol_token)
+    return pd.DataFrame(rows), str(benchmark_result.symbol_used or "").strip().upper()
+
+
+def _write_constituent_heatmap_rows(
+    *,
+    symbol: str,
+    rows_df: pd.DataFrame,
+    output_path: Path,
+) -> None:
     fig, width, height = _build_constituent_heatmap_figure(symbol=symbol, rows_df=rows_df)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_image(str(output_path), format="png", width=width, height=height, scale=2)
+ 
+
+def _write_constituent_heatmap(
+    *,
+    store: HistoryStore,
+    symbol: str,
+    constituent_rows: list[dict[str, object]],
+    output_path: Path,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> bool:
+    rows_df, _ = _compute_constituent_heatmap_rows(
+        store=store,
+        constituent_rows=constituent_rows,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+    if rows_df.empty:
+        return False
+    _write_constituent_heatmap_rows(
+        symbol=symbol,
+        rows_df=rows_df,
+        output_path=output_path,
+    )
     return True
 
 

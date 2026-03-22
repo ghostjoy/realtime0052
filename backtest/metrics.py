@@ -10,7 +10,7 @@ from backtest.types import BacktestMetrics
 
 
 def compute_yearly_returns(equity: pd.Series) -> dict[str, float]:
-    yearly = equity.resample("YE").last().pct_change().dropna()
+    yearly = equity.resample("YE").last().dropna().pct_change(fill_method=None).dropna()
     return {str(idx.year): float(val) for idx, val in yearly.items()}
 
 
@@ -19,7 +19,7 @@ def compute_metrics_from_equity(
     initial_capital: float,
     trade_pnls: Iterable[float],
 ) -> tuple[BacktestMetrics, pd.Series, dict[str, float]]:
-    returns = equity_curve["equity"].pct_change().fillna(0.0)
+    returns = equity_curve["equity"].pct_change(fill_method=None).fillna(0.0)
     running_max = equity_curve["equity"].cummax()
     drawdown = equity_curve["equity"] / running_max - 1.0
     years = max((equity_curve.index[-1] - equity_curve.index[0]).days / 365.25, 1 / 365.25)

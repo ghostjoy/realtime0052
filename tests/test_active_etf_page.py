@@ -55,6 +55,7 @@ from app import (
     _classify_issue_level,
     _classify_tw_etf,
     _compute_jaccard_pct,
+    _compute_excess_metric_value,
     _compute_tw_equal_weight_compare_payload,
     _compute_tw_etf_aum_alert_fill_color,
     _compute_tw_etf_aum_alert_mask,
@@ -1596,6 +1597,32 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(_format_weight_pct_label(3.456), "3.46%")
         self.assertEqual(_format_weight_pct_label(""), "—")
         self.assertEqual(_format_weight_pct_label(None), "—")
+
+    def test_compute_excess_metric_value_prefers_weighted_average_when_weights_exist(self):
+        rows_df = pd.DataFrame(
+            [
+                {"symbol": "A", "excess_pct": 20.0, "weight_pct": 10.0},
+                {"symbol": "B", "excess_pct": -5.0, "weight_pct": 90.0},
+            ]
+        )
+
+        value, label = _compute_excess_metric_value(rows_df)
+
+        self.assertEqual(label, "加權平均超額報酬")
+        self.assertAlmostEqual(value, -2.5)
+
+    def test_compute_excess_metric_value_falls_back_to_equal_weight_when_weights_missing(self):
+        rows_df = pd.DataFrame(
+            [
+                {"symbol": "A", "excess_pct": 20.0},
+                {"symbol": "B", "excess_pct": -5.0},
+            ]
+        )
+
+        value, label = _compute_excess_metric_value(rows_df)
+
+        self.assertEqual(label, "平均超額報酬")
+        self.assertAlmostEqual(value, 7.5)
 
     def test_load_tw_benchmark_bars_fallback_chain(self):
         idx = pd.to_datetime(["2026-01-02", "2026-01-03"], utc=True)

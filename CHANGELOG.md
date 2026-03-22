@@ -30,10 +30,17 @@
   - `docs/tw-etf-report-bundle.md`
 
 ### Changed
+- 台股 ETF 熱力圖與全球成分股 heatmap 的摘要指標改為優先顯示 `加權平均超額報酬`：
+  - 有 `weight_pct` 時改依成分股權重加權，不再單純等權平均
+  - 若缺少可用權重，才退回原本 `平均超額報酬`
 - `2026 YTD 主動式 ETF` 卡片改名為 `YTD Active ETF`，導覽卡、頁面標題、功能地圖與文件同步更新。
 - `export-tw-etf-report` 的成分股熱力圖改用黑字、淡色、偏透明的紅綠階層：
   - 贏大盤改為淡綠到藍綠系，不再使用深綠
   - 輸大盤改為淡紅到橘紅系，不再使用深紅
+- `export-tw-etf-report` 的 constituent heatmap PNG 版型進一步對齊 web：
+  - 固定每列 `8` 格，與 web 熱力圖頁相同
+  - 圖高、邊界、色條文案與字型配置同步收斂
+  - CLI 匯出圖與 web 顯示不再出現明顯不同版型
 - `2026 YTD` 兩張排行卡片調整為 Top15：
   - `2026 YTD 前十大 ETF` 改名為 `YTD top15 ETF`，並改為取前 `15` 檔
   - `2026 YTD 前十大股利型、配息型 ETF` 先改名為 `YTD top15 股利型`，後續再改為 `YTD股利型ETF`，並改為顯示完整股利型母體
@@ -51,6 +58,14 @@
 - 現有 CLI help 文案補強，`export-tw-etf-super-table --help` / `backtest --help` 會顯示更完整的用途與範例，較適合 AI 或排程直接調用。
 
 ### Fixed
+- 修正 `export-tw-etf-report --heatmap-only` 的 constituent heatmap 匯出：
+  - CLI 匯圖會把 constituent `weight_pct` 正確回填到 heatmap tiles，不再整張都顯示 `—`
+  - 預設 constituent sync 改為只刷新指定 ETF，不再先跑全市場同步
+  - heatmap 匯圖改為優先重用本地日K，僅在資料不足時補同步，速度更接近 web 頁面
+  - `--no-sync-constituents` 時，若 `heatmap_runs` 已有同區間 `buy_hold /^TWII` 快取，會直接重用，不再重跑整個 heatmap backtest
+- 修正回測績效與 ETF heatmap 匯出流程在 `pandas` 新版下的 `pct_change` `FutureWarning`：
+  - `backtest/metrics.py`、`services/backtest_runner.py`、`app.py` 改為明確指定 `fill_method=None`
+  - 年度報酬計算會先略過缺失年度資料，避免沿用即將移除的自動補值行為
 - 修正 `YTD Active ETF` 誤納入非 ETF `A` 尾碼股票：
   - `主動式` fallback 不再把所有 `A` 尾碼代碼直接視為主動式 ETF
   - 主動式卡片母體新增 ETF 身分檢查，排除 `2002A / 6958A` 這類非 ETF 股票

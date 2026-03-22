@@ -393,7 +393,7 @@ def sync_tw_etf_constituents(
     "--sync-constituents/--no-sync-constituents",
     default=True,
     show_default=True,
-    help="Run the TW ETF constituent market-wide sync before building the single-symbol report bundle",
+    help="Refresh the requested ETF constituent snapshot before exporting; disable to reuse DuckDB/local fallback",
 )
 @click.option("--ytd-start", help="YTD start date (YYYY-MM-DD or YYYYMMDD)")
 @click.option("--ytd-end", help="YTD end date (YYYY-MM-DD or YYYYMMDD)")

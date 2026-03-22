@@ -3838,7 +3838,7 @@ def _series_metrics_basic(series: pd.Series) -> dict[str, float]:
     clean = pd.to_numeric(series, errors="coerce").dropna().sort_index()
     if len(clean) < 2:
         return {"total_return": 0.0, "cagr": 0.0, "max_drawdown": 0.0, "sharpe": 0.0}
-    returns = clean.pct_change().fillna(0.0)
+    returns = clean.pct_change(fill_method=None).fillna(0.0)
     running_max = clean.cummax()
     drawdown = clean / running_max - 1.0
     years = max((clean.index[-1] - clean.index[0]).days / 365.25, 1 / 365.25)
@@ -9614,6 +9614,28 @@ def _format_weight_pct_label(value: object) -> str:
     return f"{weight:.2f}%"
 
 
+def _compute_excess_metric_value(rows_df: pd.DataFrame) -> tuple[float, str]:
+    if rows_df is None or rows_df.empty:
+        return 0.0, "平均超額報酬"
+
+    frame = rows_df.copy()
+    frame["excess_pct"] = pd.to_numeric(frame.get("excess_pct"), errors="coerce")
+    frame["weight_pct"] = pd.to_numeric(frame.get("weight_pct"), errors="coerce")
+    frame = frame.dropna(subset=["excess_pct"])
+    if frame.empty:
+        return 0.0, "平均超額報酬"
+
+    weighted = frame.dropna(subset=["weight_pct"]).copy()
+    weighted = weighted[weighted["weight_pct"] > 0]
+    if not weighted.empty:
+        weight_sum = float(weighted["weight_pct"].sum())
+        if weight_sum > 0:
+            value = float(np.average(weighted["excess_pct"], weights=weighted["weight_pct"]))
+            return value, "加權平均超額報酬"
+
+    return float(frame["excess_pct"].mean()), "平均超額報酬"
+
+
 def _consensus_threshold_candidates(etf_count: int) -> list[int]:
     n = max(0, int(etf_count))
     if n <= 0:
@@ -13919,12 +13941,12 @@ def _render_excess_heatmap_panel(
     winners = int((frame["excess_pct"] > 0).sum())
     losers = int((frame["excess_pct"] < 0).sum())
     ties = int((frame["excess_pct"] == 0).sum())
-    avg_excess = float(frame["excess_pct"].mean())
+    avg_excess, avg_excess_label = _compute_excess_metric_value(frame)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("勝過基準檔數", str(winners))
     m2.metric("輸給基準檔數", str(losers))
     m3.metric("持平檔數", str(ties))
-    m4.metric("平均超額報酬", f"{avg_excess:+.2f}%")
+    m4.metric(avg_excess_label, f"{avg_excess:+.2f}%")
 
     palette = _ui_palette()
     tiles_per_row = 6
@@ -14886,7 +14908,7 @@ def _render_tw_etf_heatmap_view(
     winners = int((rows_df["excess_pct"] > 0).sum())
     losers = int((rows_df["excess_pct"] < 0).sum())
     ties = int((rows_df["excess_pct"] == 0).sum())
-    avg_excess = float(rows_df["excess_pct"].mean())
+    avg_excess, avg_excess_label = _compute_excess_metric_value(rows_df)
     max_win = float(rows_df["excess_pct"].max())
     max_loss = float(rows_df["excess_pct"].min())
 
@@ -14894,7 +14916,7 @@ def _render_tw_etf_heatmap_view(
     m1.metric("勝過大盤檔數", f"{winners}")
     m2.metric("輸給大盤檔數", f"{losers}")
     m3.metric("持平檔數", f"{ties}")
-    m4.metric("平均超額報酬", f"{avg_excess:+.2f}%")
+    m4.metric(avg_excess_label, f"{avg_excess:+.2f}%")
     m5.metric("最佳/最差", f"{max_win:+.2f}% / {max_loss:+.2f}%")
     with st.expander("結果怎麼看（越大/越小）", expanded=False):
         st.markdown(
@@ -14903,7 +14925,7 @@ def _render_tw_etf_heatmap_view(
                     "- `勝過大盤檔數`：越大越好（代表更多成分股跑贏基準）。",
                     "- `輸給大盤檔數`：越小越好（越大代表弱勢標的較多）。",
                     "- `持平檔數`：中性，通常代表差異接近 0%。",
-                    "- `平均超額報酬`：越大越好；`> 0` 代表整體贏過基準。",
+                    f"- `{avg_excess_label}`：越大越好；`> 0` 代表整體贏過基準。",
                     "- `最佳/最差`：最佳越大越好；最差希望不要太負值（絕對值越小越穩）。",
                     "- `Bars`：策略與 Benchmark 對齊後可比較的 K 棒數，不是交易次數；通常越大結果越有參考性。",
                 ]
