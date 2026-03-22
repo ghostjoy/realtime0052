@@ -11671,65 +11671,67 @@ def _render_top10_etf_2026_ytd_view(
                 column_config=merged_link_config if merged_link_config else None,
                 disable_backtest_drilldown=True,
             )
-        (
-            exit_df,
-            exit_prev_used,
-            exit_end_used,
-            exit_is_carried_forward,
-            exit_had_comparable_pair,
-        ) = _resolve_rank_exit_snapshot(
-            current_frame=top10_etf_df,
-            previous_frame=previous_rank_df,
-            current_end_used=end_used,
-            current_prev_used=daily_prev_used,
-            start_yyyymmdd=start_target,
-            display_n=display_n,
-            type_filter=etf_type_filter_text or None,
-            sort_ascending=bool(sort_ascending),
-            exclude_split_event=bool(exclude_split_event),
-            performance_col_label=performance_col_label,
-            excess_col_label=excess_col_label,
-            rank_by_underperform=rank_by_underperform,
-        )
-        if not exit_df.empty:
-            exit_items: list[str] = []
-            for _, row in exit_df.iterrows():
-                code_text = str(row.get("代碼", "")).strip()
-                name_text = str(row.get("ETF", "")).strip() or code_text
-                date_text = str(row.get("離開日期", "")).strip() or str(exit_end_used).strip()
-                if code_text:
-                    exit_items.append(f"`{code_text}` {name_text}（離開日期：{date_text}）")
-            if exit_items:
-                if exit_is_carried_forward and exit_prev_used and exit_end_used:
-                    st.caption(
-                        f"離開排行（最近更新：{exit_end_used}；比較區間：{exit_prev_used} -> {exit_end_used}）："
-                    )
-                elif exit_prev_used and exit_end_used:
-                    st.caption(f"離開排行（{exit_prev_used} -> {exit_end_used}）：")
-                else:
-                    st.caption("離開排行：")
-                st.markdown("\n".join([f"- {item}" for item in exit_items]))
-            else:
-                st.caption("離開排行：近期無離榜 ETF。")
-        elif exit_had_comparable_pair:
-            st.caption("離開排行：近期無離榜 ETF。")
-        elif daily_prev_used:
-            st.caption(f"離開排行：{daily_prev_used} 榜單資料不可用，暫無法比對。")
-        else:
-            st.caption("離開排行：目前無前一交易日可比較。")
-
-        st.markdown(
-            "<hr style='border: 0; border-top: 1px dashed #9aa0a6; margin: 0.4rem 0 0.6rem 0;'>",
-            unsafe_allow_html=True,
-        )
-        st.caption("分類說明：")
-        st.markdown(
-            "\n".join(
-                [
-                    "- `類型`：本專案自有語意分類欄位；會參考官方資料，但統一以專案規則整理，頁面篩選也都以 `類型` 為準。",
-                ]
+        if page_key_prefix != "top10_dividend_etf_ytd":
+            (
+                exit_df,
+                exit_prev_used,
+                exit_end_used,
+                exit_is_carried_forward,
+                exit_had_comparable_pair,
+            ) = _resolve_rank_exit_snapshot(
+                current_frame=top10_etf_df,
+                previous_frame=previous_rank_df,
+                current_end_used=end_used,
+                current_prev_used=daily_prev_used,
+                start_yyyymmdd=start_target,
+                display_n=display_n,
+                type_filter=etf_type_filter_text or None,
+                sort_ascending=bool(sort_ascending),
+                exclude_split_event=bool(exclude_split_event),
+                performance_col_label=performance_col_label,
+                excess_col_label=excess_col_label,
+                rank_by_underperform=rank_by_underperform,
             )
-        )
+            if not exit_df.empty:
+                exit_items: list[str] = []
+                for _, row in exit_df.iterrows():
+                    code_text = str(row.get("代碼", "")).strip()
+                    name_text = str(row.get("ETF", "")).strip() or code_text
+                    date_text = str(row.get("離開日期", "")).strip() or str(exit_end_used).strip()
+                    if code_text:
+                        exit_items.append(f"`{code_text}` {name_text}（離開日期：{date_text}）")
+                if exit_items:
+                    if exit_is_carried_forward and exit_prev_used and exit_end_used:
+                        st.caption(
+                            f"離開排行（最近更新：{exit_end_used}；比較區間：{exit_prev_used} -> {exit_end_used}）："
+                        )
+                    elif exit_prev_used and exit_end_used:
+                        st.caption(f"離開排行（{exit_prev_used} -> {exit_end_used}）：")
+                    else:
+                        st.caption("離開排行：")
+                    st.markdown("\n".join([f"- {item}" for item in exit_items]))
+                else:
+                    st.caption("離開排行：近期無離榜 ETF。")
+            elif exit_had_comparable_pair:
+                st.caption("離開排行：近期無離榜 ETF。")
+            elif daily_prev_used:
+                st.caption(f"離開排行：{daily_prev_used} 榜單資料不可用，暫無法比對。")
+            else:
+                st.caption("離開排行：目前無前一交易日可比較。")
+
+            if page_key_prefix not in {"top10_dividend_etf_ytd", "top10_etf_ytd"}:
+                st.markdown(
+                    "<hr style='border: 0; border-top: 1px dashed #9aa0a6; margin: 0.4rem 0 0.6rem 0;'>",
+                    unsafe_allow_html=True,
+                )
+                st.caption("分類說明：")
+                st.markdown(
+                    "\n".join(
+                        [
+                            "- `類型`：本專案自有語意分類欄位；會參考官方資料，但統一以專案規則整理，頁面篩選也都以 `類型` 為準。",
+                        ]
+                    )
+                )
 
     symbols = [
         str(x).strip().upper() for x in top10_etf_df["代碼"].astype(str).tolist() if str(x).strip()
