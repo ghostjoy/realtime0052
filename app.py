@@ -1275,8 +1275,8 @@ def _infer_tw_symbol_exchanges(symbols: list[str]) -> dict[str, str]:
             out[code] = "OTC"
         elif in_twse and in_tpex:
             out[code] = "TW"
-        elif code.startswith("00"):
-            # Most Taiwan ETF codes are listed on TWSE.
+        elif len(code) == 5 and code.startswith("00"):
+            # Most 5-digit Taiwan ETF codes are listed on TWSE.
             out[code] = "TW"
     return out
 

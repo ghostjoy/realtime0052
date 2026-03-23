@@ -13,7 +13,7 @@ from unittest.mock import patch
 from providers.base import ProviderError, ProviderRequest
 from providers.tw_fugle_rest import TwFugleHistoricalProvider
 from providers.tw_fugle_ws import TwFugleWebSocketProvider
-from providers.tw_tpex import TwTpexOpenApiProvider
+from providers.tw_tpex import TwTpexEtfHistoricalProvider, TwTpexOpenApiProvider
 
 
 class _MockResponse:
@@ -113,6 +113,78 @@ class TwProvidersTests(unittest.TestCase):
                     end=datetime(2026, 1, 1, tzinfo=timezone.utc),
                 )
             )
+
+    @patch("requests.get")
+    def test_tpex_etf_historical_ohlcv_success(self, mock_get):
+        payloads = {
+            "2026/02/21": {"date": "20260221", "tables": []},
+            "2026/02/22": {"date": "20260222", "tables": []},
+            "2026/02/23": {
+                "date": "20260223",
+                "tables": [
+                    {
+                        "data": [
+                            [
+                                "1150223",
+                                "009815",
+                                "大華美國MAG7+   ",
+                                "36,662",
+                                "354,447",
+                                "9.83",
+                                "9.84",
+                                "9.63",
+                                "9.63",
+                                "-0.21",
+                                "11,334",
+                            ]
+                        ]
+                    }
+                ],
+            },
+            "2026/02/24": {
+                "date": "20260224",
+                "tables": [
+                    {
+                        "data": [
+                            [
+                                "1150224",
+                                "009815",
+                                "大華美國MAG7+   ",
+                                "24,672",
+                                "236,430",
+                                "9.56",
+                                "9.60",
+                                "9.55",
+                                "9.58",
+                                "-0.05",
+                                "7,250",
+                            ]
+                        ]
+                    }
+                ],
+            },
+        }
+
+        def _handler(*_args, **kwargs):
+            params = kwargs.get("params", {})
+            date = str(params.get("date"))
+            return _MockResponse(payloads.get(date, {"date": date.replace("/", ""), "tables": []}))
+
+        mock_get.side_effect = _handler
+        provider = TwTpexEtfHistoricalProvider(stop_missing_days=3)
+        snap = provider.ohlcv(
+            ProviderRequest(
+                symbol="009815",
+                market="OTC",
+                interval="1d",
+                start=datetime(2026, 2, 21, tzinfo=timezone.utc),
+                end=datetime(2026, 2, 24, tzinfo=timezone.utc),
+            )
+        )
+        self.assertEqual(snap.source, "tw_tpex_etf")
+        self.assertEqual(len(snap.df), 2)
+        self.assertAlmostEqual(float(snap.df["close"].iloc[-1]), 9.58)
+        self.assertEqual(float(snap.df["volume"].iloc[0]), 36_662_000.0)
 
     def test_fugle_ws_quote_success(self):
         fake_conn = _FakeWebSocketConn()

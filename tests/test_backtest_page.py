@@ -12,10 +12,23 @@ from ui.pages.backtest import (
     _build_tw_chip_filter_series,
     _build_tw_chip_history_frame,
     _build_tw_chip_replay_insight,
+    _resolve_backtest_asset_and_benchmark_markets,
 )
 
 
 class FinMindBacktestInsightTests(unittest.TestCase):
+    def test_resolve_backtest_asset_and_benchmark_markets_keeps_otc_assets(self):
+        asset_market, benchmark_market = _resolve_backtest_asset_and_benchmark_markets("OTC")
+
+        self.assertEqual(asset_market, "OTC")
+        self.assertEqual(benchmark_market, "TW")
+
+    def test_resolve_backtest_asset_and_benchmark_markets_uses_us_for_us(self):
+        asset_market, benchmark_market = _resolve_backtest_asset_and_benchmark_markets("US")
+
+        self.assertEqual(asset_market, "US")
+        self.assertEqual(benchmark_market, "US")
+
     def test_add_equity_summary_annotation_stays_inside_plot_frame(self):
         fig = go.Figure()
         equity = pd.Series([100_000.0, 120_000.0], index=pd.date_range("2026-01-01", periods=2))

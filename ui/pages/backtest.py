@@ -974,6 +974,15 @@ def _build_finmind_backtest_insight(
     }
 
 
+def _resolve_backtest_asset_and_benchmark_markets(market: object) -> tuple[str, str]:
+    token = str(market or "").strip().upper()
+    if token == "OTC":
+        return "OTC", "TW"
+    if token == "US":
+        return "US", "US"
+    return "TW", "TW"
+
+
 def _render_backtest_view():
     perf_timer = PerfTimer(enabled=perf_debug_enabled())
     _parse_symbols = runner_parse_symbols
@@ -1041,9 +1050,12 @@ def _render_backtest_view():
         format_func=lambda v: market_labels.get(str(v), str(v)),
         key=BT_KEYS.market,
     )
-    is_tw_market = market_selector in {"TW", "OTC"}
-    market_code = "TW" if is_tw_market else "US"
-    tw_symbol_label_enabled = market_code == "TW"
+    asset_market, benchmark_market = _resolve_backtest_asset_and_benchmark_markets(
+        market_selector
+    )
+    is_tw_market = benchmark_market == "TW"
+    market_code = benchmark_market
+    tw_symbol_label_enabled = asset_market in {"TW", "OTC"}
     mode = c2.selectbox("模式", ["單一標的", "投組(多標的)"], index=0, key=BT_KEYS.mode)
     default_symbol = (
         "0052" if market_selector == "TW" else ("8069" if market_selector == "OTC" else "TSLA")
@@ -1529,7 +1541,7 @@ def _render_backtest_view():
     if run_requested and auto_sync and not st.session_state.get(sync_key):
         reports, plan = sync_symbols_if_needed(
             store=store,
-            market=market_code,
+            market=asset_market,
             symbols=symbols,
             start=sync_start,
             end=sync_end,
@@ -1555,7 +1567,7 @@ def _render_backtest_view():
     if run_requested and auto_fill_gaps and not st.session_state.get(gapfill_key):
         reports, plan = sync_symbols_if_needed(
             store=store,
-            market=market_code,
+            market=asset_market,
             symbols=symbols,
             start=sync_start,
             end=sync_end,
@@ -1583,7 +1595,7 @@ def _render_backtest_view():
     if st.button("同步歷史資料", width="stretch"):
         reports, plan = sync_symbols_if_needed(
             store=store,
-            market=market_code,
+            market=asset_market,
             symbols=symbols,
             start=sync_start,
             end=sync_end,
@@ -1613,7 +1625,7 @@ def _render_backtest_view():
 
     prepared_bars = load_and_prepare_symbol_bars(
         store=store,
-        market_code=market_code,
+        market_code=asset_market,
         symbols=list(symbols),
         start=sync_start,
         end=sync_end,

@@ -15,6 +15,7 @@ from providers import (
     TwFugleWebSocketProvider,
     TwMisProvider,
     TwOpenApiProvider,
+    TwTpexEtfHistoricalProvider,
     TwTpexOpenApiProvider,
     UsStooqProvider,
     UsTwelveDataProvider,
@@ -73,6 +74,7 @@ class MarketDataService:
         self.tw_fugle_ws = TwFugleWebSocketProvider()
         self.tw_mis = TwMisProvider()
         self.tw_openapi = TwOpenApiProvider()
+        self.tw_tpex_etf = TwTpexEtfHistoricalProvider()
         self.tw_tpex = TwTpexOpenApiProvider()
         self.gateway = ProviderGateway()
         self.cache = _TtlCache()
@@ -507,8 +509,8 @@ class MarketDataService:
         candidates: list[tuple[object, ProviderRequest]] = []
         for provider in providers:
             provider_request = request
-            if request.market == "TW" and getattr(provider, "name", "") == "yahoo":
-                yahoo_symbol = self._normalize_tw_yahoo_symbol(request.symbol)
+            if request.market in {"TW", "OTC"} and getattr(provider, "name", "") == "yahoo":
+                yahoo_symbol = self._normalize_local_yahoo_symbol(request.symbol, request.market)
                 if yahoo_symbol and yahoo_symbol != request.symbol:
                     provider_request = ProviderRequest(
                         symbol=yahoo_symbol,
@@ -527,11 +529,17 @@ class MarketDataService:
 
     @staticmethod
     def _normalize_tw_yahoo_symbol(symbol: str) -> str:
+        return MarketDataService._normalize_local_yahoo_symbol(symbol, "TW")
+
+    @staticmethod
+    def _normalize_local_yahoo_symbol(symbol: str, market: str) -> str:
         text = (symbol or "").strip().upper()
         if not text or "." in text:
             return text
-        # TW individual stocks/ETFs are typically 4~6 digit codes on Yahoo.
+        market_token = str(market or "").strip().upper()
         if re.fullmatch(r"\d{4,6}[A-Z]?", text):
+            if market_token == "OTC":
+                return f"{text}.TWO"
             return f"{text}.TW"
         return text
 

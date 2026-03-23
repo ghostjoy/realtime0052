@@ -948,11 +948,14 @@ class ActiveEtfPageTests(unittest.TestCase):
         self.assertEqual(_infer_market_target_from_symbols(["SPY", "^GSPC"]), "US")
         self.assertEqual(_infer_market_target_from_symbols(["2330.TW"]), "TW")
         self.assertEqual(_infer_market_target_from_symbols(["8069.TWO"]), "OTC")
+        with patch("app._infer_tw_symbol_exchanges", return_value={}):
+            self.assertIsNone(_infer_market_target_from_symbols(["009815"]))
         self.assertIsNone(_infer_market_target_from_symbols(["8069", "AAPL"]))
         self.assertIsNone(_infer_market_target_from_symbols([]))
 
     def testparse_drill_symbol(self):
         self.assertEqual(parse_drill_symbol("0050 元大台灣50"), ("0050", "TW"))
+        self.assertEqual(parse_drill_symbol("009815"), ("009815", ""))
         self.assertEqual(parse_drill_symbol("8069.TWO"), ("8069", "OTC"))
         self.assertEqual(parse_drill_symbol("AAPL Apple"), ("AAPL", "US"))
         self.assertEqual(parse_drill_symbol("—"), ("", ""))
@@ -1028,6 +1031,8 @@ class ActiveEtfPageTests(unittest.TestCase):
 
     def test_format_tw_symbol_for_display(self):
         self.assertEqual(format_tw_symbol_for_display("0050 元大台灣50", "TW"), "0050.TW")
+        self.assertEqual(format_tw_symbol_for_display("8069", "OTC"), "8069.TWO")
+        self.assertEqual(format_tw_symbol_for_display("009815", ""), "009815")
         self.assertEqual(format_tw_symbol_for_display("AAPL", "US"), "AAPL")
         self.assertEqual(format_tw_symbol_for_display("^TWII", "TW"), "^TWII")
 

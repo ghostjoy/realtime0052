@@ -255,6 +255,18 @@ class MarketDataServiceTests(unittest.TestCase):
 
         self.assertEqual(yahoo.last_symbol, "^TWII")
 
+    def test_try_ohlcv_chain_normalizes_otc_symbol_for_yahoo(self):
+        service = MarketDataService()
+        tw_tpex = _OhlcvProvider("tw_tpex", fail=True)
+        yahoo = _OhlcvProvider("yahoo")
+        request = ProviderRequest(symbol="009815", market="OTC", interval="1d")
+
+        snap = service._try_ohlcv_chain([tw_tpex, yahoo], request)  # noqa: SLF001
+
+        self.assertEqual(tw_tpex.last_symbol, "009815")
+        self.assertEqual(yahoo.last_symbol, "009815.TWO")
+        self.assertEqual(snap.symbol, "009815.TWO")
+
     @patch("yfinance.download")
     def test_get_benchmark_series(self, mock_download):
         idx = pd.date_range("2024-01-01", periods=5, freq="B", tz="UTC")

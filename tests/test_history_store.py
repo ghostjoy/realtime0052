@@ -23,6 +23,7 @@ class _FakeService:
         self.us_stooq = _Provider("stooq")
         self.tw_fugle_rest = _Provider("tw_fugle_rest")
         self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex_etf = _Provider("tw_tpex_etf")
         self.tw_tpex = _Provider("tw_tpex")
         self.source = source
         self.fail = fail
@@ -63,12 +64,15 @@ class _CaptureService:
         self.tw_fugle_rest = _Provider("tw_fugle_rest")
         self.tw_fugle_rest.api_key = None
         self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex_etf = _Provider("tw_tpex_etf")
         self.tw_tpex = _Provider("tw_tpex")
         self.last_request: ProviderRequest | None = None
         self.last_provider_name: str | None = None
+        self.last_provider_chain: list[str] = []
 
     def _try_ohlcv_chain(self, providers, request: ProviderRequest):
         self.last_request = request
+        self.last_provider_chain = [str(getattr(provider, "name", "") or "") for provider in providers]
         self.last_provider_name = str(getattr(providers[0], "name", "") or "")
         start = request.start or datetime(2024, 1, 1, tzinfo=timezone.utc)
         dates = pd.date_range(start=start, periods=5, freq="B", tz="UTC")
@@ -103,6 +107,7 @@ class _DupColumnService:
         self.tw_fugle_rest = _Provider("tw_fugle_rest")
         self.tw_fugle_rest.api_key = None
         self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex_etf = _Provider("tw_tpex_etf")
         self.tw_tpex = _Provider("tw_tpex")
 
     def _try_ohlcv_chain(self, providers, request: ProviderRequest):
@@ -596,6 +601,24 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(service.last_provider_name, "yahoo")
             assert service.last_request is not None
             self.assertEqual(service.last_request.symbol, "^TWII")
+
+    def test_sync_history_otc_prefers_fugle_and_skips_tw_openapi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = f"{tmp}/test.sqlite3"
+            service = _CaptureService()
+            service.tw_fugle_rest.api_key = "fake-key"
+            store = HistoryStore(db_path=db_path, service=service)
+            start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            end = datetime(2024, 1, 31, tzinfo=timezone.utc)
+
+            report = store.sync_symbol_history(symbol="009815", market="OTC", start=start, end=end)
+            self.assertEqual(report.source, "tw_fugle_rest")
+            self.assertEqual(service.last_provider_name, "tw_fugle_rest")
+            assert service.last_request is not None
+            self.assertEqual(str(service.last_request.market), "OTC")
+            self.assertEqual(
+                service.last_provider_chain, ["tw_fugle_rest", "tw_tpex_etf", "tw_tpex", "yahoo"]
+            )
 
     def test_sync_history_normalizes_duplicate_ohlcv_columns(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -66,7 +66,7 @@ def parse_drill_symbol(value: object) -> tuple[str, str]:
         market = "OTC" if str(tw_match.group(2)).upper() == "TWO" else "TW"
         return symbol, market
     if re.fullmatch(r"\d{4,6}[A-Z]?", token):
-        return token, "TW"
+        return token, "TW" if len(token) <= 5 else ""
     if token == "^TWII":
         return token, "TW"
     if re.fullmatch(r"\^[A-Z0-9.\-]{2,10}", token):
@@ -111,4 +111,6 @@ def format_tw_symbol_for_display(value: object, market_hint: object = "") -> str
     market = normalize_market_tag_for_drill(market_hint) or default_market
     if market not in {"TW", "OTC"} and not looks_like_tw_symbol(symbol):
         return raw
-    return f"{symbol}.TW"
+    if market not in {"TW", "OTC"}:
+        return raw
+    return f"{symbol}.TWO" if market == "OTC" else f"{symbol}.TW"

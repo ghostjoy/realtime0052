@@ -32,15 +32,18 @@ class _CaptureSyncService:
         self.us_stooq = _Provider("stooq")
         self.tw_fugle_rest = _Provider("tw_fugle_rest", api_key="fake-key")
         self.tw_openapi = _Provider("tw_openapi")
+        self.tw_tpex_etf = _Provider("tw_tpex_etf")
         self.tw_tpex = _Provider("tw_tpex")
         self.last_request = None
         self.last_provider_name: str | None = None
+        self.last_provider_chain: list[str] = []
 
     def set_metadata_store(self, store):
         self.store = store
 
     def _try_ohlcv_chain(self, providers, request):
         self.last_request = request
+        self.last_provider_chain = [str(getattr(provider, "name", "") or "") for provider in providers]
         self.last_provider_name = str(getattr(providers[0], "name", "") or "")
         idx = pd.date_range("2024-01-01", periods=5, freq="B", tz="UTC")
         df = pd.DataFrame(
@@ -1168,6 +1171,27 @@ class DuckStoreTests(unittest.TestCase):
             self.assertEqual(report.source, "yahoo")
             self.assertEqual(service.last_provider_name, "yahoo")
             self.assertEqual(str(getattr(service.last_request, "symbol", "")), "^TWII")
+
+    def test_sync_otc_prefers_fugle_and_skips_tw_openapi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            service = _CaptureSyncService()
+            store = DuckHistoryStore(
+                db_path=str(tmp_path / "history.duckdb"),
+                parquet_root=str(tmp_path / "parquet"),
+                service=service,
+                auto_migrate_legacy_sqlite=False,
+            )
+            start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            end = datetime(2024, 1, 31, tzinfo=timezone.utc)
+
+            report = store.sync_symbol_history(symbol="009815", market="OTC", start=start, end=end)
+            self.assertEqual(report.source, "tw_fugle_rest")
+            self.assertEqual(service.last_provider_name, "tw_fugle_rest")
+            self.assertEqual(str(getattr(service.last_request, "market", "")), "OTC")
+            self.assertEqual(
+                service.last_provider_chain, ["tw_fugle_rest", "tw_tpex_etf", "tw_tpex", "yahoo"]
+            )
 
 
 if __name__ == "__main__":

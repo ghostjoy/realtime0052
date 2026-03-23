@@ -894,6 +894,8 @@ class HistoryStore:
     def _normalize_yahoo_symbol(symbol: str, market: str) -> str:
         if market == "TW" and "." not in symbol:
             return f"{symbol}.TW"
+        if market == "OTC" and "." not in symbol:
+            return f"{symbol}.TWO"
         return symbol
 
     def _get_or_create_instrument(self, symbol: str, market: str, name: str | None = None) -> int:
@@ -1030,9 +1032,10 @@ class HistoryStore:
                 fugle_rest = getattr(self.service, "tw_fugle_rest", None)
                 if fugle_rest is not None and getattr(fugle_rest, "api_key", None):
                     providers.append(fugle_rest)
-                providers.extend(
-                    [self.service.tw_tpex, self.service.tw_openapi, self.service.yahoo]
-                )
+                tw_tpex_etf = getattr(self.service, "tw_tpex_etf", None)
+                if tw_tpex_etf is not None:
+                    providers.append(tw_tpex_etf)
+                providers.extend([self.service.tw_tpex, self.service.yahoo])
             else:
                 providers = [self.service.yahoo]
         else:

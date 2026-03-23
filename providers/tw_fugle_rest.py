@@ -168,11 +168,12 @@ class TwFugleHistoricalProvider(MarketDataProvider):
         return out
 
     def ohlcv(self, request: ProviderRequest) -> OhlcvSnapshot:
-        if request.market != "TW":
+        market = str(request.market or "").strip().upper()
+        if market not in {"TW", "OTC"}:
             raise ProviderError(
                 self.name,
                 ProviderErrorKind.UNSUPPORTED,
-                "Fugle historical provider only supports TW market",
+                "Fugle historical provider only supports TW/OTC market",
             )
         interval = str(request.interval or "").strip().lower()
         if interval not in {"1d", "1m"}:
@@ -224,7 +225,7 @@ class TwFugleHistoricalProvider(MarketDataProvider):
 
         return OhlcvSnapshot(
             symbol=symbol,
-            market="TW",
+            market=market,
             interval=interval,
             tz="UTC",
             df=df[["open", "high", "low", "close", "volume"]],

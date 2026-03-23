@@ -58,6 +58,12 @@
 - 現有 CLI help 文案補強，`export-tw-etf-super-table --help` / `backtest --help` 會顯示更完整的用途與範例，較適合 AI 或排程直接調用。
 
 ### Fixed
+- 修正回測工作台在 `市場 = OTC` 時仍把標的同步與歷史載入送成 `TW`：
+  - `009815` 這類上櫃標的在回測頁的 `同步歷史資料 / 自動補缺口 / 執行回測` 會保留 `OTC` market，不再誤走 `TW` provider chain
+  - benchmark 仍維持使用台股基準（`TW`），避免影響既有 `^TWII / 0050 / 006208` 比較邏輯
+- 修正 `009815` 這類上櫃 ETF 在 `OTC` 同步仍失敗的問題：
+  - 新增 `tw_tpex_etf` provider，改接 TPEx 官方 `ETFReport/historical` 日行情 JSON
+  - `OTC` 歷史同步鏈新增 `tw_tpex_etf` fallback，可補齊 Yahoo / Fugle 無法覆蓋的上櫃 ETF 日線
 - 修正 `export-tw-etf-report --heatmap-only` 的 constituent heatmap 匯出：
   - CLI 匯圖會把 constituent `weight_pct` 正確回填到 heatmap tiles，不再整張都顯示 `—`
   - 預設 constituent sync 改為只刷新指定 ETF，不再先跑全市場同步
