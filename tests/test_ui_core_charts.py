@@ -21,12 +21,25 @@ def _configure_test_runtime(captured: dict[str, Any]) -> None:
             "_render_plotly_chart": lambda fig, **kwargs: captured.setdefault("fig", fig),
             "_to_rgba": lambda color, alpha: color,
             "_ui_palette": lambda: {
+                "bb_lower": "#60A5FA",
+                "bb_upper": "#2563EB",
+                "buy_hold": "#F59E0B",
                 "equity": "#2563EB",
+                "kd_d": "#EF4444",
+                "kd_k": "#22C55E",
+                "macd_line": "#2563EB",
+                "macd_signal": "#F59E0B",
                 "plot_template": "plotly_white",
                 "paper_bg": "#FFFFFF",
                 "plot_bg": "#FFFFFF",
+                "signal_buy": "#22C55E",
+                "signal_sell": "#EF4444",
+                "sma20": "#0EA5E9",
                 "text_color": "#111827",
+                "text_muted": "#64748B",
                 "grid": "#CBD5E1",
+                "volume_down": "#DC2626",
+                "volume_up": "#16A34A",
             },
         }
     )
@@ -139,3 +152,62 @@ def test_build_multi_line_styles_keeps_all_asset_lines_solid():
     )
     assert styles["00981A"]["dash"] == "solid"
     assert styles["00995A"]["dash"] == "solid"
+
+
+def test_render_indicator_panels_aligns_left_and_right_margins_with_main_chart():
+    captured: dict[str, Any] = {}
+    _configure_test_runtime(captured)
+    idx = pd.date_range("2026-03-01", periods=3, freq="D", tz="UTC")
+    charts._render_indicator_panels(
+        pd.DataFrame(
+            {
+                "close": [100.0, 102.0, 101.0],
+                "bb_upper": [104.0, 105.0, 104.5],
+                "bb_mid": [100.0, 101.0, 101.0],
+                "bb_lower": [96.0, 97.0, 97.5],
+                "rsi_14": [45.0, 55.0, 50.0],
+                "stoch_k": [40.0, 60.0, 55.0],
+                "stoch_d": [38.0, 58.0, 52.0],
+                "macd": [0.1, 0.3, 0.2],
+                "macd_signal": [0.0, 0.2, 0.15],
+                "macd_hist": [0.1, -0.1, 0.05],
+            },
+            index=idx,
+        ),
+        chart_key="unit_test_indicator_chart",
+    )
+
+    fig = captured["fig"]
+    trace_by_name = {str(trace.name): trace for trace in fig.data}
+    assert len(fig.layout.annotations) == 1
+    annotation = fig.layout.annotations[0]
+    assert fig.layout.height == 600
+    assert fig.layout.margin.l == 60
+    assert fig.layout.margin.r == 220
+    assert float(annotation.x) > 1.0
+    assert str(annotation.xanchor) == "left"
+    assert "Close" in str(annotation.text)
+    assert "101.00" in str(annotation.text)
+    assert "RSI14" in str(annotation.text)
+    assert "50.00" in str(annotation.text)
+    assert "MACD Signal" in str(annotation.text)
+    assert "0.1500" in str(annotation.text)
+    assert "MACD Hist" in str(annotation.text)
+    assert "0.0500" in str(annotation.text)
+    assert "#334155" in str(annotation.text)
+    assert "#1D4ED8" in str(annotation.text)
+    assert "#059669" in str(annotation.text)
+    assert trace_by_name["Close"].line.color == "#334155"
+    assert trace_by_name["BB中軌"].line.color == "#2563EB"
+    assert trace_by_name["BB上軌"].line.color == "#B91C1C"
+    assert trace_by_name["BB下軌"].line.color == "#0F766E"
+    assert trace_by_name["RSI14"].line.color == "#1D4ED8"
+    assert trace_by_name["KD-K"].line.color == "#0F766E"
+    assert trace_by_name["KD-D"].line.color == "#C2410C"
+    assert trace_by_name["MACD"].line.color == "#059669"
+    assert trace_by_name["MACD Signal"].line.color == "#B45309"
+    assert tuple(trace_by_name["MACD Hist"].marker.color) == (
+        "rgba(5,150,105,0.45)",
+        "rgba(185,28,28,0.38)",
+        "rgba(5,150,105,0.45)",
+    )

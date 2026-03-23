@@ -3424,7 +3424,7 @@ def _render_backtest_view():
         fig.update_layout(
             height=560,
             xaxis_rangeslider_visible=False,
-            margin=dict(l=10, r=10, t=68, b=10),
+            margin=dict(l=60, r=220, t=68, b=10),
             uirevision=f"playback:{run_key}",
             transition=dict(duration=0),
             template=str(palette["plot_template"]),

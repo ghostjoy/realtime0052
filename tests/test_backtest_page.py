@@ -4,8 +4,10 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import plotly.graph_objects as go
 
 from ui.pages.backtest import (
+    _add_equity_summary_annotation,
     _build_finmind_backtest_insight,
     _build_tw_chip_filter_series,
     _build_tw_chip_history_frame,
@@ -14,6 +16,29 @@ from ui.pages.backtest import (
 
 
 class FinMindBacktestInsightTests(unittest.TestCase):
+    def test_add_equity_summary_annotation_stays_inside_plot_frame(self):
+        fig = go.Figure()
+        equity = pd.Series([100_000.0, 120_000.0], index=pd.date_range("2026-01-01", periods=2))
+        benchmark = pd.Series([100_000.0, 110_000.0], index=pd.date_range("2026-01-01", periods=2))
+
+        with patch("ui.pages.backtest._to_rgba", side_effect=lambda color, alpha: color):
+            _add_equity_summary_annotation(
+                fig,
+                equity_series=equity,
+                benchmark_series=benchmark,
+                palette={
+                    "equity": "#22C55E",
+                    "benchmark": "#0EA5E9",
+                    "text_color": "#0F172A",
+                    "paper_bg": "#FFFFFF",
+                },
+            )
+
+        self.assertEqual(len(fig.layout.annotations), 1)
+        annotation = fig.layout.annotations[0]
+        self.assertGreater(float(annotation.x), 1.0)
+        self.assertEqual(str(annotation.xanchor), "left")
+
     def test_build_finmind_backtest_insight_with_positive_research_data(self):
         insight = _build_finmind_backtest_insight(
             {

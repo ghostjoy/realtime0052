@@ -23,6 +23,20 @@ MULTI_LINE_COLORS: tuple[str, ...] = (
     "#65A30D",
 )
 
+INDICATOR_PANEL_COLORS: dict[str, str] = {
+    "close": "#334155",
+    "bb_mid": "#2563EB",
+    "bb_upper": "#B91C1C",
+    "bb_lower": "#0F766E",
+    "rsi": "#1D4ED8",
+    "kd_k": "#0F766E",
+    "kd_d": "#C2410C",
+    "macd": "#059669",
+    "macd_signal": "#B45309",
+    "macd_hist_up": "rgba(5,150,105,0.45)",
+    "macd_hist_down": "rgba(185,28,28,0.38)",
+}
+
 REQUIRED_RUNTIME_NAMES = (
     "_apply_plotly_watermark",
     "_apply_unified_benchmark_hover",
@@ -124,6 +138,87 @@ def build_multi_line_styles(
             "dash": "solid",
         }
     return styles
+
+
+def _last_valid_numeric(series: object) -> float | None:
+    numeric = pd.to_numeric(series, errors="coerce")
+    if isinstance(numeric, pd.Series):
+        numeric = numeric.dropna()
+        if numeric.empty:
+            return None
+        return float(numeric.iloc[-1])
+    if pd.isna(numeric):
+        return None
+    return float(numeric)
+
+
+def _format_indicator_value(value: float | None, *, digits: int) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):.{int(digits)}f}"
+
+
+def _add_indicator_summary_annotation(
+    fig: go.Figure,
+    *,
+    frame: pd.DataFrame,
+    palette: Mapping[str, Any],
+    x_paper: float = 1.01,
+    y_paper: float = 0.985,
+) -> None:
+    bb_mid_col = "bb_mid" if "bb_mid" in frame.columns else ("sma_20" if "sma_20" in frame.columns else "")
+    items: list[tuple[str, str, float | None, int]] = [
+        ("Close", INDICATOR_PANEL_COLORS["close"], _last_valid_numeric(frame.get("close")), 2),
+        (
+            "BB中軌",
+            INDICATOR_PANEL_COLORS["bb_mid"],
+            _last_valid_numeric(frame.get(bb_mid_col)) if bb_mid_col else None,
+            2,
+        ),
+        ("BB上軌", INDICATOR_PANEL_COLORS["bb_upper"], _last_valid_numeric(frame.get("bb_upper")), 2),
+        ("BB下軌", INDICATOR_PANEL_COLORS["bb_lower"], _last_valid_numeric(frame.get("bb_lower")), 2),
+        ("RSI14", INDICATOR_PANEL_COLORS["rsi"], _last_valid_numeric(frame.get("rsi_14")), 2),
+        ("KD-K", INDICATOR_PANEL_COLORS["kd_k"], _last_valid_numeric(frame.get("stoch_k")), 2),
+        ("KD-D", INDICATOR_PANEL_COLORS["kd_d"], _last_valid_numeric(frame.get("stoch_d")), 2),
+        ("MACD", INDICATOR_PANEL_COLORS["macd"], _last_valid_numeric(frame.get("macd")), 4),
+        (
+            "MACD Signal",
+            INDICATOR_PANEL_COLORS["macd_signal"],
+            _last_valid_numeric(frame.get("macd_signal")),
+            4,
+        ),
+        (
+            "MACD Hist",
+            INDICATOR_PANEL_COLORS["macd_hist_up"],
+            _last_valid_numeric(frame.get("macd_hist")),
+            4,
+        ),
+    ]
+    lines = [
+        "<span style='color:"
+        f"{color}"
+        ";'><b>"
+        f"{label}"
+        "</b></span>: "
+        f"{_format_indicator_value(value, digits=digits)}"
+        for label, color, value, digits in items
+    ]
+    fig.add_annotation(
+        x=x_paper,
+        y=y_paper,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        showarrow=False,
+        text="<br>".join(lines),
+        font=dict(color=str(palette["text_color"]), size=15),
+        bgcolor=_to_rgba(str(palette["paper_bg"]), 0.94),
+        bordercolor=_to_rgba(str(palette["text_color"]), 0.25),
+        borderwidth=1,
+        borderpad=8,
+    )
 
 
 def _render_benchmark_lines_chart(
@@ -516,7 +611,7 @@ def _render_indicator_panels(
     ind: pd.DataFrame,
     *,
     chart_key: str,
-    height: int = 460,
+    height: int = 600,
     x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     watermark_text: str = "",
 ):
@@ -542,18 +637,14 @@ def _render_indicator_panels(
             frame[col] = pd.to_numeric(frame[col], errors="coerce")
 
     palette = _ui_palette()
-    rsi_color = str(palette.get("rsi_line", palette["sma20"]))
-    kd_k_color = str(palette.get("kd_k", palette["signal_buy"]))
-    kd_d_color = str(palette.get("kd_d", palette["signal_sell"]))
-    macd_line_color = str(palette.get("macd_line", palette["equity"]))
-    macd_signal_color = str(palette.get("macd_signal", palette["buy_hold"]))
-    panel_height = max(320, min(int(height), 580))
+    indicator_colors = INDICATOR_PANEL_COLORS
+    panel_height = max(420, min(int(height), 700))
     fig = make_subplots(
         rows=4,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.04,
-        row_heights=[0.34, 0.2, 0.2, 0.26],
+        row_heights=[0.32, 0.22, 0.22, 0.24],
     )
 
     fig.add_trace(
@@ -562,7 +653,7 @@ def _render_indicator_panels(
             y=frame["close"],
             mode="lines",
             name="Close",
-            line=dict(color=str(palette["text_muted"]), width=1.35),
+            line=dict(color=indicator_colors["close"], width=1.35),
         ),
         row=1,
         col=1,
@@ -577,7 +668,7 @@ def _render_indicator_panels(
                 y=frame[bb_mid_col],
                 mode="lines",
                 name="BB中軌",
-                line=dict(color=str(palette["sma20"]), width=1.0),
+                line=dict(color=indicator_colors["bb_mid"], width=1.05),
             ),
             row=1,
             col=1,
@@ -589,7 +680,7 @@ def _render_indicator_panels(
                 y=frame["bb_upper"],
                 mode="lines",
                 name="BB上軌",
-                line=dict(color=str(palette["bb_upper"]), width=1.0),
+                line=dict(color=indicator_colors["bb_upper"], width=1.05),
             ),
             row=1,
             col=1,
@@ -601,7 +692,7 @@ def _render_indicator_panels(
                 y=frame["bb_lower"],
                 mode="lines",
                 name="BB下軌",
-                line=dict(color=str(palette["bb_lower"]), width=1.0),
+                line=dict(color=indicator_colors["bb_lower"], width=1.05),
             ),
             row=1,
             col=1,
@@ -627,7 +718,7 @@ def _render_indicator_panels(
                 y=frame["rsi_14"],
                 mode="lines",
                 name="RSI14",
-                line=dict(color=rsi_color, width=1.2),
+                line=dict(color=indicator_colors["rsi"], width=1.25),
             ),
             row=2,
             col=1,
@@ -647,7 +738,7 @@ def _render_indicator_panels(
                 y=frame["stoch_k"],
                 mode="lines",
                 name="KD-K",
-                line=dict(color=kd_k_color, width=1.2),
+                line=dict(color=indicator_colors["kd_k"], width=1.25),
             ),
             row=3,
             col=1,
@@ -659,7 +750,7 @@ def _render_indicator_panels(
                 y=frame["stoch_d"],
                 mode="lines",
                 name="KD-D",
-                line=dict(color=kd_d_color, width=1.2),
+                line=dict(color=indicator_colors["kd_d"], width=1.25),
             ),
             row=3,
             col=1,
@@ -675,7 +766,9 @@ def _render_indicator_panels(
     if "macd_hist" in frame.columns:
         hist_vals = pd.to_numeric(frame["macd_hist"], errors="coerce").fillna(0.0)
         hist_colors = np.where(
-            hist_vals >= 0, str(palette["volume_up"]), str(palette["volume_down"])
+            hist_vals >= 0,
+            indicator_colors["macd_hist_up"],
+            indicator_colors["macd_hist_down"],
         )
         fig.add_trace(
             go.Bar(x=frame.index, y=hist_vals.values, name="MACD Hist", marker_color=hist_colors),
@@ -689,7 +782,7 @@ def _render_indicator_panels(
                 y=frame["macd"],
                 mode="lines",
                 name="MACD",
-                line=dict(color=macd_line_color, width=1.2),
+                line=dict(color=indicator_colors["macd"], width=1.25),
             ),
             row=4,
             col=1,
@@ -701,7 +794,7 @@ def _render_indicator_panels(
                 y=frame["macd_signal"],
                 mode="lines",
                 name="MACD Signal",
-                line=dict(color=macd_signal_color, width=1.1),
+                line=dict(color=indicator_colors["macd_signal"], width=1.2),
             ),
             row=4,
             col=1,
@@ -719,7 +812,7 @@ def _render_indicator_panels(
     fig.update_yaxes(gridcolor=str(palette["grid"]))
     fig.update_layout(
         height=panel_height,
-        margin=dict(l=10, r=10, t=64, b=8),
+        margin=dict(l=60, r=220, t=64, b=8),
         template=str(palette["plot_template"]),
         paper_bgcolor=str(palette["paper_bg"]),
         plot_bgcolor=str(palette["plot_bg"]),
@@ -731,6 +824,7 @@ def _render_indicator_panels(
         legend_xanchor="left",
         uirevision=f"indicators:{chart_key}",
     )
+    _add_indicator_summary_annotation(fig, frame=frame, palette=palette)
     _enable_plotly_draw_tools(fig)
     _apply_plotly_watermark(fig, text=str(watermark_text), palette=palette)
     _render_plotly_chart(
