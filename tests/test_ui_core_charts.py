@@ -181,7 +181,7 @@ def test_render_indicator_panels_aligns_left_and_right_margins_with_main_chart()
     trace_by_name = {str(trace.name): trace for trace in fig.data}
     assert len(fig.layout.annotations) == 1
     annotation = fig.layout.annotations[0]
-    assert fig.layout.height == 600
+    assert fig.layout.height == 680
     assert fig.layout.margin.l == 60
     assert fig.layout.margin.r == 220
     assert float(annotation.x) > 1.0

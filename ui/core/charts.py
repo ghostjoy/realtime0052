@@ -611,7 +611,7 @@ def _render_indicator_panels(
     ind: pd.DataFrame,
     *,
     chart_key: str,
-    height: int = 600,
+    height: int = 680,
     x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     watermark_text: str = "",
 ):
@@ -638,13 +638,13 @@ def _render_indicator_panels(
 
     palette = _ui_palette()
     indicator_colors = INDICATOR_PANEL_COLORS
-    panel_height = max(420, min(int(height), 700))
+    panel_height = max(520, min(int(height), 820))
     fig = make_subplots(
         rows=4,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.04,
-        row_heights=[0.32, 0.22, 0.22, 0.24],
+        vertical_spacing=0.06,
+        row_heights=[0.34, 0.21, 0.21, 0.24],
     )
 
     fig.add_trace(

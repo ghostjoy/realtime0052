@@ -3120,7 +3120,7 @@ def _render_backtest_view():
                 _render_indicator_panels(
                     ind_now,
                     chart_key=f"play_indicator_chart:{run_key}:{focus_symbol}",
-                    height=440,
+                    height=680,
                     x_range=panel_x_range,
                     watermark_text=playback_symbol_label,
                 )
@@ -3475,7 +3475,7 @@ def _render_backtest_view():
         _render_indicator_panels(
             ind_now,
             chart_key=f"play_indicator_chart:{run_key}:{focus_symbol}",
-            height=440,
+            height=680,
             x_range=panel_x_range,
             watermark_text=playback_symbol_label,
         )
